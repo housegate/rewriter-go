@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Fast lane: pure-Go build/vet/test. Engine-backed tests skip themselves when
+  # POLYGLOT_SQL_FFI_PATH is unset, so this runs the comparator, corpus,
+  # fidelity-metric and contract tests without the (slow) Rust FFI build.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  # Full lane: build the polyglot FFI lib from source, then run the engine-backed
+  # tests + the fidelity spike. Heavier (Rust build) — cached.
+  ffi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/polyglot-src/target
+          key: polyglot-ffi-${{ runner.os }}-${{ hashFiles('Makefile') }}
+      - run: make ffi
+      - run: make test
+      - name: fidelity spike
+        run: POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.so" go run ./cmd/fidelity-spike
