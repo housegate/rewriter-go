@@ -93,6 +93,34 @@ service trades on. Coverage is high but **not total** (the coverage suite ships 
 `debug_clickhouse_coverage_failures()` path). Therefore: full parity is *plausible*, and the
 **Phase 0 fidelity spike + the differential harness gate every claim of parity** (§7, §9).
 
+### 3.1 polyglot AST reality (Phase 0 characterization — 2026-06-03)
+
+Phase 0 characterization (captured in `internal/engine/testdata/ast-shapes/`) established how
+polyglot actually serializes ClickHouse SQL. Three findings reshape the engine design:
+
+1. **The discriminator is the single top-level JSON key**, not a `class`/`type` field. The
+   envelope is `{"<node_kind>": {…}}` — e.g. `{"select": …}`, `{"drop_table": …}`,
+   `{"command": {"this": "<raw SQL>"}}`. Classification reads that key.
+2. **Statement families split into three tiers** by how polyglot parses them:
+   - **Structured under `clickhouse`:** SELECT, INSERT, CREATE/DROP/ALTER TABLE, TRUNCATE,
+     DELETE, CREATE DATABASE, DROP DATABASE. Table/db names are addressable;
+     `if_exists`/`if_not_exists` exposed.
+   - **Opaque `command` blob under `clickhouse`, but STRUCTURED under the `generic` dialect:**
+     USE, GRANT, REVOKE, SHOW TABLES, SHOW DATABASES, SHOW CREATE. These produce *synthetic*
+     output anyway (SELECT…system.tables / `SELECT '…' AS stmt`), so name-extraction from a
+     generic re-parse suffices — no faithful round-trip needed.
+   - **No structured parse under ANY dialect (raw-SQL handling required):** RENAME TABLE,
+     EXISTS TABLE, ALTER…UPDATE / ALTER…DELETE mutations. (`OPTIMIZE` too — already
+     `UnsupportedStatement`.)
+3. **Decision — dual-dialect + raw-SQL (chosen 2026-06-03):** the `Engine` parses `clickhouse`
+   first; when the result is a `command` node it re-parses under `generic` to recover
+   structure for USE/SHOW/GRANT/REVOKE; RENAME/EXISTS/mutations use focused raw-SQL handlers.
+   The full-parity target is preserved. **GRANT carries the most risk** (a generic-dialect
+   parse may not preserve `ON CLUSTER` or ClickHouse privilege keywords) and gets an explicit
+   validation checkpoint before its handler is trusted. Caveats from the probe: GRANT's target
+   comes back as a flat `"db.t"` string (manual split needed); SHOW TABLES' db sits under an
+   odd `from.column.name` path.
+
 ---
 
 ## 4. Architecture
@@ -125,6 +153,10 @@ touching any handler:
 ```go
 type Engine interface {
     ParseOne(sql string) (AST, error)                       // polyglot Parse (clickhouse)
+    // ParseStructured parses under clickhouse; if the root is an opaque `command`
+    // node, re-parses under generic to recover structure (USE/SHOW/GRANT/REVOKE).
+    ParseStructured(sql string) (ast AST, dialect, nodeKind string, err error) // §3.1
+    NodeKind(ast AST) (string, error)                       // top-level JSON key (§3.1)
     Generate(ast AST) (string, error)                       // polyglot Generate (clickhouse)
     RenameTables(ast AST, m map[string]string) (AST, error)
     QualifyTables(ast AST, db string) (AST, error)
@@ -132,6 +164,11 @@ type Engine interface {
     Diff(a, b AST) (Delta, error)                           // for the parity harness
 }
 ```
+
+`ParseStructured` is added in Phase 1 (Phase 0 needs only clickhouse `ParseOne` + `NodeKind`
+for classification and round-trip measurement). RENAME TABLE, EXISTS TABLE, and
+ALTER…UPDATE/…DELETE mutations bypass the structured-AST path entirely — a small
+`internal/rawsql` package handles them (§3.1 tier 3).
 
 - One `*polyglot.Client`, created once at startup, dialect pinned to `"clickhouse"`; shared
   across all connections.
