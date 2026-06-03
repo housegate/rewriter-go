@@ -1,0 +1,7 @@
+# built FFI lib + polyglot source checkout
+/third_party/
+# spike scratch
+/tmp/
+# go
+*.test
+*.out
