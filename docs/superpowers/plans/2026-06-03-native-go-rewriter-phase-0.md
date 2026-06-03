@@ -326,7 +326,14 @@ type Engine interface {
 }
 ```
 
-- [ ] **Step 2: Write the failing test for `astClass`**
+> **Task 3 finding (corrects the original draft):** polyglot has **no `class`/`type` field** —
+> the node kind IS the **single top-level JSON key** of the object (`{"select": …}`,
+> `{"drop_table": …}`, `{"command": {"this": "<raw SQL>"}}`). Tokens are lowercase. Six
+> families (USE/GRANT/REVOKE/RENAME/SHOW*/EXISTS) collapse to `command` with the raw SQL in
+> `command.this`. So `NodeKind` returns the top-level key, and `CommandSQL` extracts the raw
+> SQL for the `command` families. See spec §3.1.
+
+- [ ] **Step 2: Write the failing test for `NodeKind` / `CommandSQL`**
 
 Create `internal/engine/ast_test.go`:
 ```go
@@ -338,37 +345,59 @@ import (
 	"testing"
 )
 
-func TestAstClassFromSnapshots(t *testing.T) {
-	want := map[string]string{
-		// filename (without .json) -> expected class token as polyglot emits it.
-		// FILL these in from the Task 3 snapshots (e.g. "Select", "Insert", ...).
-		"select": astClassSelect,
-		"insert": astClassInsert,
+func TestNodeKindFromSnapshots(t *testing.T) {
+	want := map[string]string{ // snapshot file -> top-level key polyglot emits
+		"select":       NodeSelect,
+		"select_join":  NodeSelect,
+		"insert":       NodeInsert,
+		"create_table": NodeCreateTable,
+		"drop_table":   NodeDropTable,
+		"alter_table":  NodeAlterTable,
+		"use":          NodeCommand,
+		"grant":        NodeCommand,
+		"rename_table": NodeCommand,
+		"show_tables":  NodeCommand,
+		"show_create":  NodeCommand,
+		"exists_table": NodeCommand,
 	}
 	for name, expect := range want {
 		raw, err := os.ReadFile(filepath.Join("testdata", "ast-shapes", name+".json"))
 		if err != nil {
 			t.Fatalf("read snapshot %s: %v", name, err)
 		}
-		got, err := astClass(AST(raw))
+		got, err := NodeKind(AST(raw))
 		if err != nil {
-			t.Fatalf("%s: astClass: %v", name, err)
+			t.Fatalf("%s: NodeKind: %v", name, err)
 		}
 		if got != expect {
-			t.Errorf("%s: astClass = %q, want %q", name, got, expect)
+			t.Errorf("%s: NodeKind = %q, want %q", name, got, expect)
 		}
+	}
+}
+
+func TestCommandSQL(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "ast-shapes", "use.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := CommandSQL(AST(raw))
+	if err != nil {
+		t.Fatalf("CommandSQL: %v", err)
+	}
+	if got != "USE db" {
+		t.Errorf("CommandSQL = %q, want %q", got, "USE db")
 	}
 }
 ```
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `go test ./internal/engine/ -run TestAstClassFromSnapshots`
-Expected: FAIL — `astClass`, `astClassSelect`, `astClassInsert` undefined.
+Run: `go test ./internal/engine/ -run 'TestNodeKind|TestCommandSQL'`
+Expected: FAIL — `NodeKind`, `CommandSQL`, `Node*` undefined.
 
 - [ ] **Step 4: Implement `ast.go`**
 
-Create `internal/engine/ast.go`. **Set `astClassKey` and the `astClass*` constants to the exact tokens from your Task 3 snapshots** (the values below are the SQLGlot-conventional shape — verify and correct):
+Create `internal/engine/ast.go`:
 ```go
 package engine
 
@@ -377,52 +406,64 @@ import (
 	"fmt"
 )
 
-// astClassKey is the top-level JSON field that names a node's kind.
-// VERIFY against internal/engine/testdata/ast-shapes/*.json (Task 3).
-const astClassKey = "class"
-
-// Class tokens as polyglot emits them. VERIFY/adjust from the snapshots.
+// Node-kind tokens = the single top-level JSON key polyglot emits (spec §3.1).
+// Confirmed against internal/engine/testdata/ast-shapes/ (Task 3).
 const (
-	astClassSelect = "Select"
-	astClassInsert = "Insert"
-	astClassCreate = "Create"
-	astClassDrop   = "Drop"
-	astClassAlter  = "Alter"
-	astClassRename = "RenameTable"
-	astClassUse    = "Use"
-	astClassGrant  = "Grant"
-	astClassCmd    = "Command" // SHOW / EXISTS often land here in SQLGlot
+	NodeSelect        = "select"
+	NodeInsert        = "insert"
+	NodeCreateTable   = "create_table"
+	NodeDropTable     = "drop_table"
+	NodeAlterTable    = "alter_table"
+	NodeCreateDB      = "create_database"
+	NodeDropDB        = "drop_database"
+	NodeTruncate      = "truncate"
+	NodeDelete        = "delete"
+	NodeCommand       = "command" // USE/GRANT/REVOKE/RENAME/SHOW*/EXISTS — raw SQL in .this
 )
 
-// astClass returns the node-kind token of an AST root.
-func astClass(ast AST) (string, error) {
+// NodeKind returns a node's kind: the single top-level key of the AST object.
+func NodeKind(ast AST) (string, error) {
 	var head map[string]json.RawMessage
 	if err := json.Unmarshal(ast, &head); err != nil {
 		return "", fmt.Errorf("engine: decode AST head: %w", err)
 	}
-	raw, ok := head[astClassKey]
-	if !ok {
-		return "", fmt.Errorf("engine: AST has no %q field", astClassKey)
+	if len(head) != 1 {
+		return "", fmt.Errorf("engine: expected exactly one top-level key, got %d", len(head))
 	}
-	var class string
-	if err := json.Unmarshal(raw, &class); err != nil {
-		return "", fmt.Errorf("engine: decode %q: %w", astClassKey, err)
+	for k := range head {
+		return k, nil
 	}
-	return class, nil
+	return "", fmt.Errorf("engine: empty AST object")
+}
+
+// CommandSQL returns the raw SQL held in a `command` node (command.this).
+// Errors if the node is not a command.
+func CommandSQL(ast AST) (string, error) {
+	var head struct {
+		Command *struct {
+			This string `json:"this"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(ast, &head); err != nil {
+		return "", fmt.Errorf("engine: decode command: %w", err)
+	}
+	if head.Command == nil {
+		return "", fmt.Errorf("engine: AST is not a command node")
+	}
+	return head.Command.This, nil
 }
 ```
 
-- [ ] **Step 5: Fill in `want` and run the test to pass**
+- [ ] **Step 5: Run the test to pass**
 
-Edit `ast_test.go`'s `want` map to cover all snapshot files using the constants. Run:
-`go test ./internal/engine/ -run TestAstClassFromSnapshots -v`
+Run: `go test ./internal/engine/ -run 'TestNodeKind|TestCommandSQL' -v`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add internal/engine/engine.go internal/engine/ast.go internal/engine/ast_test.go
-git commit -m "feat(engine): Engine interface + AST class discriminator"
+git commit -m "feat(engine): Engine interface + node-kind discriminator + command extraction"
 ```
 
 ---
@@ -1134,18 +1175,14 @@ Expected: FAIL — `New`/`NativeRewriter` undefined.
 
 - [ ] **Step 4: Implement `native.go`**
 
-Create `native.go`. **Map class tokens using the constants verified in Task 4.** `astClass` is unexported in `engine`, so expose a small classifier there first — add to `internal/engine/ast.go`:
-```go
-// Classify maps an AST root to a pb.StatementType-friendly token string.
-// Returns the raw class token; callers map it to their enum.
-func Classify(ast AST) (string, error) { return astClass(ast) }
-```
-Then create `native.go`:
+Classification uses `engine.NodeKind` (top-level key) from Task 4, with `command` nodes
+sub-classified by the leading keyword of `engine.CommandSQL` (spec §3.1). Create `native.go`:
 ```go
 package rewriter
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -1175,9 +1212,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		resp.Message = err.Error()
 		return resultFromPB(resp), nil // SyntaxError is a code, not a Go error
 	}
-	if class, cerr := engine.Classify(ast); cerr == nil {
-		resp.StatementType = classToStatementType(class)
-	}
+	resp.StatementType = r.classify(ast)
 	// Pass-through: regenerate (proves the engine round-trips); fall back to
 	// the input on any generate hiccup so SQL is always runnable.
 	if gen, gerr := r.engine.Generate(ast); gerr == nil && gen != "" {
@@ -1202,24 +1237,60 @@ func (r *NativeRewriter) Close() error {
 	return r.engine.Close()
 }
 
-// classToStatementType maps polyglot class tokens to pb.StatementType.
-// VERIFY the class tokens against Task 3/4 snapshots.
-func classToStatementType(class string) pb.StatementType {
-	switch class {
-	case "Select":
+// classify maps an AST root to a pb.StatementType via its node kind (top-level
+// key). `command` nodes carry only raw SQL, so we sub-classify by leading keyword.
+func (r *NativeRewriter) classify(ast engine.AST) pb.StatementType {
+	kind, err := engine.NodeKind(ast)
+	if err != nil {
+		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	}
+	switch kind {
+	case engine.NodeSelect:
 		return pb.StatementType_STATEMENT_TYPE_SELECT
-	case "Insert":
+	case engine.NodeInsert:
 		return pb.StatementType_STATEMENT_TYPE_INSERT
-	case "Create":
+	case engine.NodeCreateTable:
 		return pb.StatementType_STATEMENT_TYPE_CREATE_TABLE
-	case "Drop":
+	case engine.NodeDropTable:
 		return pb.StatementType_STATEMENT_TYPE_DROP_TABLE
-	case "Alter":
+	case engine.NodeAlterTable:
 		return pb.StatementType_STATEMENT_TYPE_ALTER_TABLE
-	case "RenameTable":
-		return pb.StatementType_STATEMENT_TYPE_RENAME_TABLE
-	case "Use":
+	case engine.NodeCreateDB:
+		return pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE
+	case engine.NodeDropDB:
+		return pb.StatementType_STATEMENT_TYPE_DROP_DATABASE
+	case engine.NodeTruncate:
+		return pb.StatementType_STATEMENT_TYPE_TRUNCATE_TABLE
+	case engine.NodeDelete:
+		return pb.StatementType_STATEMENT_TYPE_DELETE
+	case engine.NodeCommand:
+		sql, _ := engine.CommandSQL(ast)
+		return classifyCommand(sql)
+	default:
+		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	}
+}
+
+// classifyCommand sub-classifies an opaque `command` node by its leading keyword(s).
+func classifyCommand(sql string) pb.StatementType {
+	u := strings.ToUpper(strings.TrimSpace(sql))
+	switch {
+	case strings.HasPrefix(u, "USE"):
 		return pb.StatementType_STATEMENT_TYPE_USE
+	case strings.HasPrefix(u, "GRANT"):
+		return pb.StatementType_STATEMENT_TYPE_GRANT
+	case strings.HasPrefix(u, "REVOKE"):
+		return pb.StatementType_STATEMENT_TYPE_REVOKE
+	case strings.HasPrefix(u, "RENAME"):
+		return pb.StatementType_STATEMENT_TYPE_RENAME_TABLE
+	case strings.HasPrefix(u, "EXISTS"):
+		return pb.StatementType_STATEMENT_TYPE_EXISTS_TABLE
+	case strings.HasPrefix(u, "SHOW CREATE"):
+		return pb.StatementType_STATEMENT_TYPE_SHOW_CREATE_TABLE
+	case strings.HasPrefix(u, "SHOW DATABASES"), strings.HasPrefix(u, "SHOW SCHEMAS"):
+		return pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES
+	case strings.HasPrefix(u, "SHOW TABLES"), strings.HasPrefix(u, "SHOW"):
+		return pb.StatementType_STATEMENT_TYPE_SHOW_TABLES
 	default:
 		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	}
@@ -1234,7 +1305,7 @@ Expected: PASS. (If `STATEMENT_TYPE_SELECT` doesn't match because the class toke
 - [ ] **Step 6: Commit**
 
 ```bash
-git add rewriter.go native.go native_test.go internal/engine/ast.go
+git add rewriter.go native.go native_test.go
 git commit -m "feat: public Rewriter + pass-through NativeRewriter (code-not-error, fail-open)"
 ```
 
