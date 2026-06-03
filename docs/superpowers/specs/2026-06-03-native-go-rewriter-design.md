@@ -61,12 +61,10 @@ type Rewriter interface {
   most recent successful `Rewrite`.
 - **`Close`** releases per-connection resources; safe to call multiple times.
 
-`RewriteResult` is a thin wrapper over `pb.RewriteSQLResponse` (generated from
-`rewriter.proto`, §7), surfacing: `SQL` (= `sql_after_rewrite`), `table_rewrites`,
-`database_rewrites`, `original_accessed_tables`, `statement_type`, `privileges_deltas`,
-`existence_clause`, `failed_cte_aliases`, plus `code`/`message` for fail-open
-classification. **Assumption — confirm against the proxy repo:** if `RewriteResult` is a
-trimmed subset, we map only the fields it carries.
+`RewriteResult` **mirrors `pb.RewriteSQLResponse`** (generated from `rewriter.proto`, §7),
+surfacing: `SQL` (= `sql_after_rewrite`), `table_rewrites`, `database_rewrites`,
+`original_accessed_tables`, `statement_type`, `privileges_deltas`, `existence_clause`,
+`failed_cte_aliases`, plus `code`/`message`. (Confirmed — §11.)
 
 ---
 
@@ -105,12 +103,18 @@ repo-portable:
 ```
 NativeRewriter (implements Rewriter, one instance per client connection)
  ├─ engine   Engine                              // shared, process-wide
- ├─ options  func(account string) []*pb.RewriteOption  // injected: assembles options
- │                                                //   exactly as today's gRPC client does
- │                                                //   (database_map via buildDatabaseMap,
- │                                                //   plus any session Limit/Settings)
- └─ last     *callContext                         // per-conn: {sql, account, fwd+reverse
-                                                  //   name maps} for RewriteErrorMessage
+ ├─ options  func(account string) []*pb.RewriteOption  // injected: ACCOUNT-derived policy
+ │                                                //   only — database_map / known_physical /
+ │                                                //   delim / extras / remote_upstreams …
+ │                                                //   via buildDatabaseMap. Does NOT set the
+ │                                                //   session fields below.
+ ├─ session  *sessionState                        // per-conn, HELD here (decision §11):
+ │                                                //   logicalDB  -> upstream_logical_database_in_context
+ │                                                //   physicalDB -> upstream_physical_database_in_context
+ │                                                //   updated by the USE handler
+ ├─ last     *callContext                         // per-conn: {sql, account, fwd+reverse
+ │                                                //   name maps} for RewriteErrorMessage
+ └─ mu       sync.Mutex                            // guards session + last
 ```
 
 ### The Engine seam (the one boundary that matters)
@@ -140,12 +144,24 @@ type Engine interface {
 The `Rewriter` is per-connection, but only the **last-call context** is per-connection; the
 engine is shared. `Close()` drops the context and never closes the shared client.
 
-### Policy injection = the consumer's `buildDatabaseMap`
+### Policy injection vs. session state
 
-This is what makes the native impl match the gRPC impl: today `Rewrite(sql, account)` calls
+**Account-derived policy is injected.** Today `Rewrite(sql, account)` calls
 `buildDatabaseMap(account)` to build the per-query options, then ships them to C++. The
-native impl runs the **same** `options(account)` in-process and applies the result locally.
-`buildDatabaseMap` is injected, never re-implemented here.
+native impl runs the **same** `options(account)` in-process and applies the result locally —
+`buildDatabaseMap` is injected, never re-implemented here. `options(account)` returns
+*account*-derived policy only: `database_map`, `known_physical_databases`, `delim`,
+`extra_arguments`, `remote_upstreams`, `logical_database_to_remote_upstream_index` (plus any
+session-independent Limit/Settings).
+
+**Session state is held by the rewriter.** The connection-scoped fields —
+`upstream_logical_database_in_context` (the most recent `USE <db>`) and
+`upstream_physical_database_in_context` — are **not** produced by `options(account)`; the
+`NativeRewriter` holds them in `session` and **overlays** them onto the active
+`TableNameRewrite.dynamic_args` on every call. The `USE` handler updates `session.logicalDB`
+after a successful resolve, so subsequent unqualified statements resolve against the right
+logical DB. (In the gRPC design the proxy tracked this; per §11 it now lives in the
+rewriter.)
 
 ### Components (each mirrors a C++ handler; full-parity target)
 
@@ -164,9 +180,11 @@ native impl runs the **same** `options(account)` in-process and applies the resu
 
 ## 5. Data flow — `Rewrite(ctx, sql, account)`
 
-1. `opts := r.options(account)` → `[]*pb.RewriteOption`.
-2. `ast := engine.ParseOne(sql)` → on failure: `code=SyntaxError`, **fail-open**
-   (`return zero, err`).
+1. `opts := r.options(account)` → `[]*pb.RewriteOption` (account-derived policy); then
+   **overlay session state** — set `dynamic_args.upstream_logical_database_in_context` (and
+   `…physical…`) from `r.session` onto the active `TableNameRewrite`.
+2. `ast := engine.ParseOne(sql)` → on failure: `RewriteResult{code: SyntaxError, SQL: sql}`,
+   **nil error** (the Go `error` is reserved for unexpected/internal failures — see §8).
 3. Read `existence_clause` from the AST and set it immediately (accurate even if a later
    step rejects — matches the proto: only `SyntaxError` leaves it `UNSPECIFIED`).
 4. `classify(ast)` → `StatementType` → route to handler.
@@ -179,7 +197,8 @@ native impl runs the **same** `options(account)` in-process and applies the resu
    `remote()` calls are visible).
 7. `engine.Generate(ast)` → `sql_after_rewrite` — **except** synthetic-SQL handlers build the
    output string directly (see §6 b).
-8. Assemble `RewriteResult`; stash the last-call context (sql, account, fwd/reverse name
+8. If the statement was a successfully-resolved `USE <db>`, update `r.session.logicalDB`.
+   Assemble `RewriteResult`; stash the last-call context (sql, account, fwd/reverse name
    maps) for `RewriteErrorMessage`; return.
 
 `RewriteErrorMessage(message)` uses the stashed maps to substitute physical→logical
@@ -248,7 +267,7 @@ differential-fuzz (mutate the corpus; run both engines; AST-diff).
   - **Classified outcomes → `RewriteResult{code, message, SQL}` with nil error.** Every
     `RewriteCode` (including `SyntaxError`) is surfaced here; `SQL` is set to the **original
     input** on any non-Success code so the caller can unconditionally run
-    `RewriteResult.SQL`. (Assumption — see open question 5.)
+    `RewriteResult.SQL`. (Confirmed — §11.)
 - **`RewriteCode` mapping:** parse failure → `SyntaxError`; valid-but-unhandled
   variant → `UnsupportedStatement` (caller MAY pass through); caller policy wrong for the SQL
   (logical DB unresolvable; unqualified target with empty
@@ -289,18 +308,21 @@ Each phase merges only when its slice of the differential harness is green.
 
 ---
 
-## 11. Open questions / assumptions
+## 11. Decisions & open questions
 
-1. **`RewriteResult` exact shape** — assumed to mirror `pb.RewriteSQLResponse`; confirm
-   against the proxy repo (trim mapping if it's a subset).
-2. **`options(account)` injection signature** — assumed to reproduce the current gRPC
-   client's option assembly (incl. session-derived `upstream_logical_database_in_context`
-   from the most recent `USE`). Confirm where USE/session state is tracked (proxy vs. here).
-3. **Phase 0 corpus** — which anonymized prod-log set is available.
-4. **FFI-lib distribution** — build `libpolyglot_sql_ffi` from source in CI vs. vendor a
-   pinned release artifact; the platform matrix for prod (linux/amd64 at minimum) and local
-   dev (darwin/arm64).
-5. **Error-vs-code channel** — confirm whether the consumer's existing gRPC `Rewriter`
-   surfaces `SyntaxError` (or any non-Success code) as a Go `error` rather than in
-   `RewriteResult.code`. The native impl must match the gRPC impl **exactly** for drop-in
-   interchangeability (§8 states the assumed mapping).
+**Resolved (2026-06-03):**
+
+1. **`RewriteResult` shape** — **mirrors `pb.RewriteSQLResponse`.** ✅
+2. **Session state** — the **native rewriter holds it** (per-connection
+   `upstream_logical_database_in_context` / `…physical…`, updated by the `USE` handler);
+   `options(account)` supplies *account*-derived policy only. ✅ (see §4)
+3. **Error-vs-code channel** — non-Success outcomes (incl. `SyntaxError`) are returned in
+   **`RewriteResult.code` with a nil Go error**; the Go `error` return is reserved for
+   unexpected/internal failures only. ✅ (see §8)
+
+**Still open (not blockers for the plan — folded into Phase 0):**
+
+4. **Phase 0 corpus** — which anonymized prod-log set is available to feed the differential
+   spike (in addition to the ported `rewriter_test.cc` cases + ClickHouse's extracted tests).
+5. **FFI-lib distribution** — build `libpolyglot_sql_ffi` from source in CI vs. vendor a
+   pinned release artifact; platform matrix (prod linux/amd64; dev darwin/arm64).
