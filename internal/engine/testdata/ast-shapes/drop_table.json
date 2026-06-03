@@ -1,0 +1,35 @@
+{
+  "drop_table": {
+    "names": [
+      {
+        "name": {
+          "name": "t",
+          "quoted": false,
+          "trailing_comments": []
+        },
+        "schema": {
+          "name": "db",
+          "quoted": false,
+          "trailing_comments": []
+        },
+        "catalog": null,
+        "alias": null,
+        "alias_explicit_as": false,
+        "column_aliases": [],
+        "trailing_comments": [],
+        "when": null,
+        "only": false,
+        "final_": false,
+        "hints": []
+      }
+    ],
+    "if_exists": true,
+    "cascade": false,
+    "cascade_constraints": false,
+    "purge": false,
+    "leading_comments": [],
+    "sync": false,
+    "iceberg": false,
+    "restrict": false
+  }
+}

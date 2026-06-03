@@ -1,0 +1,5 @@
+{
+  "command": {
+    "this": "SHOW TABLES FROM db"
+  }
+}

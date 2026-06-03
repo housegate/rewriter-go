@@ -1,0 +1,133 @@
+{
+  "select": {
+    "expressions": [
+      {
+        "star": {
+          "table": null,
+          "except": null,
+          "replace": null,
+          "rename": null
+        }
+      }
+    ],
+    "from": {
+      "expressions": [
+        {
+          "table": {
+            "name": {
+              "name": "a",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "schema": null,
+            "catalog": null,
+            "alias": {
+              "name": "GLOBAL",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "alias_explicit_as": false,
+            "column_aliases": [],
+            "trailing_comments": [],
+            "when": null,
+            "only": false,
+            "final_": false,
+            "hints": []
+          }
+        }
+      ]
+    },
+    "joins": [
+      {
+        "this": {
+          "table": {
+            "name": {
+              "name": "b",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "schema": null,
+            "catalog": null,
+            "alias": null,
+            "alias_explicit_as": false,
+            "column_aliases": [],
+            "trailing_comments": [],
+            "when": null,
+            "only": false,
+            "final_": false,
+            "hints": []
+          }
+        },
+        "on": {
+          "eq": {
+            "left": {
+              "column": {
+                "name": {
+                  "name": "id",
+                  "quoted": false,
+                  "trailing_comments": []
+                },
+                "table": {
+                  "name": "a",
+                  "quoted": false,
+                  "trailing_comments": []
+                },
+                "join_mark": false,
+                "trailing_comments": []
+              }
+            },
+            "right": {
+              "column": {
+                "name": {
+                  "name": "id",
+                  "quoted": false,
+                  "trailing_comments": []
+                },
+                "table": {
+                  "name": "b",
+                  "quoted": false,
+                  "trailing_comments": []
+                },
+                "join_mark": false,
+                "trailing_comments": []
+              }
+            },
+            "left_comments": [],
+            "operator_comments": [],
+            "trailing_comments": []
+          }
+        },
+        "using": [],
+        "kind": "Inner",
+        "use_inner_keyword": false,
+        "use_outer_keyword": false,
+        "deferred_condition": false,
+        "nesting_group": 0,
+        "directed": false
+      }
+    ],
+    "lateral_views": [],
+    "where_clause": null,
+    "group_by": null,
+    "having": null,
+    "qualify": null,
+    "order_by": null,
+    "distribute_by": null,
+    "cluster_by": null,
+    "sort_by": null,
+    "limit": null,
+    "offset": null,
+    "fetch": null,
+    "distinct": false,
+    "distinct_on": null,
+    "top": null,
+    "with": null,
+    "sample": null,
+    "windows": null,
+    "hint": null,
+    "connect": null,
+    "into": null,
+    "locks": [],
+    "leading_comments": []
+  }
+}

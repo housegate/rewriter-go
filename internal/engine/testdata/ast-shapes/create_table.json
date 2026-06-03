@@ -1,0 +1,119 @@
+{
+  "create_table": {
+    "name": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "columns": [
+      {
+        "name": {
+          "name": "a",
+          "quoted": false,
+          "trailing_comments": []
+        },
+        "data_type": {
+          "data_type": "custom",
+          "name": "Int64"
+        },
+        "nullable": null,
+        "default": null,
+        "primary_key": false,
+        "primary_key_order": null,
+        "unique": false,
+        "unique_nulls_not_distinct": false,
+        "auto_increment": false,
+        "comment": null,
+        "constraints": [],
+        "constraint_order": [],
+        "format": null,
+        "title": null,
+        "inline_length": null,
+        "compress": null,
+        "character_set": null,
+        "uppercase": false,
+        "casespecific": null,
+        "auto_increment_start": null,
+        "auto_increment_increment": null,
+        "auto_increment_order": null,
+        "unsigned": false,
+        "zerofill": false,
+        "no_type": false,
+        "not_for_replication": false
+      }
+    ],
+    "constraints": [],
+    "if_not_exists": false,
+    "temporary": false,
+    "or_replace": false,
+    "as_select": null,
+    "as_select_parenthesized": false,
+    "on_commit": null,
+    "clone_source": null,
+    "is_copy": false,
+    "shallow_clone": false,
+    "deep_clone": false,
+    "leading_comments": [],
+    "with_properties": [],
+    "teradata_post_name_options": [],
+    "with_data": null,
+    "with_statistics": null,
+    "teradata_indexes": [],
+    "with_cte": null,
+    "properties": [
+      {
+        "engine_property": {
+          "this": {
+            "identifier": {
+              "name": "MergeTree",
+              "quoted": false,
+              "trailing_comments": []
+            }
+          }
+        }
+      },
+      {
+        "order_by": {
+          "expressions": [
+            {
+              "this": {
+                "column": {
+                  "name": {
+                    "name": "a",
+                    "quoted": false,
+                    "trailing_comments": []
+                  },
+                  "table": null,
+                  "join_mark": false,
+                  "trailing_comments": []
+                }
+              },
+              "desc": false,
+              "nulls_first": null,
+              "explicit_asc": false
+            }
+          ]
+        }
+      }
+    ],
+    "post_table_properties": [],
+    "mysql_table_options": [],
+    "copy_grants": false
+  }
+}

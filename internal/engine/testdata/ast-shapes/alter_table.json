@@ -1,0 +1,69 @@
+{
+  "alter_table": {
+    "name": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "actions": [
+      {
+        "AddColumn": {
+          "column": {
+            "name": {
+              "name": "b",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "data_type": {
+              "data_type": "custom",
+              "name": "Int64"
+            },
+            "nullable": null,
+            "default": null,
+            "primary_key": false,
+            "primary_key_order": null,
+            "unique": false,
+            "unique_nulls_not_distinct": false,
+            "auto_increment": false,
+            "comment": null,
+            "constraints": [],
+            "constraint_order": [],
+            "format": null,
+            "title": null,
+            "inline_length": null,
+            "compress": null,
+            "character_set": null,
+            "uppercase": false,
+            "casespecific": null,
+            "auto_increment_start": null,
+            "auto_increment_increment": null,
+            "auto_increment_order": null,
+            "unsigned": false,
+            "zerofill": false,
+            "no_type": false,
+            "not_for_replication": false
+          },
+          "if_not_exists": false,
+          "position": null
+        }
+      }
+    ],
+    "if_exists": false
+  }
+}

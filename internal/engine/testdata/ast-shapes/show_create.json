@@ -1,0 +1,5 @@
+{
+  "command": {
+    "this": "SHOW CREATE TABLE db.t"
+  }
+}
