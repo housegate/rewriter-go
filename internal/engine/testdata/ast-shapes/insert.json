@@ -1,0 +1,61 @@
+{
+  "insert": {
+    "table": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "columns": [
+      {
+        "name": "a",
+        "quoted": false,
+        "trailing_comments": []
+      }
+    ],
+    "values": [
+      [
+        {
+          "literal": {
+            "literal_type": "number",
+            "value": "1"
+          }
+        }
+      ]
+    ],
+    "query": null,
+    "overwrite": false,
+    "partition": [],
+    "directory": null,
+    "returning": [],
+    "output": null,
+    "on_conflict": null,
+    "leading_comments": [],
+    "if_exists": false,
+    "with": null,
+    "ignore": false,
+    "source_alias": null,
+    "alias": null,
+    "alias_explicit_as": false,
+    "default_values": false,
+    "by_name": false,
+    "is_replace": false,
+    "replace_where": null,
+    "source": null
+  }
+}

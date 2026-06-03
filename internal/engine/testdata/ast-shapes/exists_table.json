@@ -1,0 +1,5 @@
+{
+  "command": {
+    "this": "EXISTS TABLE db.t"
+  }
+}

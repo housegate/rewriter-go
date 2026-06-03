@@ -1,0 +1,102 @@
+{
+  "select": {
+    "expressions": [
+      {
+        "column": {
+          "name": {
+            "name": "a",
+            "quoted": false,
+            "trailing_comments": []
+          },
+          "table": null,
+          "join_mark": false,
+          "trailing_comments": []
+        }
+      }
+    ],
+    "from": {
+      "expressions": [
+        {
+          "table": {
+            "name": {
+              "name": "t",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "schema": {
+              "name": "db",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "catalog": null,
+            "alias": null,
+            "alias_explicit_as": false,
+            "column_aliases": [],
+            "trailing_comments": [],
+            "when": null,
+            "only": false,
+            "final_": false,
+            "hints": []
+          }
+        }
+      ]
+    },
+    "joins": [],
+    "lateral_views": [],
+    "where_clause": {
+      "this": {
+        "in": {
+          "this": {
+            "column": {
+              "name": {
+                "name": "x",
+                "quoted": false,
+                "trailing_comments": []
+              },
+              "table": null,
+              "join_mark": false,
+              "trailing_comments": []
+            }
+          },
+          "expressions": [
+            {
+              "literal": {
+                "literal_type": "number",
+                "value": "1"
+              }
+            },
+            {
+              "literal": {
+                "literal_type": "number",
+                "value": "2"
+              }
+            }
+          ],
+          "query": null,
+          "not": false
+        }
+      }
+    },
+    "group_by": null,
+    "having": null,
+    "qualify": null,
+    "order_by": null,
+    "distribute_by": null,
+    "cluster_by": null,
+    "sort_by": null,
+    "limit": null,
+    "offset": null,
+    "fetch": null,
+    "distinct": false,
+    "distinct_on": null,
+    "top": null,
+    "with": null,
+    "sample": null,
+    "windows": null,
+    "hint": null,
+    "connect": null,
+    "into": null,
+    "locks": [],
+    "leading_comments": []
+  }
+}
