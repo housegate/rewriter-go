@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // TableTarget is the read view of one real table reference in a SELECT AST.
@@ -249,4 +250,103 @@ func identName(v any) string {
 	}
 	s, _ := m["name"].(string)
 	return s
+}
+
+// numLiteral builds {"literal":{"literal_type":"number","value":"<n>"}}.
+func numLiteral(n int64) map[string]any {
+	return map[string]any{"literal": map[string]any{"literal_type": "number", "value": strconv.FormatInt(n, 10)}}
+}
+
+// outerSelect decodes the AST and returns the outermost select object (value under
+// the top-level "select" key) for in-place mutation, plus a re-encode closure.
+func outerSelect(ast AST) (sel map[string]any, encode func() (AST, error), err error) {
+	var root map[string]any
+	if err = json.Unmarshal(ast, &root); err != nil {
+		return nil, nil, fmt.Errorf("engine: decode select: %w", err)
+	}
+	s, ok := root["select"].(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("engine: not a select node")
+	}
+	encode = func() (AST, error) {
+		b, e := json.Marshal(root)
+		if e != nil {
+			return nil, fmt.Errorf("engine: encode select: %w", e)
+		}
+		return AST(b), nil
+	}
+	return s, encode, nil
+}
+
+// GetLimit returns the outer select's LIMIT literal value, if present and numeric.
+func GetLimit(ast AST) (val int64, ok bool, err error) {
+	sel, _, err := outerSelect(ast)
+	if err != nil {
+		return 0, false, err
+	}
+	lim, ok := sel["limit"].(map[string]any)
+	if !ok {
+		return 0, false, nil
+	}
+	this, ok := lim["this"].(map[string]any)
+	if !ok {
+		return 0, false, nil
+	}
+	lit, ok := this["literal"].(map[string]any)
+	if !ok {
+		return 0, false, nil
+	}
+	s, _ := lit["value"].(string)
+	n, e := strconv.ParseInt(s, 10, 64)
+	if e != nil {
+		return 0, false, nil // non-literal/expression limit → treat as absent
+	}
+	return n, true, nil
+}
+
+// SetLimit sets the outer select's LIMIT to n.
+func SetLimit(ast AST, n int64) (AST, error) {
+	sel, encode, err := outerSelect(ast)
+	if err != nil {
+		return nil, err
+	}
+	sel["limit"] = map[string]any{"this": numLiteral(n)}
+	return encode()
+}
+
+// SetOffset sets the outer select's OFFSET to n.
+func SetOffset(ast AST, n int64) (AST, error) {
+	sel, encode, err := outerSelect(ast)
+	if err != nil {
+		return nil, err
+	}
+	sel["offset"] = map[string]any{"this": numLiteral(n)}
+	return encode()
+}
+
+// Setting is one SETTINGS key=value to render. LiteralType is polyglot's
+// literal_type ("number"|"string"); Value is the encoded value.
+type Setting struct {
+	Key         string
+	LiteralType string
+	Value       string
+}
+
+// SetSettings appends settings to the outer select's SETTINGS array (creating it
+// if absent). Each renders as {"eq":{"left":{"column":...},"right":{"literal":...}}}.
+func SetSettings(ast AST, settings []Setting) (AST, error) {
+	sel, encode, err := outerSelect(ast)
+	if err != nil {
+		return nil, err
+	}
+	arr, _ := sel["settings"].([]any)
+	for _, s := range settings {
+		arr = append(arr, map[string]any{"eq": map[string]any{
+			"left":  colBare(s.Key),
+			"right": map[string]any{"literal": map[string]any{"literal_type": s.LiteralType, "value": s.Value}},
+			"left_comments": []any{}, "operator_comments": []any{}, "trailing_comments": []any{},
+		}})
+	}
+	sel["settings"] = arr
+	return encode()
 }

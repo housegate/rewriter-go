@@ -186,6 +186,31 @@ func TestRewriteSelectTables_dottedNameIsQuoted(t *testing.T) {
 	}
 }
 
+func TestLimitOps(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	if v, ok, _ := GetLimit(load(t, "select_limit")); !ok || v != 10 {
+		t.Fatalf("GetLimit = %d,%v want 10,true", v, ok)
+	}
+	out, err := SetLimit(load(t, "select"), 5) // `select` golden has no LIMIT
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLimit := "SELECT a FROM db.t WHERE x IN (1, 2) LIMIT 5"
+	if got := genOf(t, out); got != wantLimit {
+		t.Fatalf("SetLimit got %q want %q", got, wantLimit)
+	}
+	off, err := SetOffset(out, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOffset := "SELECT a FROM db.t WHERE x IN (1, 2) LIMIT 5 OFFSET 3"
+	if got := genOf(t, off); got != wantOffset {
+		t.Fatalf("SetOffset got %q want %q", got, wantOffset)
+	}
+}
+
 // sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
 func sortTargets(s []TableTarget) {
 	sort.Slice(s, func(i, j int) bool {
