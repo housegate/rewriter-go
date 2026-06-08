@@ -26,6 +26,21 @@ func sqlEq(t *testing.T, e Engine, a, b string) bool {
 	return na == nb
 }
 
+// inspectSQL parses sql and runs InspectWrite, failing the test (not panicking)
+// on either error — the standard pattern for the engine-integration tests here.
+func inspectSQL(t *testing.T, e Engine, sql string) WriteInfo {
+	t.Helper()
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatalf("parse %q: %v", sql, err)
+	}
+	info, err := InspectWrite(ast)
+	if err != nil {
+		t.Fatalf("InspectWrite %q: %v", sql, err)
+	}
+	return info
+}
+
 func TestInspectWrite_simpleTargets(t *testing.T) {
 	e := newTestEngine(t)
 	cases := []struct {
@@ -138,5 +153,188 @@ func TestRewriteWriteTargets_renameKeepsDBWhenNewDBEmpty(t *testing.T) {
 	}
 	if !sqlEq(t, e, got, "DROP TABLE db.t2") {
 		t.Errorf("got %q, want semantically DROP TABLE db.t2 (schema preserved)", got)
+	}
+}
+
+// --- Task 3: create_table ---
+
+func TestInspectWrite_createTable(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE TABLE db.t (x Int32) ENGINE=Memory")
+	if info.Kind != NodeCreateTable || len(info.Slots) != 1 || info.Slots[0].Role != RoleCreate {
+		t.Fatalf("got %+v", info)
+	}
+	if info.Slots[0].Target.DB != "db" || info.Slots[0].Target.Table != "t" {
+		t.Errorf("target=%+v", info.Slots[0].Target)
+	}
+}
+
+func TestInspectWrite_createTableAs(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE TABLE db.t AS db2.src")
+	if len(info.Slots) != 2 {
+		t.Fatalf("slots=%d want 2 (%+v)", len(info.Slots), info.Slots)
+	}
+	if info.Slots[0].Role != RoleCreate || info.Slots[1].Role != RoleCloneSource {
+		t.Errorf("roles=%s,%s", info.Slots[0].Role, info.Slots[1].Role)
+	}
+	if info.Slots[1].Target.DB != "db2" || info.Slots[1].Target.Table != "src" {
+		t.Errorf("clone=%+v", info.Slots[1].Target)
+	}
+}
+
+func TestInspectWrite_createTableIfNotExists(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE TABLE IF NOT EXISTS db.t (x Int32) ENGINE=Memory")
+	if !info.IfNotExists {
+		t.Errorf("IfNotExists=false want true")
+	}
+}
+
+// TestInspectWrite_createTableAsFunction pins the EMPIRICAL shape of
+// `CREATE TABLE x AS table_function(...)`. The Phase-2 plan ASSUMED a
+// top-level `create_table.as_table_function` key (mirroring the C++ DB AST
+// field `ASTCreateQuery::as_table_function`, writes.cc:346). Polyglot does NOT
+// expose that: it reuses the `clone_source` slot but with an EMPTY name and a
+// nested `identifier_func.function`. So AsTableFunction is detected by the
+// presence of `clone_source.identifier_func`, not a dedicated key.
+func TestInspectWrite_createTableAsFunction(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		"CREATE TABLE db.t AS remote('h', d, tbl)",
+		"CREATE TABLE db.t AS numbers(10)",
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", sql, err)
+		}
+		info, err := InspectWrite(ast)
+		if err != nil {
+			t.Fatalf("InspectWrite %q: %v", sql, err)
+		}
+		if !info.AsTableFunction {
+			t.Errorf("%q: AsTableFunction=false want true", sql)
+		}
+		// The clone_source slot (the function node, empty name) must be dropped:
+		// only the real RoleCreate target remains.
+		if len(info.Slots) != 1 || info.Slots[0].Role != RoleCreate {
+			t.Errorf("%q: slots=%+v want exactly 1 RoleCreate", sql, info.Slots)
+		}
+	}
+}
+
+// TestInspectWrite_createTableAsPlainTableNotFunction guards the boundary: a
+// plain `AS db2.src` clone source must NOT be flagged AsTableFunction (only the
+// identifier_func form is a table function).
+func TestInspectWrite_createTableAsPlainTableNotFunction(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE TABLE db.t AS db2.src")
+	if info.AsTableFunction {
+		t.Errorf("plain AS db2.src flagged AsTableFunction")
+	}
+}
+
+func TestRewriteWriteTargets_createTableAs(t *testing.T) {
+	e := newTestEngine(t)
+	ast, _ := e.ParseOne("CREATE TABLE db.t AS db2.src")
+	out, _ := RewriteWriteTargets(ast, func(s WriteSlot) TableDecision {
+		switch s.Role {
+		case RoleCreate:
+			return TableDecision{Action: ActionRename, NewDB: "p1", NewTable: "t2"}
+		case RoleCloneSource:
+			return TableDecision{Action: ActionRename, NewDB: "p2", NewTable: "src2"}
+		}
+		return TableDecision{Action: ActionSkip}
+	})
+	got, _ := e.Generate(out)
+	if !sqlEq(t, e, got, "CREATE TABLE p1.t2 AS p2.src2") {
+		t.Errorf("got %q", got)
+	}
+}
+
+// --- Task 3: alter_table ---
+
+func TestInspectWrite_alterTable(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "ALTER TABLE db.t ADD COLUMN y Int32")
+	if info.Kind != NodeAlterTable || len(info.Slots) != 1 || info.Slots[0].Role != RoleAlter {
+		t.Fatalf("got %+v", info)
+	}
+	if info.CrossTable {
+		t.Errorf("plain ALTER ADD flagged CrossTable")
+	}
+}
+
+func TestInspectWrite_alterTableIfExists(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "ALTER TABLE IF EXISTS db.t ADD COLUMN y Int32")
+	if !info.IfExists {
+		t.Errorf("IfExists=false want true")
+	}
+}
+
+func TestInspectWrite_alterCrossTable(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "ALTER TABLE db.t ATTACH PARTITION 1 FROM db.src")
+	if !info.CrossTable {
+		t.Errorf("ATTACH ... FROM not flagged CrossTable")
+	}
+}
+
+// TestInspectWrite_alterCrossTableStructured covers REPLACE PARTITION ... FROM,
+// which Polyglot models as a STRUCTURED action ({"ReplacePartition":{"source":
+// {"table":...}}}) rather than a Raw SQL action. The C++ reference
+// (alterHasCrossTableRef, writes.cc:160-168) flags this via the structured
+// from_table field and the dedicated test rejects it
+// (rewriter_test.cc:2389). Go must catch the structured form too, not just Raw.
+func TestInspectWrite_alterCrossTableStructured(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "ALTER TABLE db.t REPLACE PARTITION 1 FROM db.src")
+	if !info.CrossTable {
+		t.Errorf("REPLACE PARTITION ... FROM (structured) not flagged CrossTable")
+	}
+}
+
+// TestInspectWrite_alterCrossTableMoveToTable covers MOVE PARTITION ... TO TABLE
+// (a Raw action carrying " TO TABLE ").
+func TestInspectWrite_alterCrossTableMoveToTable(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "ALTER TABLE db.t MOVE PARTITION 1 TO TABLE db.dst")
+	if !info.CrossTable {
+		t.Errorf("MOVE PARTITION ... TO TABLE not flagged CrossTable")
+	}
+}
+
+// TestInspectWrite_alterCrossTableGranularity guards both directions of the Raw
+// keyword scan against the bugs found in review: the singular PART forms
+// (ATTACH PART ... FROM, MOVE PART ... TO TABLE) ARE cross-table (C++ sets
+// from_table/to_table for PART and PARTITION alike), while FETCH PARTITION ...
+// FROM '<zk-path>' and MOVE PARTITION ... TO DISK/VOLUME are NOT (FETCH's FROM is
+// a ZooKeeper path C++ accepts; TO DISK/VOLUME is single-table).
+func TestInspectWrite_alterCrossTableGranularity(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql  string
+		want bool
+	}{
+		{"ALTER TABLE db.t ATTACH PART '1' FROM db.src", true},        // singular PART, was false-negative
+		{"ALTER TABLE db.t MOVE PART '1' TO TABLE db.dst", true},      // singular PART, was false-negative
+		{"ALTER TABLE db.t FETCH PARTITION 1 FROM '/zk/path'", false}, // ZK path FROM, was false-positive
+		{"ALTER TABLE db.t MOVE PARTITION 1 TO VOLUME 'v'", false},    // single-table
+		{"ALTER TABLE db.t MOVE PARTITION 1 TO DISK 'd'", false},      // single-table
+		{"ALTER TABLE db.t ADD COLUMN y Int32", false},                // plain
+	}
+	for _, c := range cases {
+		ast, err := e.ParseOne(c.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.sql, err)
+		}
+		info, err := InspectWrite(ast)
+		if err != nil {
+			t.Fatalf("InspectWrite %q: %v", c.sql, err)
+		}
+		if info.CrossTable != c.want {
+			t.Errorf("%q: CrossTable=%v want %v", c.sql, info.CrossTable, c.want)
+		}
 	}
 }
