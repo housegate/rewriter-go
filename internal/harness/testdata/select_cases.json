@@ -52,6 +52,22 @@
     "want_sql": "WITH good AS (SELECT 1) SELECT * FROM good"
   },
   {
+    "name": "cte_unreferenced_not_injected",
+    "sql": "SELECT * FROM c",
+    "cte": {"c": "SELECT 1", "unused": "SELECT 2"},
+    "want_code": "Success",
+    "want_failed_cte_aliases": [],
+    "want_sql": "WITH c AS (SELECT 1) SELECT * FROM c"
+  },
+  {
+    "name": "cte_none_referenced_no_inject",
+    "sql": "SELECT 1",
+    "cte": {"a": "SELECT 1", "b": "SELECT 2"},
+    "want_code": "Success",
+    "want_failed_cte_aliases": [],
+    "want_sql": "SELECT 1"
+  },
+  {
     "name": "limit_force",
     "sql": "SELECT a FROM db.t LIMIT 100",
     "limit_force": 10,
