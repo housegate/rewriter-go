@@ -1,0 +1,113 @@
+{
+  "select": {
+    "expressions": [
+      {
+        "star": {
+          "table": null,
+          "except": null,
+          "replace": null,
+          "rename": null
+        }
+      }
+    ],
+    "from": {
+      "expressions": [
+        {
+          "table": {
+            "name": {
+              "name": "c",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "schema": null,
+            "catalog": null,
+            "alias": null,
+            "alias_explicit_as": false,
+            "column_aliases": [],
+            "trailing_comments": [],
+            "when": null,
+            "only": false,
+            "final_": false,
+            "hints": []
+          }
+        }
+      ]
+    },
+    "joins": [],
+    "lateral_views": [],
+    "where_clause": null,
+    "group_by": null,
+    "having": null,
+    "qualify": null,
+    "order_by": null,
+    "distribute_by": null,
+    "cluster_by": null,
+    "sort_by": null,
+    "limit": null,
+    "offset": null,
+    "fetch": null,
+    "distinct": false,
+    "distinct_on": null,
+    "top": null,
+    "with": {
+      "ctes": [
+        {
+          "alias": {
+            "name": "c",
+            "quoted": false,
+            "trailing_comments": []
+          },
+          "this": {
+            "select": {
+              "expressions": [
+                {
+                  "literal": {
+                    "literal_type": "number",
+                    "value": "1"
+                  }
+                }
+              ],
+              "from": null,
+              "joins": [],
+              "lateral_views": [],
+              "where_clause": null,
+              "group_by": null,
+              "having": null,
+              "qualify": null,
+              "order_by": null,
+              "distribute_by": null,
+              "cluster_by": null,
+              "sort_by": null,
+              "limit": null,
+              "offset": null,
+              "fetch": null,
+              "distinct": false,
+              "distinct_on": null,
+              "top": null,
+              "with": null,
+              "sample": null,
+              "windows": null,
+              "hint": null,
+              "connect": null,
+              "into": null,
+              "locks": [],
+              "leading_comments": []
+            }
+          },
+          "columns": [],
+          "materialized": null,
+          "alias_first": true
+        }
+      ],
+      "recursive": false,
+      "leading_comments": []
+    },
+    "sample": null,
+    "windows": null,
+    "hint": null,
+    "connect": null,
+    "into": null,
+    "locks": [],
+    "leading_comments": []
+  }
+}
