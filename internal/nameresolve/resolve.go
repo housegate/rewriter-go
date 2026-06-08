@@ -170,20 +170,11 @@ func Resolve(db, table string, sel Selection) Outcome {
 func ResolveAccessed(db, table string, sel Selection) Accessed {
 	switch sel.Mode {
 	case ModeStatic:
-		// Resolve through all three static maps so that remote_table_map entries
-		// report is_remote=true and table_with_database_map entries report the
-		// entry's physical database, matching the C++ oracle behaviour
-		// (name_rewrite.cc:229-256).
+		// Static mode tracks no logical DB. Physical and is_remote come from the
+		// same static lookup: table_map hit → origin db; remote hit → remote db +
+		// is_remote; table_with_database hit → entry db; UNMATCHED → empty physical.
 		o := LookupStatic(db, table, sel.Static)
-		switch o.Status {
-		case StatusRemote:
-			return Accessed{LogicalDB: "", PhysicalDB: o.PhysicalDB, IsRemote: true}
-		case StatusRewrite:
-			return Accessed{LogicalDB: "", PhysicalDB: o.PhysicalDB, IsRemote: false}
-		default:
-			// Passthrough: physical = origin_db (which may be "" for bare tables).
-			return Accessed{LogicalDB: "", PhysicalDB: db, IsRemote: false}
-		}
+		return Accessed{LogicalDB: "", PhysicalDB: o.PhysicalDB, IsRemote: o.Status == StatusRemote}
 	case ModeDynamic:
 		logical := db
 		if logical == "" {
