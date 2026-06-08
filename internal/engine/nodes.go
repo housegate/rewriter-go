@@ -150,9 +150,34 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 	}
 }
 
-// ident builds an Identifier node {"name":s,"quoted":false,"trailing_comments":[]}.
+// needsQuoting reports whether s must be quoted to survive as a single ClickHouse
+// identifier — i.e. it is empty or contains a character outside [A-Za-z0-9_] or
+// starts with a digit. Mirrors ClickHouse IdentifierQuotingRule::WhenNecessary for
+// the cases the rewriter produces (notably dotted dynamic table names).
+func needsQuoting(s string) bool {
+	if s == "" {
+		return true
+	}
+	for i, r := range s {
+		isLower := r >= 'a' && r <= 'z'
+		isUpper := r >= 'A' && r <= 'Z'
+		isDigit := r >= '0' && r <= '9'
+		if r == '_' || isLower || isUpper {
+			continue
+		}
+		if isDigit && i > 0 {
+			continue
+		}
+		return true // includes '.', leading digit, and any other char
+	}
+	return false
+}
+
+// ident builds an Identifier node, quoting the name only when necessary (so a
+// dotted dynamic table name like `tenant1.events` round-trips as a single
+// identifier, not a multi-part db.table.col reference).
 func ident(s string) map[string]any {
-	return map[string]any{"name": s, "quoted": false, "trailing_comments": []any{}}
+	return map[string]any{"name": s, "quoted": needsQuoting(s), "trailing_comments": []any{}}
 }
 
 // litStr builds a string-literal argument node; used for addr, user, and password in remote().
