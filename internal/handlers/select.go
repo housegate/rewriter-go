@@ -12,7 +12,29 @@ import (
 // RewriteSelect ports handleSelectQuery: resolve every table, rewrite the AST,
 // populate table_rewrites + original_accessed_tables, regenerate. (Options/CTE/
 // GLOBAL are layered in Tasks 8-10.)
+//
+// It is a thin wrapper over rewriteSelectCore: run the pipeline, then Generate the
+// rewritten AST into SqlAfterRewrite.
 func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
+	rewritten, resp, err := rewriteSelectCore(e, ast, opts)
+	if err != nil {
+		return nil, err
+	}
+	sql, err := e.Generate(rewritten)
+	if err != nil {
+		return nil, err
+	}
+	resp.SqlAfterRewrite = sql
+	return resp, nil
+}
+
+// rewriteSelectCore runs the full SELECT rewrite pipeline and returns the rewritten
+// AST + a response carrying table_rewrites/original_accessed_tables/failed_cte_aliases
+// (SqlAfterRewrite left empty — the caller Generates or splices). Shared by
+// RewriteSelect (top-level) and the view-body path (handlers/writes.go dispatchView,
+// mirroring C++ rewriteEmbeddedViewBody which runs the same SELECT pipeline on a
+// view's embedded body).
+func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (engine.AST, *pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{
 		Code:          pb.RewriteCode_Success,
 		Message:       "success",
@@ -46,7 +68,7 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 		// These are the candidate CTE-alias references.
 		bareNames, berr := engine.BareTableNames(ast)
 		if berr != nil {
-			return nil, berr
+			return nil, nil, berr
 		}
 
 		// Step 3: seed referenced set — only aliases that appear as bare refs.
@@ -66,7 +88,7 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 		if len(bodies) > 0 {
 			var ierr error
 			if ast, ierr = engine.InjectCTEs(ast, bodies); ierr != nil {
-				return nil, ierr
+				return nil, nil, ierr
 			}
 		}
 	}
@@ -74,7 +96,7 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 
 	originals, err := engine.CollectSelectTables(ast)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
@@ -82,25 +104,20 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 		return decideTable(tt, sel, resp.TableRewrites)
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rewritten, err = applyOptions(rewritten, opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rewritten, err = engine.ForceGlobalForRemoteAsymmetry(rewritten)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	sql, err := e.Generate(rewritten)
-	if err != nil {
-		return nil, err
-	}
-	resp.SqlAfterRewrite = sql
-	return resp, nil
+	return rewritten, resp, nil
 }
 
 // decideTable maps a nameresolve.Outcome to an engine.TableDecision and records the
