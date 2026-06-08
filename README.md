@@ -16,6 +16,17 @@ via a **dual-dialect + raw-SQL** architecture — see the
 [fidelity report](docs/superpowers/reports/2026-06-03-phase0-fidelity.md). Phases 1–5
 (the statement handlers) land on `feat/*` branches via PR.
 
+**Phase 1 complete** (SELECT handler, branch `feat/phase-1-select`). Implemented:
+
+- Table resolution — static 3-map (`table_map`, `remote_table_map`, `table_with_database_map`) + dynamic (logical→physical, `buildDynamicTableName`, known-physical passthrough), including `remote()` wrapping for remote upstreams.
+- Option pipeline — `LimitRewrite` (force + replace), `OffsetRewrite`, `SettingsRewrite`.
+- CTE injection (`CommonTableExprRewrite`) — parse-and-inject bodies before the table walk, failing aliases recorded and sorted.
+- GLOBAL cross-shard pass (`ForceGlobalForRemoteAsymmetry`) to handle mixed local/remote JOIN patterns.
+- Full response population (`table_rewrites`, `original_accessed_tables`, `failed_cte_aliases`, `sql_after_rewrite`).
+- Validated by `internal/harness` golden tests (10 cases covering dynamic rename, static maps, remote, CTE injection, limit, JOIN, passthrough) and, when `REWRITER_ORACLE_ADDR` is set, an env-gated differential against the live C++ oracle.
+
+Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cannot be synthesised through polyglot's generator — such cases are left un-GLOBAL and allow-listed in CI.
+
 ## Layout
 
 | Path | What |

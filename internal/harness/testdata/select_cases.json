@@ -1,0 +1,92 @@
+[
+  {
+    "name": "dynamic_qualified_rename",
+    "sql": "SELECT a FROM tenant1.events",
+    "dynamic": {"database_map": {"tenant1": "testnet"}, "delim": "_"},
+    "want_code": "Success",
+    "want_table_rewrites": {"tenant1.events": "testnet.tenant1.events"},
+    "want_accessed": [{"original_database": "tenant1", "original_table": "events", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false}],
+    "want_sql": "SELECT a FROM testnet.\"tenant1.events\""
+  },
+  {
+    "name": "dynamic_unqualified_no_context_lenient",
+    "sql": "SELECT a FROM events",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "Success",
+    "want_table_rewrites": {},
+    "want_accessed": [{"original_database": "", "original_table": "events", "logical_database": "", "physical_database": "", "is_remote": false}],
+    "want_sql": "SELECT a FROM events"
+  },
+  {
+    "name": "static_table_map_keeps_db",
+    "sql": "SELECT a FROM db.t",
+    "static": {"table_map": {"db.t": "t2"}},
+    "want_code": "Success",
+    "want_table_rewrites": {"db.t": "db.t2"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "SELECT a FROM db.t2"
+  },
+  {
+    "name": "static_remote_table",
+    "sql": "SELECT a FROM db.r",
+    "static": {"remote_table_map": {"db.r": {"Addr": "h:9000", "Database": "pd", "Table": "rt", "User": "u", "Password": "p"}}},
+    "want_code": "Success",
+    "want_table_rewrites": {"db.r": "pd.rt"},
+    "want_accessed": [{"original_database": "db", "original_table": "r", "logical_database": "", "physical_database": "pd", "is_remote": true}],
+    "want_sql": "SELECT a FROM remote('h:9000', pd, rt, 'u', 'p')"
+  },
+  {
+    "name": "cte_alias_not_rewritten",
+    "sql": "SELECT * FROM c",
+    "cte": {"c": "SELECT 1"},
+    "want_code": "Success",
+    "want_failed_cte_aliases": [],
+    "want_sql": "WITH c AS (SELECT 1) SELECT * FROM c"
+  },
+  {
+    "name": "cte_bad_parse_recorded",
+    "sql": "SELECT * FROM good",
+    "cte": {"good": "SELECT 1", "bad": ")("},
+    "want_code": "Success",
+    "want_failed_cte_aliases": ["bad"],
+    "want_sql": "WITH good AS (SELECT 1) SELECT * FROM good"
+  },
+  {
+    "name": "limit_force",
+    "sql": "SELECT a FROM db.t LIMIT 100",
+    "limit_force": 10,
+    "want_code": "Success",
+    "want_sql": "SELECT a FROM db.t LIMIT 10"
+  },
+  {
+    "name": "dynamic_join_two_tables",
+    "sql": "SELECT a.id, b.val FROM tenant1.orders AS a JOIN tenant1.items AS b USING (id)",
+    "dynamic": {"database_map": {"tenant1": "testnet"}, "delim": "_"},
+    "want_code": "Success",
+    "want_table_rewrites": {"tenant1.orders": "testnet.tenant1.orders", "tenant1.items": "testnet.tenant1.items"},
+    "want_accessed": [
+      {"original_database": "tenant1", "original_table": "items", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false},
+      {"original_database": "tenant1", "original_table": "orders", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false}
+    ],
+    "want_sql": "SELECT a.id, b.val FROM testnet.\"tenant1.orders\" AS a JOIN testnet.\"tenant1.items\" AS b USING (id)"
+  },
+  {
+    "name": "cte_body_table_rewritten",
+    "sql": "SELECT * FROM c",
+    "cte": {"c": "SELECT * FROM tenant1.events"},
+    "dynamic": {"database_map": {"tenant1": "testnet"}, "delim": "_"},
+    "want_code": "Success",
+    "want_table_rewrites": {"tenant1.events": "testnet.tenant1.events"},
+    "want_failed_cte_aliases": [],
+    "want_sql": "WITH c AS (SELECT * FROM testnet.\"tenant1.events\") SELECT * FROM c"
+  },
+  {
+    "name": "static_unmatched_passthrough",
+    "sql": "SELECT * FROM mydb.untouched",
+    "static": {"table_map": {"mydb.other": "other_renamed"}},
+    "want_code": "Success",
+    "want_table_rewrites": {},
+    "want_accessed": [{"original_database": "mydb", "original_table": "untouched", "logical_database": "", "physical_database": "mydb", "is_remote": false}],
+    "want_sql": "SELECT * FROM mydb.untouched"
+  }
+]
