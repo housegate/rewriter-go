@@ -92,3 +92,21 @@ func TestForceGlobal_remoteLeftJoin_notCorrupted(t *testing.T) {
 		t.Fatalf("unexpectedly synthesized GLOBAL JOIN on a function left operand: %q", got)
 	}
 }
+
+// The remote source is in a JOIN (not the FROM); an IN with a local RHS must
+// still be promoted to GLOBAL IN (C++ tests the whole table list).
+func TestForceGlobal_inWithRemoteInJoin(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e := gge(t)
+	ast, _ := e.ParseOne("SELECT x FROM local_a JOIN remote('h', d, t, 'u', 'p') ON p = q WHERE x IN (SELECT z FROM local_b)")
+	out, err := ForceGlobalForRemoteAsymmetry(ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.Generate(out)
+	if !contains(got, "GLOBAL IN") {
+		t.Fatalf("expected GLOBAL IN (remote source in JOIN), got %q", got)
+	}
+}
