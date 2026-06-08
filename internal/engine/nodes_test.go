@@ -72,6 +72,58 @@ func TestCollectSelectTables_columnQualifierNotATable(t *testing.T) {
 	}
 }
 
+func genOf(t *testing.T, ast AST) string {
+	t.Helper()
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Skipf("engine unavailable: %v", err)
+	}
+	defer e.Close()
+	out, err := e.Generate(ast)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	return out
+}
+
+func TestRewriteSelectTables_renameAndSetDB(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	out, err := RewriteSelectTables(load(t, "select"), func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "t_x"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	t.Logf("RENAME got: %q", got)
+	want := "SELECT a FROM phys.t_x WHERE x IN (1, 2)"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestRewriteSelectTables_remote(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	out, err := RewriteSelectTables(load(t, "select"), func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRemote, Remote: &RemoteSpec{
+			Addr: "h:9000", DB: "phys", Table: "t_x", User: "u", Password: "p",
+		}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	t.Logf("REMOTE got: %q", got)
+	want := "SELECT a FROM remote('h:9000', phys, t_x, 'u', 'p') WHERE x IN (1, 2)"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
 // sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
 func sortTargets(s []TableTarget) {
 	sort.Slice(s, func(i, j int) bool {

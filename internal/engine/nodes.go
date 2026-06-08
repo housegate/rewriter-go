@@ -12,6 +12,26 @@ type TableTarget struct {
 	Alias string // alias.name; "" if none
 }
 
+// TableAction is the rewrite a caller chose for a TableTarget.
+type TableAction int
+
+const (
+	ActionSkip   TableAction = iota // leave the node untouched
+	ActionRename                    // set table name (+ optionally schema/db)
+	ActionRemote                    // replace the table expr with remote(...)
+)
+
+// RemoteSpec are the five positional args of a remote() table function.
+type RemoteSpec struct{ Addr, DB, Table, User, Password string }
+
+// TableDecision is what a caller returns for a TableTarget.
+type TableDecision struct {
+	Action   TableAction
+	NewDB    string      // ActionRename: new schema; "" keeps the existing schema untouched
+	NewTable string      // ActionRename: new table name
+	Remote   *RemoteSpec // ActionRemote: the remote() args
+}
+
 // CollectSelectTables returns every real table reference in a SELECT AST, in
 // document order, recursing into JOINs, FROM-subqueries, and CTE bodies. Bare
 // references whose name matches an in-scope CTE alias are skipped (they are not
@@ -22,44 +42,117 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 		return nil, fmt.Errorf("engine: decode select: %w", err)
 	}
 	var out []TableTarget
-	walkTables(root, nil, &out)
+	visitTables(root, nil, func(_, _ map[string]any, tt TableTarget) {
+		out = append(out, tt)
+	})
 	return out, nil
 }
 
-// walkTables recurses any decoded JSON node. `scope` is the set of CTE aliases
-// visible here (copy-on-fork at each `select` node, like select.cc).
-func walkTables(node any, scope map[string]bool, out *[]TableTarget) {
+// RewriteSelectTables walks every real table reference (same traversal as
+// CollectSelectTables) and applies the TableDecision returned by decide. The AST
+// is decoded once, mutated in place (Go maps are references), and re-encoded.
+// Mirrors ASTReplaceTransformer::transform.
+func RewriteSelectTables(ast AST, decide func(TableTarget) TableDecision) (AST, error) {
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode select: %w", err)
+	}
+	visitTables(root, nil, func(expr, tbl map[string]any, tt TableTarget) {
+		applyDecision(expr, tbl, tt, decide(tt))
+	})
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode select: %w", err)
+	}
+	return AST(out), nil
+}
+
+// visitTables walks a decoded SELECT AST and calls visit for every REAL table
+// reference (recursing into JOINs, FROM-subqueries, CTE bodies), skipping
+// column-qualifier nodes (tt.Table=="") and bare refs matching an in-scope CTE
+// alias. visit receives the table-expression wrapper `expr` (mutable) and the
+// `tbl` node (mutable), so callers can rewrite in place.
+// scope is treated read-only: it is never mutated (copy-on-fork via forkCTEScope).
+func visitTables(node any, scope map[string]bool, visit func(expr, tbl map[string]any, tt TableTarget)) {
 	switch n := node.(type) {
 	case map[string]any:
-		// Fork the CTE scope when entering a `select` node.
 		if sel, ok := n["select"].(map[string]any); ok {
 			scope = forkCTEScope(sel, scope)
 			for _, v := range sel {
-				walkTables(v, scope, out)
+				visitTables(v, scope, visit)
 			}
 			return
 		}
-		// A `table` node is a concrete table reference.
-		// Guard: a real FROM/JOIN table descriptor has its .name field as a nested
-		// identifier map ({"name":"t",...}). Column-qualifier "table" fields hold a
-		// plain identifier directly, so identName returns "". Skip those.
 		if tbl, ok := n["table"].(map[string]any); ok {
 			tt := decodeTableTarget(tbl)
-			if tt.Table == "" {
-				break // not a real table descriptor (e.g. column qualifier); keep walking
+			if tt.Table == "" { // column-qualifier false positive — recurse, don't visit
+				for _, v := range n {
+					visitTables(v, scope, visit)
+				}
+				return
 			}
-			if !(tt.DB == "" && scope[tt.Table]) { // skip in-scope CTE alias refs
-				*out = append(*out, tt)
+			if tt.DB == "" && scope[tt.Table] {
+				return // in-scope CTE alias — leave untouched
 			}
-			return // a table node has no table-bearing descendants
+			visit(n, tbl, tt)
+			return
 		}
 		for _, v := range n {
-			walkTables(v, scope, out)
+			visitTables(v, scope, visit)
 		}
 	case []any:
 		for _, v := range n {
-			walkTables(v, scope, out)
+			visitTables(v, scope, visit)
 		}
+	}
+}
+
+// applyDecision mutates the table-expression wrapper `expr` (expr["table"]==tbl) per d.
+func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
+	switch d.Action {
+	case ActionRename:
+		tbl["name"] = ident(d.NewTable)
+		if d.NewDB != "" {
+			tbl["schema"] = ident(d.NewDB)
+		}
+		// existing tbl["alias"] is left untouched (preserves the user's alias).
+	case ActionRemote:
+		delete(expr, "table")
+		fn := remoteFunc(d.Remote)
+		if tt.Alias != "" {
+			fn["alias"] = ident(tt.Alias)
+		}
+		expr["function"] = fn
+	case ActionSkip:
+		// no-op
+	}
+}
+
+// ident builds an Identifier node {"name":s,"quoted":false,"trailing_comments":[]}.
+func ident(s string) map[string]any {
+	return map[string]any{"name": s, "quoted": false, "trailing_comments": []any{}}
+}
+
+func litStr(s string) map[string]any {
+	return map[string]any{"literal": map[string]any{"literal_type": "string", "value": s}}
+}
+
+func colBare(s string) map[string]any {
+	return map[string]any{"column": map[string]any{
+		"name": ident(s), "table": nil, "join_mark": false, "trailing_comments": []any{},
+	}}
+}
+
+// remoteFunc builds {"name":"remote","args":[addr, db, table, user, pw], ...}.
+// addr/user/pw are string literals; db/table are bare column identifiers.
+func remoteFunc(r *RemoteSpec) map[string]any {
+	return map[string]any{
+		"name": "remote",
+		"args": []any{
+			litStr(r.Addr), colBare(r.DB), colBare(r.Table), litStr(r.User), litStr(r.Password),
+		},
+		"distinct": false, "trailing_comments": []any{},
+		"use_bracket_syntax": false, "no_parens": false, "quoted": false,
 	}
 }
 
