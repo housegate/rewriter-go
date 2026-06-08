@@ -1,0 +1,309 @@
+[
+  {
+    "name": "create_table_rename_static",
+    "sql": "CREATE TABLE db.t (x Int32) ENGINE = Memory",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "CREATE_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "CREATE TABLE db.t_phys (x Int32) ENGINE = Memory"
+  },
+  {
+    "name": "create_table_as_both_targets",
+    "sql": "CREATE TABLE db.t AS db2.src",
+    "static": {"table_map": {"db.t": "t_phys", "db2.src": "src_phys"}},
+    "want_code": "Success",
+    "want_stmt": "CREATE_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys", "db2.src": "db2.src_phys"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db2", "original_table": "src", "logical_database": "", "physical_database": "db2", "is_remote": false}
+    ],
+    "want_sql": "CREATE TABLE db.t_phys AS db2.src_phys"
+  },
+  {
+    "name": "create_table_if_not_exists_rename",
+    "sql": "CREATE TABLE IF NOT EXISTS db.t (x Int32) ENGINE = Memory",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "CREATE_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "CREATE TABLE IF NOT EXISTS db.t_phys (x Int32) ENGINE = Memory"
+  },
+  {
+    "name": "create_table_as_table_function_reject",
+    "sql": "CREATE TABLE db.t AS remote('h', d, x)",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "CREATE_TABLE",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "CREATE TABLE db.t AS remote('h', d, x)"
+  },
+  {
+    "name": "drop_table_rename",
+    "sql": "DROP TABLE db.t",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "DROP_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "DROP TABLE db.t_phys"
+  },
+  {
+    "name": "drop_table_if_exists_rename",
+    "sql": "DROP TABLE IF EXISTS db.t",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "DROP_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "DROP TABLE IF EXISTS db.t_phys"
+  },
+  {
+    "name": "drop_table_multi_reject",
+    "sql": "DROP TABLE db.a, db.b",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "DROP_TABLE",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "DROP TABLE db.a, db.b"
+  },
+  {
+    "name": "drop_view_rename",
+    "sql": "DROP VIEW db.v",
+    "static": {"table_map": {"db.v": "v_phys"}},
+    "want_code": "Success",
+    "want_stmt": "DROP_VIEW",
+    "want_table_rewrites": {"db.v": "db.v_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "v", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "DROP VIEW db.v_phys"
+  },
+  {
+    "name": "truncate_rename",
+    "sql": "TRUNCATE TABLE db.t",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "TRUNCATE_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "TRUNCATE TABLE db.t_phys"
+  },
+  {
+    "name": "alter_table_add_rename",
+    "sql": "ALTER TABLE db.t ADD COLUMN z Int32",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "ALTER_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "ALTER TABLE db.t_phys ADD COLUMN z Int32"
+  },
+  {
+    "name": "alter_cross_table_reject",
+    "sql": "ALTER TABLE db.t ATTACH PARTITION 1 FROM db.src",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "ALTER_TABLE",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "ALTER TABLE db.t ATTACH PARTITION 1 FROM db.src"
+  },
+  {
+    "name": "insert_values_rename",
+    "sql": "INSERT INTO db.t (x) VALUES (1)",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "INSERT INTO db.t_phys (x) VALUES (1)"
+  },
+  {
+    "name": "insert_format_payload_preserved",
+    "sql": "INSERT INTO db.t FORMAT JSONEachRow {\"x\":1}",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "sql_prefix": "INSERT INTO db.t_phys FORMAT JSONEachRow",
+    "sql_contains": ["{\"x\":1}"]
+  },
+  {
+    "name": "insert_select_source_untouched",
+    "sql": "INSERT INTO db.t SELECT * FROM db.s",
+    "static": {"table_map": {"db.t": "t_phys", "db.s": "s_phys"}},
+    "want_code": "Success",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "INSERT INTO db.t_phys SELECT * FROM db.s"
+  },
+  {
+    "name": "insert_into_function_reject",
+    "sql": "INSERT INTO FUNCTION remote('h', d, t) VALUES (1)",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "INSERT INTO FUNCTION remote('h', d, t) VALUES (1)"
+  },
+  {
+    "name": "update_rename",
+    "sql": "UPDATE db.t SET x = 1 WHERE y = 2",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "UPDATE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "UPDATE db.t_phys SET x = 1 WHERE y = 2"
+  },
+  {
+    "name": "delete_rename",
+    "sql": "DELETE FROM db.t WHERE y = 2",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "DELETE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "DELETE FROM db.t_phys WHERE y = 2"
+  },
+  {
+    "name": "rename_single_pair",
+    "sql": "RENAME TABLE db.a TO db.b",
+    "static": {"table_map": {"db.a": "a_phys", "db.b": "b_phys"}},
+    "want_code": "Success",
+    "want_stmt": "RENAME_TABLE",
+    "want_table_rewrites": {"db.a": "db.a_phys", "db.b": "db.b_phys"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "a", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "b", "logical_database": "", "physical_database": "db", "is_remote": false}
+    ],
+    "want_sql": "RENAME TABLE db.a_phys TO db.b_phys"
+  },
+  {
+    "name": "rename_multi_pair",
+    "sql": "RENAME TABLE db.a TO db.b, db.c TO db.d",
+    "static": {"table_map": {"db.a": "a_phys", "db.b": "b_phys", "db.c": "c_phys", "db.d": "d_phys"}},
+    "want_code": "Success",
+    "want_stmt": "RENAME_TABLE",
+    "want_table_rewrites": {"db.a": "db.a_phys", "db.b": "db.b_phys", "db.c": "db.c_phys", "db.d": "db.d_phys"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "a", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "b", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "c", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "d", "logical_database": "", "physical_database": "db", "is_remote": false}
+    ],
+    "want_sql": "RENAME TABLE db.a_phys TO db.b_phys, db.c_phys TO db.d_phys"
+  },
+  {
+    "name": "exchange_tables",
+    "sql": "EXCHANGE TABLES db.a AND db.b",
+    "static": {"table_map": {"db.a": "a_phys", "db.b": "b_phys"}},
+    "want_code": "Success",
+    "want_stmt": "RENAME_TABLE",
+    "want_table_rewrites": {"db.a": "db.a_phys", "db.b": "db.b_phys"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "a", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "b", "logical_database": "", "physical_database": "db", "is_remote": false}
+    ],
+    "want_sql": "EXCHANGE TABLES db.a_phys AND db.b_phys"
+  },
+  {
+    "name": "alter_update_raw",
+    "sql": "ALTER TABLE db.t UPDATE x = 1 WHERE y = 2",
+    "static": {"table_map": {"db.t": "t_phys"}},
+    "want_code": "Success",
+    "want_stmt": "ALTER_TABLE",
+    "want_table_rewrites": {"db.t": "db.t_phys"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "want_sql": "ALTER TABLE db.t_phys UPDATE x = 1 WHERE y = 2"
+  },
+  {
+    "name": "create_view_body_rewritten",
+    "sql": "CREATE VIEW db.v AS SELECT * FROM db.s",
+    "static": {"table_map": {"db.v": "v_phys", "db.s": "s_phys"}},
+    "want_code": "Success",
+    "want_stmt": "CREATE_VIEW",
+    "want_table_rewrites": {"db.v": "db.v_phys", "db.s": "db.s_phys"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "v", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "s", "logical_database": "", "physical_database": "db", "is_remote": false}
+    ],
+    "want_sql": "CREATE VIEW db.v_phys AS SELECT * FROM db.s_phys \"db.s\""
+  },
+  {
+    "name": "create_materialized_view_to_and_body",
+    "sql": "CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s",
+    "static": {"table_map": {"db.mv": "mv2", "db.dst": "dst2", "db.s": "s2"}},
+    "want_code": "Success",
+    "want_stmt": "CREATE_MATERIALIZED_VIEW",
+    "want_table_rewrites": {"db.mv": "db.mv2", "db.dst": "db.dst2", "db.s": "db.s2"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "mv", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "dst", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "s", "logical_database": "", "physical_database": "db", "is_remote": false}
+    ],
+    "want_sql": "CREATE MATERIALIZED VIEW db.mv2 TO db.dst2 AS SELECT * FROM db.s2 \"db.s\""
+  },
+  {
+    "name": "optimize_bare_reject",
+    "sql": "OPTIMIZE TABLE db.t",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "UNSPECIFIED",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "OPTIMIZE TABLE db.t"
+  },
+  {
+    "name": "create_database_out_of_phase",
+    "sql": "CREATE DATABASE db",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "CREATE_DATABASE",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "CREATE DATABASE db"
+  },
+  {
+    "name": "drop_database_out_of_phase",
+    "sql": "DROP DATABASE db",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "DROP_DATABASE",
+    "want_table_rewrites": {},
+    "reject": true,
+    "want_sql": "DROP DATABASE db"
+  },
+  {
+    "name": "dynamic_rename_drop",
+    "sql": "DROP TABLE db.t",
+    "dynamic": {"database_map": {"db": "testnet"}, "delim": "_"},
+    "want_code": "Success",
+    "want_stmt": "DROP_TABLE",
+    "want_table_rewrites": {"db.t": "testnet.db.t"},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "db", "physical_database": "testnet", "is_remote": false}],
+    "want_sql": "DROP TABLE testnet.\"db.t\""
+  },
+  {
+    "name": "dynamic_invalid_unqualified_reject",
+    "sql": "DROP TABLE t",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "InvalidRewriteRequest",
+    "want_stmt": "DROP_TABLE",
+    "want_table_rewrites": {},
+    "want_accessed": [{"original_database": "", "original_table": "t", "logical_database": "", "physical_database": "", "is_remote": false}],
+    "reject": true,
+    "want_sql": "DROP TABLE t"
+  },
+  {
+    "name": "remote_hit_on_write_reject",
+    "sql": "DROP TABLE db.t",
+    "static": {"remote_table_map": {"db.t": {"Addr": "h", "Database": "d", "Table": "x"}}},
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "DROP_TABLE",
+    "want_table_rewrites": {},
+    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "d", "is_remote": true}],
+    "reject": true,
+    "want_sql": "DROP TABLE db.t"
+  }
+]
