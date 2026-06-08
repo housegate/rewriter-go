@@ -17,6 +17,9 @@ const (
 	NodeDropDB      = "drop_database"
 	NodeTruncate    = "truncate"
 	NodeDelete      = "delete"
+	NodeCreateView  = "create_view"
+	NodeDropView    = "drop_view"
+	NodeUpdate      = "update"
 	NodeCommand     = "command" // USE/GRANT/REVOKE/RENAME/SHOW*/EXISTS — raw SQL in .this
 )
 
