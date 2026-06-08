@@ -1,0 +1,33 @@
+{
+  "alter_table": {
+    "name": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "actions": [
+      {
+        "Raw": {
+          "sql": "ATTACH PARTITION 1 FROM db.src"
+        }
+      }
+    ],
+    "if_exists": false
+  }
+}

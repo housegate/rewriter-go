@@ -1,0 +1,5 @@
+{
+  "command": {
+    "this": "EXCHANGE TABLES db.a AND db.b"
+  }
+}

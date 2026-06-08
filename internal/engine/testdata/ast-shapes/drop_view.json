@@ -1,0 +1,27 @@
+{
+  "drop_view": {
+    "name": {
+      "name": {
+        "name": "v",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "if_exists": false,
+    "materialized": false
+  }
+}

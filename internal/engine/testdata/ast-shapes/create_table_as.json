@@ -1,0 +1,68 @@
+{
+  "create_table": {
+    "name": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "columns": [],
+    "constraints": [],
+    "if_not_exists": false,
+    "temporary": false,
+    "or_replace": false,
+    "as_select": null,
+    "as_select_parenthesized": false,
+    "on_commit": null,
+    "clone_source": {
+      "name": {
+        "name": "src",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db2",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "is_copy": false,
+    "shallow_clone": false,
+    "deep_clone": false,
+    "leading_comments": [],
+    "with_properties": [],
+    "teradata_post_name_options": [],
+    "with_data": null,
+    "with_statistics": null,
+    "teradata_indexes": [],
+    "with_cte": null,
+    "properties": [],
+    "post_table_properties": [],
+    "mysql_table_options": [],
+    "copy_grants": false
+  }
+}
