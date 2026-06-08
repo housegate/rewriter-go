@@ -124,6 +124,46 @@ func TestRewriteSelectTables_remote(t *testing.T) {
 	}
 }
 
+func TestRewriteSelectTables_remoteWithAlias(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	defer e.Close()
+
+	// Parse a source that carries an alias on the table reference.
+	// Characterization confirmed: polyglot parses the alias onto tbl["alias"],
+	// so decodeTableTarget returns tt.Alias=="x" correctly.
+	src, err := e.ParseOne("SELECT * FROM db.t AS x")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	out, err := RewriteSelectTables(src, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRemote, Remote: &RemoteSpec{
+			Addr: "h:9000", DB: "phys", Table: "t_x", User: "u", Password: "p",
+		}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	t.Logf("REMOTE_WITH_ALIAS got: %q", got)
+
+	// The alias wrapper node causes polyglot to render `remote(...) AS x`.
+	want := "SELECT * FROM remote('h:9000', phys, t_x, 'u', 'p') AS x"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
 // sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
 func sortTargets(s []TableTarget) {
 	sort.Slice(s, func(i, j int) bool {
