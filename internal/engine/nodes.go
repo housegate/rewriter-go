@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 )
 
@@ -311,6 +312,46 @@ func SetLimit(ast AST, n int64) (AST, error) {
 		return nil, err
 	}
 	sel["limit"] = map[string]any{"this": numLiteral(n)}
+	return encode()
+}
+
+// InjectCTEs prepends named CTEs (alias → body select AST) to the outer select's
+// WITH clause, creating the clause if absent. Aliases are inserted sorted for
+// determinism. Mirrors ASTRewriteCTETransformer.
+func InjectCTEs(ast AST, bodies map[string]AST) (AST, error) {
+	if len(bodies) == 0 {
+		return ast, nil
+	}
+	sel, encode, err := outerSelect(ast)
+	if err != nil {
+		return nil, err
+	}
+	with, _ := sel["with"].(map[string]any)
+	if with == nil {
+		with = map[string]any{"ctes": []any{}, "recursive": false, "leading_comments": []any{}}
+	}
+	ctes, _ := with["ctes"].([]any)
+
+	aliases := make([]string, 0, len(bodies))
+	for a := range bodies {
+		aliases = append(aliases, a)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		var bodyNode any
+		if err := json.Unmarshal(bodies[alias], &bodyNode); err != nil {
+			return nil, fmt.Errorf("engine: decode cte %q: %w", alias, err)
+		}
+		ctes = append(ctes, map[string]any{
+			"alias":        ident(alias),
+			"this":         bodyNode,
+			"columns":      []any{},
+			"materialized": nil,
+			"alias_first":  true,
+		})
+	}
+	with["ctes"] = ctes
+	sel["with"] = with
 	return encode()
 }
 

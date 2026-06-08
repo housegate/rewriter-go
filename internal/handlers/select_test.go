@@ -74,6 +74,28 @@ func TestRewriteSelect_dynamicRename(t *testing.T) {
 	}
 }
 
+func TestRewriteSelect_cteInjectAndFailedAliases(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT * FROM c")
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_CommonTableExprRewrite,
+		Value: &pb.RewriteOption_CommonTableExprArgs{CommonTableExprArgs: &pb.RewriteCommonTableExprArgs{
+			CteMap: map[string]*pb.RewriteCommonTableExprArgs_CommonTableExpr{
+				"c":   {Alias: "c", Sql: "SELECT 1"},
+				"bad": {Alias: "bad", Sql: ")("},
+			}}}}}
+	resp, err := RewriteSelect(e, ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetSqlAfterRewrite() == "" {
+		t.Fatal("empty sql")
+	}
+	t.Logf("sql_after_rewrite: %q", resp.GetSqlAfterRewrite())
+	if len(resp.GetFailedCteAliases()) != 1 || resp.GetFailedCteAliases()[0] != "bad" {
+		t.Fatalf("failed_cte_aliases = %v, want [bad]", resp.GetFailedCteAliases())
+	}
+}
+
 func TestRewriteSelect_invalidUnqualified_skipsLeniently(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("SELECT a FROM events")
