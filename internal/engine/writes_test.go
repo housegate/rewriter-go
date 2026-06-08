@@ -740,7 +740,11 @@ func TestClassifyWriteCommand(t *testing.T) {
 		{"  rename table db.a to db.b ", CmdRename},
 		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
 		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
-		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdNone}, // ALTER without UPDATE word → not alter_update
+		// A non-UPDATE ALTER reaching the COMMAND path is a non-table ALTER
+		// (ALTER TABLE ADD/DROP/MODIFY all parse to a structured alter_table node,
+		// never a command), so it rejects — matching C++ "only ALTER TABLE is
+		// supported" (writes.cc:481-483). Task 13 added the broad "ALTER " reject.
+		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdBareReject},
 		{"OPTIMIZE TABLE db.t", CmdBareReject},
 		{"UNDROP TABLE db.t", CmdBareReject},
 		{"MOVE db.t TO SHARD '...'", CmdBareReject},
@@ -757,6 +761,89 @@ func TestClassifyWriteCommand(t *testing.T) {
 		if got := classifyWriteCommand(c.sql); got != c.sub {
 			t.Errorf("classifyWriteCommand(%q)=%q want %q", c.sql, got, c.sub)
 		}
+	}
+}
+
+// TestClassifyWriteCommand_rejectsDDL (Task 13) covers the command-node DDL forms
+// that polyglot flattens into {"command":{"this":…}} which C++ rejects as
+// UnsupportedStatement (writes.cc RENAME/EXCHANGE database/dictionary guards +
+// the ALTER non-table / DETACH / DROP DICTIONARY reject paths). These must
+// classify as CmdBareReject so the dispatcher rejects them, WITHOUT swallowing the
+// Phase-3/4 pass-throughs (USE/SHOW/GRANT/REVOKE/EXISTS → CmdNone) or the accepted
+// table forms (RENAME TABLE/EXCHANGE TABLES/ALTER TABLE…UPDATE).
+func TestClassifyWriteCommand_rejectsDDL(t *testing.T) {
+	cases := []struct {
+		sql string
+		sub CommandSub
+	}{
+		// command-node DDL rejects (verified `command.this` shapes via probe):
+		{"DETACH TABLE db.t", CmdBareReject},
+		{"DETACH VIEW db.v", CmdBareReject},
+		{"DROP DICTIONARY db.d", CmdBareReject}, // command-node DROP (DICTIONARY)
+		{"RENAME DATABASE db1 TO db2", CmdBareReject},
+		{"RENAME DICTIONARY db.d1 TO db.d2", CmdBareReject},
+		{"EXCHANGE DICTIONARIES db.d1 AND db.d2", CmdBareReject},
+		{"ALTER USER u IDENTIFIED BY 'p'", CmdBareReject}, // ALTER non-table
+		{"ALTER ROLE r SETTINGS x = 1", CmdBareReject},
+		{"ALTER QUOTA q FOR INTERVAL 1 DAY MAX queries = 1", CmdBareReject},
+		// accepted table forms must NOT regress to a reject:
+		{"RENAME TABLE db.a TO db.b", CmdRename},
+		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
+		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
+		// Phase-3/4 pass-throughs must STILL hit CmdNone (no reject prefix):
+		{"USE db", CmdNone},
+		{"SHOW TABLES", CmdNone},
+		{"SHOW CREATE TABLE db.t", CmdNone},
+		{"GRANT SELECT ON db.t TO user", CmdNone},
+		{"REVOKE SELECT ON db.t FROM user", CmdNone},
+		{"EXISTS TABLE db.t", CmdNone},
+	}
+	for _, c := range cases {
+		if got := classifyWriteCommand(c.sql); got != c.sub {
+			t.Errorf("classifyWriteCommand(%q)=%q want %q", c.sql, got, c.sub)
+		}
+	}
+}
+
+// TestInspectWrite_truncateTarget pins the truncate `target` discriminator
+// (verified via probe): TRUNCATE TABLE → "Table", TRUNCATE DATABASE → "Database".
+func TestInspectWrite_truncateTarget(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql    string
+		target string
+	}{
+		{"TRUNCATE TABLE db.t", "Table"},
+		{"TRUNCATE DATABASE db", "Database"},
+	}
+	for _, c := range cases {
+		info := inspectSQL(t, e, c.sql)
+		if info.TruncateTarget != c.target {
+			t.Errorf("%q: TruncateTarget=%q want %q", c.sql, info.TruncateTarget, c.target)
+		}
+	}
+}
+
+// TestInspectWrite_createDictionary pins the CREATE DICTIONARY discriminator
+// (verified via probe, exact field+value): create_table.table_modifier=="DICTIONARY".
+func TestInspectWrite_createDictionary(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE DICTIONARY db.d (id UInt64) PRIMARY KEY id SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)")
+	if info.Kind != NodeCreateTable {
+		t.Fatalf("kind=%q want create_table", info.Kind)
+	}
+	if !info.IsDictionary {
+		t.Errorf("IsDictionary=false want true")
+	}
+}
+
+// TestInspectWrite_createTableNotDictionary guards the boundary: a plain
+// CREATE TABLE must NOT be flagged IsDictionary.
+func TestInspectWrite_createTableNotDictionary(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE TABLE db.t (x Int32) ENGINE = Memory")
+	if info.IsDictionary {
+		t.Errorf("plain CREATE TABLE flagged IsDictionary")
 	}
 }
 

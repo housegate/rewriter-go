@@ -60,6 +60,10 @@ type WriteInfo struct {
 	IsView          bool // CREATE/DROP VIEW (later tasks)
 	HasViewBody     bool // view definition carries a SELECT body (later tasks)
 
+	// Task 13 reject-guard parity discriminators.
+	TruncateTarget string // truncate node `target` ("Table"/"Database"); "" when not a truncate
+	IsDictionary   bool   // CREATE DICTIONARY (create_table.table_modifier == "DICTIONARY")
+
 	Sub        CommandSub    // command sub-classification (later tasks)
 	RawTargets []TableTarget // raw targets parsed from a command's SQL (later tasks)
 }
@@ -166,8 +170,19 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 		info.Materialized, _ = body["materialized"].(bool)
 	case NodeTruncate:
 		info.IfExists, _ = body["if_exists"].(bool)
+		// `target` discriminates TRUNCATE TABLE ("Table") from TRUNCATE DATABASE
+		// ("Database"). VERIFIED via probe. Note: TRUNCATE VIEW / TRUNCATE ALL
+		// TABLES FROM both still carry target=="Table" (polyglot mis-parses the
+		// keyword as the table name and LOSES the real object), so the handler
+		// must additionally scan the raw SQL — target alone catches only DATABASE.
+		info.TruncateTarget, _ = body["target"].(string)
 	case NodeCreateTable:
 		info.IfNotExists, _ = body["if_not_exists"].(bool)
+		// CREATE DICTIONARY folds into a create_table node discriminated by
+		// table_modifier=="DICTIONARY" (VERIFIED via probe — exact field+value).
+		// C++ guards on ASTCreateQuery::is_dictionary (writes.cc:270-272).
+		tm, _ := body["table_modifier"].(string)
+		info.IsDictionary = tm == "DICTIONARY"
 		// `CREATE TABLE x AS table_function(...)`. The Phase-2 plan assumed a
 		// top-level `as_table_function` key (mirroring the C++ DB AST field
 		// ASTCreateQuery::as_table_function, writes.cc:346). Polyglot does NOT
@@ -508,17 +523,31 @@ func structuredActionRefsTable(payload map[string]any) bool {
 func classifyWriteCommand(sql string) CommandSub {
 	u := strings.ToUpper(strings.TrimSpace(sql))
 	switch {
+	// Accepted table forms FIRST — the broad reject prefixes below (RENAME /
+	// EXCHANGE / ALTER / DROP) would otherwise swallow them.
 	case strings.HasPrefix(u, "RENAME TABLE"):
 		return CmdRename
+	case strings.HasPrefix(u, "RENAME "): // RENAME DATABASE / RENAME DICTIONARY → reject (writes.cc:565-572)
+		return CmdBareReject
 	case strings.HasPrefix(u, "EXCHANGE TABLE"): // EXCHANGE TABLES
 		return CmdExchange
+	case strings.HasPrefix(u, "EXCHANGE "): // EXCHANGE DICTIONARIES → reject
+		return CmdBareReject
 	case strings.HasPrefix(u, "ALTER TABLE") && containsWord(u, "UPDATE"):
 		return CmdAlterUpdate
+	case strings.HasPrefix(u, "ALTER "): // ALTER USER/ROLE/QUOTA/… (non-table) → reject (writes.cc:481-483)
+		return CmdBareReject
+	case strings.HasPrefix(u, "DETACH"): // DETACH TABLE/VIEW → reject (writes.cc:383-385)
+		return CmdBareReject
+	case strings.HasPrefix(u, "DROP "): // command-node DROP = DROP DICTIONARY → reject (writes.cc:387-389). DROP TABLE/VIEW/DATABASE are structured nodes, never here.
+		return CmdBareReject
 	case strings.HasPrefix(u, "OPTIMIZE"), strings.HasPrefix(u, "UNDROP"),
 		strings.HasPrefix(u, "MOVE"), strings.HasPrefix(u, "BACKUP"),
 		strings.HasPrefix(u, "RESTORE"), strings.HasPrefix(u, "KILL"):
 		return CmdBareReject
 	default:
+		// USE / SHOW / SHOW CREATE / GRANT / REVOKE / EXISTS — not a write this
+		// phase handles → pass through (Phase 3/4).
 		return CmdNone
 	}
 }

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strings"
+
 	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
@@ -25,7 +27,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	case engine.NodeCreateTable:
 		return dispatchCreateTable(e, ast, info, sel)
 	case engine.NodeDropTable, engine.NodeDropView, engine.NodeTruncate:
-		return dispatchDropLike(e, ast, info, sel)
+		return dispatchDropLike(e, ast, sql, info, sel)
 	case engine.NodeAlterTable:
 		return dispatchAlter(e, ast, info, sel)
 	case engine.NodeUpdate:
@@ -38,6 +40,16 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return dispatchInsert(e, ast, sql, info, sel)
 	case engine.NodeCommand:
 		return dispatchCommand(e, ast, sql, info, sel)
+	case engine.NodeRaw:
+		// DDL polyglot couldn't structure (CREATE LIVE/WINDOW VIEW, ALTER
+		// DATABASE, …). C++ rejects each via its structured guard; we reject by
+		// inspecting the raw SQL (Task 13).
+		return dispatchRawReject(e, ast)
+	case engine.NodeCopy:
+		// COPY … FROM/TO — C++ QueryKind::Copy reject (writes.cc).
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectUnsupported(resp, "COPY is not supported")
+		return resp, true, nil
 	case engine.NodeCreateDB, engine.NodeDropDB:
 		return dispatchDatabaseOutOfPhase(info)
 	default:
@@ -169,10 +181,16 @@ func dispatchCreateTable(e engine.Engine, ast engine.AST, info engine.WriteInfo,
 		rejectUnsupported(resp, "CREATE TABLE AS table_function(...) is not supported")
 		return resp, true, nil
 	}
+	if info.IsDictionary {
+		// CREATE DICTIONARY folds into a create_table node (table_modifier ==
+		// "DICTIONARY"); C++ rejects via ASTCreateQuery::is_dictionary (writes.cc:270).
+		rejectUnsupported(resp, "CREATE DICTIONARY is not supported")
+		return resp, true, nil
+	}
 	return finishStructured(e, ast, info, sel, resp)
 }
 
-func dispatchDropLike(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+func dispatchDropLike(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	stmt := pb.StatementType_STATEMENT_TYPE_DROP_TABLE
 	switch info.Kind {
 	case engine.NodeDropView:
@@ -181,11 +199,48 @@ func dispatchDropLike(e engine.Engine, ast engine.AST, info engine.WriteInfo, se
 		stmt = pb.StatementType_STATEMENT_TYPE_TRUNCATE_TABLE
 	}
 	resp := newWriteResp(stmt)
+	// TRUNCATE non-table reject (Task 13). Polyglot flattens TRUNCATE VIEW / ALL
+	// TABLES FROM / DATABASE into a `truncate` node that LOSES the real object
+	// (VIEW/ALL mis-parse as the table name, target stays "Table"; only DATABASE
+	// flips target to "Database"). So we reject on EITHER signal: a non-"Table"
+	// target (covers DATABASE) OR a raw-SQL object keyword that is not TABLE
+	// (covers VIEW/ALL/DICTIONARY). Mirrors C++ writes.cc:387-412 which rejects
+	// DROP/TRUNCATE on DICTIONARY, TRUNCATE on VIEW, and TRUNCATE DATABASE / ALL.
+	if info.Kind == engine.NodeTruncate {
+		if (info.TruncateTarget != "" && info.TruncateTarget != "Table") || !truncateObjectIsTable(sql) {
+			rejectUnsupported(resp, "TRUNCATE VIEW / DATABASE / ALL TABLES FROM is not supported; only TRUNCATE TABLE is allowed")
+			return resp, true, nil
+		}
+	}
 	if info.Multi {
 		rejectUnsupported(resp, "multi-table DROP/TRUNCATE is not supported")
 		return resp, true, nil
 	}
 	return finishStructured(e, ast, info, sel, resp)
+}
+
+// truncateObjectIsTable reports whether the object keyword in a raw TRUNCATE
+// statement is TABLE (the only accepted form). It keyword-scans the SQL: find the
+// "TRUNCATE" token, skip an optional "TEMPORARY", and the next token is the object
+// keyword — true ONLY when it equals "TABLE". This is needed because polyglot's
+// `truncate` AST mis-parses VIEW/ALL as the table name (the structured `target`
+// stays "Table"), so the raw text is the only faithful discriminator for those.
+// A bare `TRUNCATE db.t` (no object keyword — ClickHouse allows implicit TABLE) is
+// NOT emitted by polyglot for this phase; defensively, an absent/unknown next
+// token is treated as not-TABLE so the caller rejects rather than corrupts.
+func truncateObjectIsTable(sql string) bool {
+	fields := strings.Fields(strings.ToUpper(sql))
+	for i, f := range fields {
+		if f != "TRUNCATE" {
+			continue
+		}
+		j := i + 1
+		if j < len(fields) && fields[j] == "TEMPORARY" {
+			j++
+		}
+		return j < len(fields) && fields[j] == "TABLE"
+	}
+	return false
 }
 
 func dispatchAlter(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
@@ -359,6 +414,31 @@ func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.
 		return nil, false, err
 	}
 	resp.SqlAfterRewrite = out
+	return resp, true, nil
+}
+
+// dispatchRawReject rejects a `raw` node — DDL polyglot could not structure
+// (CREATE LIVE/WINDOW VIEW, ALTER DATABASE / other non-table ALTER, …). It reads
+// the original SQL (engine.RawSQL) and names the form when recognizable so the
+// message matches the C++ structured guard it stands in for (CREATE LIVE/WINDOW
+// VIEW → writes.cc:266-268; non-table ALTER → writes.cc:481-483). The reject uses
+// StatementType UNSPECIFIED — C++ sets no stmt type on these rejects.
+func dispatchRawReject(e engine.Engine, ast engine.AST) (*pb.RewriteSQLResponse, bool, error) {
+	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+	raw, err := engine.RawSQL(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	u := strings.ToUpper(strings.TrimSpace(raw))
+	switch {
+	case strings.HasPrefix(u, "CREATE LIVE VIEW"), strings.HasPrefix(u, "CREATE WINDOW VIEW"),
+		strings.HasPrefix(u, "CREATE OR REPLACE LIVE VIEW"), strings.HasPrefix(u, "CREATE OR REPLACE WINDOW VIEW"):
+		rejectUnsupported(resp, "CREATE LIVE VIEW / WINDOW VIEW is not supported")
+	case strings.HasPrefix(u, "ALTER "):
+		rejectUnsupported(resp, "only ALTER TABLE is supported")
+	default:
+		rejectUnsupported(resp, "statement is not supported")
+	}
 	return resp, true, nil
 }
 

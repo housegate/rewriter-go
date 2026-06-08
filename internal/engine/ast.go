@@ -21,6 +21,8 @@ const (
 	NodeDropView    = "drop_view"
 	NodeUpdate      = "update"
 	NodeCommand     = "command" // USE/GRANT/REVOKE/RENAME/SHOW*/EXISTS — raw SQL in .this
+	NodeRaw         = "raw"     // DDL polyglot couldn't structure — raw SQL in body["sql"] (CREATE LIVE/WINDOW VIEW, ALTER DATABASE, …)
+	NodeCopy        = "copy"    // COPY … FROM/TO — rejected as UnsupportedStatement (writes.cc QueryKind::Copy)
 )
 
 // NodeKind returns a node's kind: the single top-level key of the AST object.
@@ -53,4 +55,22 @@ func CommandSQL(ast AST) (string, error) {
 		return "", fmt.Errorf("engine: AST is not a command node")
 	}
 	return head.Command.This, nil
+}
+
+// RawSQL returns the original SQL held in a `raw` node (raw.sql) — the form
+// polyglot emits for DDL it cannot structure (CREATE LIVE/WINDOW VIEW, ALTER
+// DATABASE, …). Errors if the node is not a raw node. Mirrors CommandSQL.
+func RawSQL(ast AST) (string, error) {
+	var head struct {
+		Raw *struct {
+			SQL string `json:"sql"`
+		} `json:"raw"`
+	}
+	if err := json.Unmarshal(ast, &head); err != nil {
+		return "", fmt.Errorf("engine: decode raw: %w", err)
+	}
+	if head.Raw == nil {
+		return "", fmt.Errorf("engine: AST is not a raw node")
+	}
+	return head.Raw.SQL, nil
 }
