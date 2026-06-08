@@ -181,6 +181,13 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 	case NodeAlterTable:
 		info.IfExists, _ = body["if_exists"].(bool)
 		info.CrossTable = alterHasCrossTableRef(body)
+	case NodeCreateView:
+		info.IsView = true
+		info.Materialized, _ = body["materialized"].(bool)
+		info.IfNotExists, _ = body["if_not_exists"].(bool)
+		if _, ok := body["query"].(map[string]any); ok {
+			info.HasViewBody = true
+		}
 	}
 	writeSlots(kind, body, func(role WriteRole, tbl map[string]any) {
 		info.Slots = append(info.Slots, WriteSlot{Role: role, Target: decodeTableTarget(tbl)})
@@ -221,6 +228,53 @@ func RewriteWriteTargets(ast AST, decide func(WriteSlot) TableDecision) (AST, er
 	out, err := json.Marshal(root)
 	if err != nil {
 		return nil, fmt.Errorf("engine: encode write: %w", err)
+	}
+	return AST(out), nil
+}
+
+// ExtractViewBody returns the view's embedded body as a standalone {"select":…}
+// AST (the value of create_view.query), or ok=false when absent. The returned AST
+// is an independent copy safe to rewrite before SetViewBody splices it back.
+//
+// Empirically verified: polyglot renders create_view.query as exactly
+// {"select":{…}} for both CREATE VIEW and CREATE MATERIALIZED VIEW (… TO …),
+// so the returned AST is directly consumable by CollectSelectTables /
+// RewriteSelectTables, whose top-level key is "select".
+func ExtractViewBody(ast AST) (AST, bool, error) {
+	_, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	q, ok := body["query"].(map[string]any)
+	if !ok {
+		return nil, false, nil
+	}
+	b, err := json.Marshal(q)
+	if err != nil {
+		return nil, false, fmt.Errorf("engine: encode view body: %w", err)
+	}
+	return AST(b), true, nil
+}
+
+// SetViewBody replaces create_view.query with the given {"select":…} body AST and
+// re-encodes the whole statement. It errors on a non-view kind so a caller cannot
+// silently splice a body onto the wrong node.
+func SetViewBody(ast AST, body AST) (AST, error) {
+	kind, b, root, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	if kind != NodeCreateView {
+		return nil, fmt.Errorf("engine: SetViewBody on non-view kind %q", kind)
+	}
+	var bodyNode map[string]any
+	if err := json.Unmarshal(body, &bodyNode); err != nil {
+		return nil, fmt.Errorf("engine: decode view body: %w", err)
+	}
+	b["query"] = bodyNode
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode view: %w", err)
 	}
 	return AST(out), nil
 }

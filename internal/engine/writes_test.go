@@ -338,3 +338,170 @@ func TestInspectWrite_alterCrossTableGranularity(t *testing.T) {
 		}
 	}
 }
+
+// --- Task 4: create_view (name + MV TO target + body extract/set) ---
+
+func TestInspectWrite_createView(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE VIEW db.v AS SELECT * FROM db.s")
+	if info.Kind != NodeCreateView || !info.IsView || info.Materialized {
+		t.Fatalf("got %+v", info)
+	}
+	if len(info.Slots) != 1 || info.Slots[0].Role != RoleCreate {
+		t.Fatalf("slots=%+v", info.Slots)
+	}
+	if info.Slots[0].Target.DB != "db" || info.Slots[0].Target.Table != "v" {
+		t.Errorf("create target=%+v", info.Slots[0].Target)
+	}
+	if !info.HasViewBody {
+		t.Errorf("HasViewBody=false want true")
+	}
+}
+
+func TestInspectWrite_createMVTo(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s")
+	if !info.Materialized {
+		t.Fatalf("Materialized=false")
+	}
+	if !info.IsView {
+		t.Errorf("IsView=false want true")
+	}
+	if len(info.Slots) != 2 || info.Slots[1].Role != RoleViewTo ||
+		info.Slots[1].Target.DB != "db" || info.Slots[1].Target.Table != "dst" {
+		t.Fatalf("slots=%+v", info.Slots)
+	}
+}
+
+func TestInspectWrite_createViewIfNotExists(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "CREATE VIEW IF NOT EXISTS db.v AS SELECT * FROM db.s")
+	if !info.IfNotExists {
+		t.Errorf("IfNotExists=false want true")
+	}
+}
+
+func TestViewBody_extractRewriteSet(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("CREATE VIEW db.v AS SELECT * FROM db.s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractViewBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	// body is a {"select":...} AST: CollectSelectTables sees db.s.
+	tts, err := CollectSelectTables(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tts) != 1 || tts[0].Table != "s" {
+		t.Fatalf("body tables=%+v", tts)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetViewBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DEVIATION FROM PLAN STRING: the plan asserted
+	//   "CREATE VIEW db.v AS SELECT * FROM phys.s2"
+	// but RewriteSelectTables (the Phase-1 SELECT layer) intentionally adds a
+	// back-alias of the ORIGINAL qualified name on every rename, so unqualified
+	// column refs in the body still resolve to the renamed table. See
+	// TestRewriteSelectTables_renameAndSetDB (nodes_test.go), which pins
+	//   SELECT a FROM phys.t_x "db.t" ...
+	// That alias is semantically load-bearing (sqlEq treats it as distinct from the
+	// alias-free form), so the faithful expectation is the back-aliased SQL below.
+	// This is NOT introduced by ExtractViewBody/SetViewBody — the body splice is
+	// lossless (see TestViewBody_roundTripNoChange); the alias comes from the
+	// SELECT rewrite the body went through.
+	if !sqlEq(t, e, got, `CREATE VIEW db.v AS SELECT * FROM phys.s2 "db.s"`) {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestViewBody_roundTripNoChange confirms extract -> (no change) -> SetViewBody ->
+// Generate is semantically identical to the original: the {"select":...} body
+// splices back without loss.
+func TestViewBody_roundTripNoChange(t *testing.T) {
+	e := newTestEngine(t)
+	const src = "CREATE VIEW db.v AS SELECT * FROM db.s"
+	ast, err := e.ParseOne(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractViewBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	out, err := SetViewBody(ast, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, got, src) {
+		t.Errorf("round-trip got %q want semantically %q", got, src)
+	}
+}
+
+// TestViewBody_materializedRewrite confirms SetViewBody reattaches correctly for a
+// MATERIALIZED VIEW with a TO target: the body SELECT is rewritten while the
+// create name and TO target are untouched by the body splice.
+func TestViewBody_materializedRewrite(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractViewBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetViewBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Back-alias on the body's renamed table, as in TestViewBody_extractRewriteSet
+	// (the Phase-1 SELECT rewrite contract). The create name (db.mv) and TO target
+	// (db.dst) are untouched by the body splice — confirming SetViewBody reattaches
+	// the rewritten body to a MATERIALIZED VIEW without disturbing its other slots.
+	if !sqlEq(t, e, got, `CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM phys.s2 "db.s"`) {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestSetViewBody_nonViewRejected confirms SetViewBody guards its kind: calling it
+// on a non-create_view AST is an error, not a silent splice.
+func TestSetViewBody_nonViewRejected(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("DROP TABLE db.t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetViewBody(ast, AST(`{"select":{}}`)); err == nil {
+		t.Errorf("SetViewBody on non-view kind: err=nil want error")
+	}
+}
