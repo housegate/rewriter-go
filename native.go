@@ -7,13 +7,15 @@ import (
 
 	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-go/internal/handlers"
 )
 
 // NativeRewriter is the in-process Rewriter. Phase 0 = pass-through.
 type NativeRewriter struct {
-	engine engine.Engine
-	mu     sync.Mutex
-	last   *callContext
+	engine  engine.Engine
+	options func(account string) []*pb.RewriteOption // injected account-derived policy
+	mu      sync.Mutex
+	last    *callContext
 }
 
 type callContext struct {
@@ -21,8 +23,23 @@ type callContext struct {
 	account string
 }
 
-// New builds a pass-through NativeRewriter over the given engine.
-func New(e engine.Engine) *NativeRewriter { return &NativeRewriter{engine: e} }
+// Option configures a NativeRewriter.
+type Option func(*NativeRewriter)
+
+// WithOptions injects the account-derived RewriteOption builder (buildDatabaseMap
+// in the consumer). When unset, SELECT runs with no rewrite policy (round-trip).
+func WithOptions(fn func(account string) []*pb.RewriteOption) Option {
+	return func(r *NativeRewriter) { r.options = fn }
+}
+
+// New builds a NativeRewriter over the given engine.
+func New(e engine.Engine, opts ...Option) *NativeRewriter {
+	r := &NativeRewriter{engine: e}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
 
 func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
@@ -33,6 +50,23 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		return resultFromPB(resp), nil // SyntaxError is a code, not a Go error
 	}
 	resp.StatementType = r.classify(ast)
+
+	// Phase 1: route SELECT to the real handler; everything else stays pass-through.
+	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect {
+		var opts []*pb.RewriteOption
+		if r.options != nil {
+			opts = r.options(account)
+		}
+		hresp, herr := handlers.RewriteSelect(r.engine, ast, opts)
+		if herr != nil {
+			return RewriteResult{}, herr // unexpected/internal → fail-open Go error
+		}
+		r.mu.Lock()
+		r.last = &callContext{sql: sql, account: account}
+		r.mu.Unlock()
+		return resultFromPB(hresp), nil
+	}
+
 	// Pass-through: regenerate (proves the engine round-trips); fall back to
 	// the input on any generate hiccup so SQL is always runnable.
 	if gen, gerr := r.engine.Generate(ast); gerr == nil && gen != "" {
