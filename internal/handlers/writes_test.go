@@ -1012,6 +1012,129 @@ func TestRewriteWrite_createDatabaseOutOfPhase(t *testing.T) {
 	}
 }
 
+// ---- Task 13: reject-guard parity (writes.cc forms polyglot flattens) ----
+
+// wantUnsupported drives a SQL through RewriteWrite (nil opts) and asserts the
+// statement is handled + rejected as UnsupportedStatement. Used by the Task-13
+// reject parity cases (CREATE DICTIONARY, LIVE/WINDOW VIEW, COPY, DETACH, RENAME/
+// EXCHANGE non-table, ALTER non-table, TRUNCATE non-table).
+func wantUnsupported(t *testing.T, sql string) *pb.RewriteSQLResponse {
+	t.Helper()
+	e := newEngine(t)
+	ast := mustParse(t, e, sql)
+	resp, handled, err := RewriteWrite(e, ast, sql, nil)
+	if err != nil {
+		t.Fatalf("%q: RewriteWrite err: %v", sql, err)
+	}
+	if !handled {
+		t.Fatalf("%q: handled = false, want true (reject is handled)", sql)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("%q: code = %v, want UnsupportedStatement (%s)", sql, resp.GetCode(), resp.GetMessage())
+	}
+	return resp
+}
+
+// wantPassthrough drives a SQL through RewriteWrite (nil opts) and asserts it is
+// NOT handled by this phase (handled=false) — the caller falls through to SELECT.
+// Regression guard that Phase-3/4 statements (USE/SHOW/GRANT/REVOKE/EXISTS) are
+// not swallowed by the new reject prefixes.
+func wantPassthrough(t *testing.T, sql string) {
+	t.Helper()
+	e := newEngine(t)
+	ast := mustParse(t, e, sql)
+	resp, handled, err := RewriteWrite(e, ast, sql, nil)
+	if err != nil {
+		t.Fatalf("%q: RewriteWrite err: %v", sql, err)
+	}
+	if handled {
+		t.Fatalf("%q: handled = true, want false (must pass through to SELECT) resp=%+v", sql, resp)
+	}
+}
+
+func TestRewriteWrite_truncateViewRejected(t *testing.T) { wantUnsupported(t, "TRUNCATE VIEW db.v") }
+func TestRewriteWrite_truncateAllTablesRejected(t *testing.T) {
+	wantUnsupported(t, "TRUNCATE ALL TABLES FROM db")
+}
+func TestRewriteWrite_truncateDatabaseRejected(t *testing.T) {
+	wantUnsupported(t, "TRUNCATE DATABASE db")
+}
+
+// REGRESSION guard: a plain TRUNCATE TABLE must still rewrite to Success — the
+// new non-table TRUNCATE reject must not break real truncates.
+func TestRewriteWrite_plainTruncateStillWorks(t *testing.T) {
+	e := newEngine(t)
+	const src = "TRUNCATE TABLE db.t"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.t": "t_phys"}})
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_TRUNCATE_TABLE {
+		t.Fatalf("stmt = %v, want TRUNCATE_TABLE", resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "TRUNCATE TABLE db.t_phys") {
+		t.Fatalf("sql = %q, want ≈ TRUNCATE TABLE db.t_phys", resp.GetSqlAfterRewrite())
+	}
+	if got := resp.GetTableRewrites(); !mapEq(got, map[string]string{"db.t": "db.t_phys"}) {
+		t.Fatalf("table_rewrites = %v", got)
+	}
+}
+
+func TestRewriteWrite_createDictionaryRejected(t *testing.T) {
+	resp := wantUnsupported(t, "CREATE DICTIONARY db.d (id UInt64) PRIMARY KEY id SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)")
+	// Reject lives in dispatchCreateTable → stmt stays CREATE_TABLE (parity with
+	// the sibling create_table AS-function reject).
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_CREATE_TABLE {
+		t.Fatalf("stmt = %v, want CREATE_TABLE", resp.GetStatementType())
+	}
+}
+
+func TestRewriteWrite_liveViewRejected(t *testing.T) {
+	wantUnsupported(t, "CREATE LIVE VIEW db.lv AS SELECT 1")
+}
+func TestRewriteWrite_windowViewRejected(t *testing.T) {
+	wantUnsupported(t, "CREATE WINDOW VIEW db.wv AS SELECT 1")
+}
+
+func TestRewriteWrite_copyRejected(t *testing.T) { wantUnsupported(t, "COPY foo FROM 'bar'") }
+
+func TestRewriteWrite_detachRejected(t *testing.T) { wantUnsupported(t, "DETACH TABLE db.t") }
+func TestRewriteWrite_renameDatabaseRejected(t *testing.T) {
+	wantUnsupported(t, "RENAME DATABASE db1 TO db2")
+}
+func TestRewriteWrite_renameDictionaryRejected(t *testing.T) {
+	wantUnsupported(t, "RENAME DICTIONARY db.d1 TO db.d2")
+}
+func TestRewriteWrite_exchangeDictionariesRejected(t *testing.T) {
+	wantUnsupported(t, "EXCHANGE DICTIONARIES db.d1 AND db.d2")
+}
+func TestRewriteWrite_alterUserRejected(t *testing.T) {
+	wantUnsupported(t, "ALTER USER u IDENTIFIED BY 'p'")
+}
+func TestRewriteWrite_dropDictionaryRejected(t *testing.T) {
+	wantUnsupported(t, "DROP DICTIONARY db.d")
+}
+func TestRewriteWrite_alterDatabaseRejected(t *testing.T) {
+	wantUnsupported(t, "ALTER DATABASE db MODIFY SETTING x = 1")
+}
+
+// REGRESSION guards: Phase-3/4 pass-throughs must NOT be swallowed by the new
+// reject prefixes (handled=false → caller falls through to SELECT).
+func TestRewriteWrite_useStillPassthrough(t *testing.T)    { wantPassthrough(t, "USE db") }
+func TestRewriteWrite_existsStillPassthrough(t *testing.T) { wantPassthrough(t, "EXISTS TABLE db.t") }
+func TestRewriteWrite_grantStillPassthrough(t *testing.T) {
+	wantPassthrough(t, "GRANT SELECT ON db.t TO user")
+}
+func TestRewriteWrite_revokeStillPassthrough(t *testing.T) {
+	wantPassthrough(t, "REVOKE SELECT ON db.t FROM user")
+}
+func TestRewriteWrite_showStillPassthrough(t *testing.T) { wantPassthrough(t, "SHOW TABLES") }
+
 // Task 10.11. DROP DATABASE db → handled (out-of-phase reject),
 // UnsupportedStatement, stmt=DROP_DATABASE.
 func TestRewriteWrite_dropDatabaseOutOfPhase(t *testing.T) {
