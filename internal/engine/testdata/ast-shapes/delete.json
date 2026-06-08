@@ -1,0 +1,67 @@
+{
+  "delete": {
+    "table": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "hint": null,
+    "alias": null,
+    "alias_explicit_as": false,
+    "using": [],
+    "where_clause": {
+      "this": {
+        "eq": {
+          "left": {
+            "column": {
+              "name": {
+                "name": "x",
+                "quoted": false,
+                "trailing_comments": []
+              },
+              "table": null,
+              "join_mark": false,
+              "trailing_comments": []
+            }
+          },
+          "right": {
+            "literal": {
+              "literal_type": "number",
+              "value": "1"
+            }
+          },
+          "left_comments": [],
+          "operator_comments": [],
+          "trailing_comments": []
+        }
+      }
+    },
+    "output": null,
+    "leading_comments": [],
+    "with": null,
+    "limit": null,
+    "order_by": null,
+    "returning": [],
+    "tables": [],
+    "tables_from_using": false,
+    "joins": [],
+    "force_index": null,
+    "no_from": false
+  }
+}

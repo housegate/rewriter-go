@@ -1,0 +1,5 @@
+{
+  "command": {
+    "this": "ALTER TABLE db.t UPDATE x = 1 WHERE y = 2"
+  }
+}

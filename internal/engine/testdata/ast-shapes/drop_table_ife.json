@@ -23,7 +23,7 @@
         "hints": []
       }
     ],
-    "if_exists": false,
+    "if_exists": true,
     "cascade": false,
     "cascade_constraints": false,
     "purge": false,

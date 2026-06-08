@@ -1,0 +1,79 @@
+{
+  "update": {
+    "table": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "hint": null,
+    "extra_tables": [],
+    "table_joins": [],
+    "set": [
+      [
+        {
+          "name": "x",
+          "quoted": false,
+          "trailing_comments": []
+        },
+        {
+          "literal": {
+            "literal_type": "number",
+            "value": "1"
+          }
+        }
+      ]
+    ],
+    "from_clause": null,
+    "from_joins": [],
+    "where_clause": {
+      "this": {
+        "eq": {
+          "left": {
+            "column": {
+              "name": {
+                "name": "y",
+                "quoted": false,
+                "trailing_comments": []
+              },
+              "table": null,
+              "join_mark": false,
+              "trailing_comments": []
+            }
+          },
+          "right": {
+            "literal": {
+              "literal_type": "number",
+              "value": "2"
+            }
+          },
+          "left_comments": [],
+          "operator_comments": [],
+          "trailing_comments": []
+        }
+      }
+    },
+    "returning": [],
+    "output": null,
+    "with": null,
+    "leading_comments": [],
+    "limit": null,
+    "order_by": null,
+    "from_before_set": false
+  }
+}

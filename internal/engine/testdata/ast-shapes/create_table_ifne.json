@@ -59,7 +59,7 @@
       }
     ],
     "constraints": [],
-    "if_not_exists": false,
+    "if_not_exists": true,
     "temporary": false,
     "or_replace": false,
     "as_select": null,

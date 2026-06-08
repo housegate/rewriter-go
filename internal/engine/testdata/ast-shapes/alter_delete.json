@@ -1,0 +1,57 @@
+{
+  "alter_table": {
+    "name": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "actions": [
+      {
+        "Delete": {
+          "where_clause": {
+            "eq": {
+              "left": {
+                "column": {
+                  "name": {
+                    "name": "y",
+                    "quoted": false,
+                    "trailing_comments": []
+                  },
+                  "table": null,
+                  "join_mark": false,
+                  "trailing_comments": []
+                }
+              },
+              "right": {
+                "literal": {
+                  "literal_type": "number",
+                  "value": "2"
+                }
+              },
+              "left_comments": [],
+              "operator_comments": [],
+              "trailing_comments": []
+            }
+          }
+        }
+      }
+    ],
+    "if_exists": false
+  }
+}

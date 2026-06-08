@@ -1,0 +1,110 @@
+{
+  "insert": {
+    "table": {
+      "name": {
+        "name": "t",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "schema": {
+        "name": "db",
+        "quoted": false,
+        "trailing_comments": []
+      },
+      "catalog": null,
+      "alias": null,
+      "alias_explicit_as": false,
+      "column_aliases": [],
+      "trailing_comments": [],
+      "when": null,
+      "only": false,
+      "final_": false,
+      "hints": []
+    },
+    "columns": [],
+    "values": [],
+    "query": {
+      "select": {
+        "expressions": [
+          {
+            "star": {
+              "table": null,
+              "except": null,
+              "replace": null,
+              "rename": null
+            }
+          }
+        ],
+        "from": {
+          "expressions": [
+            {
+              "table": {
+                "name": {
+                  "name": "s",
+                  "quoted": false,
+                  "trailing_comments": []
+                },
+                "schema": {
+                  "name": "db",
+                  "quoted": false,
+                  "trailing_comments": []
+                },
+                "catalog": null,
+                "alias": null,
+                "alias_explicit_as": false,
+                "column_aliases": [],
+                "trailing_comments": [],
+                "when": null,
+                "only": false,
+                "final_": false,
+                "hints": []
+              }
+            }
+          ]
+        },
+        "joins": [],
+        "lateral_views": [],
+        "where_clause": null,
+        "group_by": null,
+        "having": null,
+        "qualify": null,
+        "order_by": null,
+        "distribute_by": null,
+        "cluster_by": null,
+        "sort_by": null,
+        "limit": null,
+        "offset": null,
+        "fetch": null,
+        "distinct": false,
+        "distinct_on": null,
+        "top": null,
+        "with": null,
+        "sample": null,
+        "windows": null,
+        "hint": null,
+        "connect": null,
+        "into": null,
+        "locks": [],
+        "leading_comments": []
+      }
+    },
+    "overwrite": false,
+    "partition": [],
+    "directory": null,
+    "returning": [],
+    "output": null,
+    "on_conflict": null,
+    "leading_comments": [],
+    "if_exists": false,
+    "with": null,
+    "ignore": false,
+    "source_alias": null,
+    "alias": null,
+    "alias_explicit_as": false,
+    "default_values": false,
+    "by_name": false,
+    "is_replace": false,
+    "replace_where": null,
+    "source": null
+  }
+}
