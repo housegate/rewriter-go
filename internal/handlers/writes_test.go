@@ -723,3 +723,312 @@ func TestRewriteWrite_insertPassthrough(t *testing.T) {
 		t.Fatalf("accessed = %+v, want 1 {t}", ats)
 	}
 }
+
+// accessedTables returns the OriginalTable of each accessed entry in order
+// (used by the multi-target tier-C tests to assert document-order recording).
+func accessedTables(resp *pb.RewriteSQLResponse) []string {
+	ats := resp.GetOriginalAccessedTables()
+	out := make([]string, len(ats))
+	for i, a := range ats {
+		out[i] = a.GetOriginalTable()
+	}
+	return out
+}
+
+// Task 10.1. RENAME TABLE db.a TO db.b, static {db.a→a_phys, db.b→b_phys}. Both
+// sides rewritten via the raw splice; stmt=RENAME_TABLE; 2 accessed [a, b] in
+// document order; table_rewrites carry UNQUOTED qualified names.
+func TestRewriteWrite_renameStrictRewrite(t *testing.T) {
+	e := newEngine(t)
+	const src = "RENAME TABLE db.a TO db.b"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.a": "a_phys",
+		"db.b": "b_phys",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_RENAME_TABLE {
+		t.Fatalf("stmt = %v, want RENAME_TABLE", resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "RENAME TABLE db.a_phys TO db.b_phys") {
+		t.Fatalf("sql = %q, want ≈ RENAME TABLE db.a_phys TO db.b_phys", resp.GetSqlAfterRewrite())
+	}
+	want := map[string]string{"db.a": "db.a_phys", "db.b": "db.b_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	if got := accessedTables(resp); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("accessed = %v, want [a b] in order", got)
+	}
+}
+
+// Task 10.2. RENAME TABLE db.a TO db.b, db.c TO db.d with all four mapped → all
+// four spliced; 4 accessed in document order [a, b, c, d].
+func TestRewriteWrite_renameMultiPair(t *testing.T) {
+	e := newEngine(t)
+	const src = "RENAME TABLE db.a TO db.b, db.c TO db.d"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.a": "a_phys", "db.b": "b_phys", "db.c": "c_phys", "db.d": "d_phys",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(),
+		"RENAME TABLE db.a_phys TO db.b_phys, db.c_phys TO db.d_phys") {
+		t.Fatalf("sql = %q", resp.GetSqlAfterRewrite())
+	}
+	want := map[string]string{
+		"db.a": "db.a_phys", "db.b": "db.b_phys",
+		"db.c": "db.c_phys", "db.d": "db.d_phys",
+	}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	if got := accessedTables(resp); len(got) != 4 ||
+		got[0] != "a" || got[1] != "b" || got[2] != "c" || got[3] != "d" {
+		t.Fatalf("accessed = %v, want [a b c d] in order", got)
+	}
+}
+
+// Task 10.3. EXCHANGE TABLES db.a AND db.b → both rewritten; stmt stays
+// RENAME_TABLE (C++ writes.cc:585: EXCHANGE uses STATEMENT_TYPE_RENAME_TABLE).
+func TestRewriteWrite_exchangeStrictRewrite(t *testing.T) {
+	e := newEngine(t)
+	const src = "EXCHANGE TABLES db.a AND db.b"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.a": "a_phys",
+		"db.b": "b_phys",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_RENAME_TABLE {
+		t.Fatalf("stmt = %v, want RENAME_TABLE", resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "EXCHANGE TABLES db.a_phys AND db.b_phys") {
+		t.Fatalf("sql = %q, want ≈ EXCHANGE TABLES db.a_phys AND db.b_phys", resp.GetSqlAfterRewrite())
+	}
+	want := map[string]string{"db.a": "db.a_phys", "db.b": "db.b_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	if got := accessedTables(resp); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("accessed = %v, want [a b]", got)
+	}
+}
+
+// Task 10.4. ALTER TABLE db.t UPDATE x = 1 WHERE y = 2, static {db.t→t_phys}.
+// Only the table name splices (stmt=ALTER_TABLE); the UPDATE/WHERE expression is
+// untouched (raw byte-span splice never reaches the SET/WHERE clauses).
+func TestRewriteWrite_alterUpdateRaw(t *testing.T) {
+	e := newEngine(t)
+	const src = "ALTER TABLE db.t UPDATE x = 1 WHERE y = 2"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.t": "t_phys"}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_ALTER_TABLE {
+		t.Fatalf("stmt = %v, want ALTER_TABLE", resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "ALTER TABLE db.t_phys UPDATE x = 1 WHERE y = 2") {
+		t.Fatalf("sql = %q, want ≈ ALTER TABLE db.t_phys UPDATE x = 1 WHERE y = 2", resp.GetSqlAfterRewrite())
+	}
+	want := map[string]string{"db.t": "db.t_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	if got := accessedTables(resp); len(got) != 1 || got[0] != "t" {
+		t.Fatalf("accessed = %v, want [t]", got)
+	}
+}
+
+// Task 10.5. RENAME TABLE db.a TO db.b where db.a → remote upstream (writes can't
+// remote) → UnsupportedStatement. Strict decide short-circuits: only db.a is
+// accessed (db.b never reached), 0 table_rewrites.
+func TestRewriteWrite_renameRejectShortCircuits(t *testing.T) {
+	e := newEngine(t)
+	const src = "RENAME TABLE db.a TO db.b"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{RemoteTableMap: map[string]*pb.RewriteTableStaticArgs_RemoteTable{
+		"db.a": {Addr: "h", Database: "d", Table: "x"}, // first side → remote → reject
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if got := accessedTables(resp); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("accessed = %v, want exactly [a] — db.b must not be recorded", got)
+	}
+	if got := resp.GetTableRewrites(); len(got) != 0 {
+		t.Fatalf("table_rewrites = %v, want empty (short-circuit before any rewrite)", got)
+	}
+}
+
+// Task 10.6. RENAME TABLE db.a TO db.b with dynamic args (databaseMap{db→testnet},
+// delim "_"). The dynamic rename produces NewDB=testnet and NewTable="db.a"/"db.b"
+// (the buildDynamicTableName "<logical>.<origtable>" rule, where logical=db). Each
+// rewritten name must splice with the dotted table backtick-quoted as a SINGLE
+// identifier (db plain, table quoted), so re-parsing + RawTableRefs decodes
+// DB=testnet, Table="db.a"/"db.b" (NOT a 3-part name that would collapse Table to
+// "db"). table_rewrites carry the UNQUOTED names.
+func TestRewriteWrite_renameDynamicDottedNameQuoted(t *testing.T) {
+	e := newEngine(t)
+	const src = "RENAME TABLE db.a TO db.b"
+	ast := mustParse(t, e, src)
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{
+		DatabaseMap: map[string]string{"db": "testnet"},
+		Delim:       "_",
+	})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_RENAME_TABLE {
+		t.Fatalf("stmt = %v, want RENAME_TABLE", resp.GetStatementType())
+	}
+	// table_rewrites: UNQUOTED qualified names (recordRewrite via qualify).
+	want := map[string]string{"db.a": "testnet.db.a", "db.b": "testnet.db.b"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	// Load-bearing: the dotted dynamic names survive as SINGLE quoted identifiers.
+	// Re-parse the output and decode via RawTableRefs.
+	out := resp.GetSqlAfterRewrite()
+	reparsed := mustParse(t, e, out)
+	refs, sub, err := engine.RawTableRefs(e, reparsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub != engine.CmdRename {
+		t.Fatalf("sub = %q, want %q", sub, engine.CmdRename)
+	}
+	if len(refs) != 2 ||
+		refs[0].DB != "testnet" || refs[0].Table != "db.a" ||
+		refs[1].DB != "testnet" || refs[1].Table != "db.b" {
+		t.Fatalf("dotted dynamic name not preserved as single identifier: out=%q refs=%+v", out, refs)
+	}
+	// 2 accessed [a, b]; static-less dynamic mode records logical=db, physical=testnet.
+	if got := accessedTables(resp); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("accessed = %v, want [a b]", got)
+	}
+}
+
+// Task 10.7. OPTIMIZE TABLE db.t → bare-reject → handled, UnsupportedStatement.
+func TestRewriteWrite_optimizeBareReject(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "OPTIMIZE TABLE db.t")
+
+	resp, handled, err := RewriteWrite(e, ast, "OPTIMIZE TABLE db.t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true (bare-reject is handled)")
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("code = %v, want UnsupportedStatement (%s)", resp.GetCode(), resp.GetMessage())
+	}
+}
+
+// Task 10.8. USE db → not a write this phase handles → handled=false (pass through).
+func TestRewriteWrite_useNotAWrite(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "USE db")
+
+	resp, handled, err := RewriteWrite(e, ast, "USE db", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handled {
+		t.Fatalf("handled = true, want false (resp=%+v)", resp)
+	}
+}
+
+// Task 10.9. EXISTS TABLE db.t → not a write this phase handles → handled=false.
+func TestRewriteWrite_existsNotAWrite(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "EXISTS TABLE db.t")
+
+	resp, handled, err := RewriteWrite(e, ast, "EXISTS TABLE db.t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handled {
+		t.Fatalf("handled = true, want false (resp=%+v)", resp)
+	}
+}
+
+// Task 10.10. CREATE DATABASE db → handled (out-of-phase reject),
+// UnsupportedStatement, stmt=CREATE_DATABASE. Phase 3 replaces this.
+func TestRewriteWrite_createDatabaseOutOfPhase(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "CREATE DATABASE db")
+
+	resp, handled, err := RewriteWrite(e, ast, "CREATE DATABASE db", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true (out-of-phase reject is handled)")
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("code = %v, want UnsupportedStatement (%s)", resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE {
+		t.Fatalf("stmt = %v, want CREATE_DATABASE", resp.GetStatementType())
+	}
+}
+
+// Task 10.11. DROP DATABASE db → handled (out-of-phase reject),
+// UnsupportedStatement, stmt=DROP_DATABASE.
+func TestRewriteWrite_dropDatabaseOutOfPhase(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "DROP DATABASE db")
+
+	resp, handled, err := RewriteWrite(e, ast, "DROP DATABASE db", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true (out-of-phase reject is handled)")
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("code = %v, want UnsupportedStatement (%s)", resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_DROP_DATABASE {
+		t.Fatalf("stmt = %v, want DROP_DATABASE", resp.GetStatementType())
+	}
+}

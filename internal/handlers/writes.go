@@ -36,8 +36,10 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return dispatchView(e, ast, info, opts, sel)
 	case engine.NodeInsert:
 		return dispatchInsert(e, ast, sql, info, sel)
-	// case engine.NodeCommand:              → Task 10
-	// case engine.NodeCreateDB, NodeDropDB: → Task 10
+	case engine.NodeCommand:
+		return dispatchCommand(e, ast, sql, info, sel)
+	case engine.NodeCreateDB, engine.NodeDropDB:
+		return dispatchDatabaseOutOfPhase(info)
 	default:
 		return nil, false, nil // not handled this task → caller falls through to SELECT
 	}
@@ -293,4 +295,82 @@ func mergeViewBody(dst, body *pb.RewriteSQLResponse) {
 	}
 	dst.OriginalAccessedTables = append(dst.OriginalAccessedTables, body.GetOriginalAccessedTables()...)
 	dst.FailedCteAliases = append(dst.FailedCteAliases, body.GetFailedCteAliases()...)
+}
+
+// dispatchCommand routes a tier-C `command` node by its sub-classification
+// (CommandSub, set by InspectWrite). The table-bearing forms (RENAME/EXCHANGE/
+// ALTER…UPDATE) go to the raw byte-span splice path; the bare rejects
+// (OPTIMIZE/UNDROP/MOVE/BACKUP/RESTORE/KILL/…) reject as UnsupportedStatement
+// (C++ writes.cc:590-621); everything else (USE/SHOW/GRANT/REVOKE/EXISTS) is not a
+// write this phase handles → handled=false, caller falls through to SELECT.
+func dispatchCommand(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+	switch info.Sub {
+	case engine.CmdRename, engine.CmdExchange, engine.CmdAlterUpdate:
+		return dispatchRawTables(e, ast, sql, info, sel)
+	case engine.CmdBareReject:
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectUnsupported(resp, "statement is not supported")
+		return resp, true, nil
+	default: // CmdNone: USE/SHOW/GRANT/REVOKE/EXISTS — not a write this phase handles
+		return nil, false, nil
+	}
+}
+
+// dispatchRawTables ports the C++ RENAME/EXCHANGE block (writes.cc:563-587) plus
+// ALTER…UPDATE, all of which parse to an opaque command node with NO structured
+// table refs. It reads the table refs out of the raw SQL (RawTableRefs), strict-
+// decides EACH in document order — recording accessed + table_rewrites and short-
+// circuiting on the first reject (mirrors rewriteRenameSide→rewriteOneTarget) — and
+// then splices the surviving renames back into the original byte spans. Splice map
+// values are pre-QUOTED via QuoteQualified so a dotted dynamic name re-parses as a
+// single identifier (the table_rewrites map, by contrast, keeps UNQUOTED names —
+// decideWriteTarget records those). RENAME and EXCHANGE both surface as
+// STATEMENT_TYPE_RENAME_TABLE (writes.cc:585); ALTER…UPDATE as ALTER_TABLE.
+func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+	stmt := pb.StatementType_STATEMENT_TYPE_RENAME_TABLE
+	kind := "RENAME TABLE"
+	switch info.Sub {
+	case engine.CmdExchange:
+		kind = "EXCHANGE TABLES" // statement type stays RENAME_TABLE (C++ writes.cc:585)
+	case engine.CmdAlterUpdate:
+		stmt, kind = pb.StatementType_STATEMENT_TYPE_ALTER_TABLE, "ALTER TABLE"
+	}
+	resp := newWriteResp(stmt)
+
+	targets, _, err := engine.RawTableRefs(e, ast)
+	if err != nil {
+		return nil, false, err
+	}
+	// Strict-decide each target IN ORDER (records accessed + table_rewrites, short-
+	// circuits on the first reject — mirrors C++ rewriteRenameSide→rewriteOneTarget).
+	// Build the splice map of qualify(orig) → QUOTED new qualified name.
+	rewrites := map[string]string{}
+	for _, tt := range targets {
+		d, ok := decideWriteTarget(tt, kind, sel, resp)
+		if !ok {
+			return resp, true, nil // reject populated
+		}
+		if d.Action == engine.ActionRename {
+			rewrites[qualify(tt.DB, tt.Table)] = engine.QuoteQualified(d.NewDB, d.NewTable)
+		}
+	}
+	out, err := engine.SpliceRawTables(e, sql, rewrites)
+	if err != nil {
+		return nil, false, err
+	}
+	resp.SqlAfterRewrite = out
+	return resp, true, nil
+}
+
+// dispatchDatabaseOutOfPhase rejects CREATE/DROP DATABASE as not-yet-supported.
+// Phase 3 replaces this with the synthetic-SELECT debug rewrite + db_map validation
+// (C++ writes.cc:277-345 / 403-463).
+func dispatchDatabaseOutOfPhase(info engine.WriteInfo) (*pb.RewriteSQLResponse, bool, error) {
+	stmt := pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE
+	if info.Kind == engine.NodeDropDB {
+		stmt = pb.StatementType_STATEMENT_TYPE_DROP_DATABASE
+	}
+	resp := newWriteResp(stmt)
+	rejectUnsupported(resp, "database-level DDL (CREATE/DROP DATABASE) is handled in Phase 3")
+	return resp, true, nil
 }
