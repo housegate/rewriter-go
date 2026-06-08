@@ -1,0 +1,157 @@
+{
+  "select": {
+    "expressions": [
+      {
+        "column": {
+          "name": {
+            "name": "x",
+            "quoted": false,
+            "trailing_comments": []
+          },
+          "table": null,
+          "join_mark": false,
+          "trailing_comments": []
+        }
+      }
+    ],
+    "from": {
+      "expressions": [
+        {
+          "table": {
+            "name": {
+              "name": "t",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "schema": {
+              "name": "db",
+              "quoted": false,
+              "trailing_comments": []
+            },
+            "catalog": null,
+            "alias": null,
+            "alias_explicit_as": false,
+            "column_aliases": [],
+            "trailing_comments": [],
+            "when": null,
+            "only": false,
+            "final_": false,
+            "hints": []
+          }
+        }
+      ]
+    },
+    "joins": [],
+    "lateral_views": [],
+    "where_clause": {
+      "this": {
+        "in": {
+          "this": {
+            "column": {
+              "name": {
+                "name": "y",
+                "quoted": false,
+                "trailing_comments": []
+              },
+              "table": null,
+              "join_mark": false,
+              "trailing_comments": []
+            }
+          },
+          "expressions": [],
+          "query": {
+            "select": {
+              "expressions": [
+                {
+                  "column": {
+                    "name": {
+                      "name": "z",
+                      "quoted": false,
+                      "trailing_comments": []
+                    },
+                    "table": null,
+                    "join_mark": false,
+                    "trailing_comments": []
+                  }
+                }
+              ],
+              "from": {
+                "expressions": [
+                  {
+                    "table": {
+                      "name": {
+                        "name": "u",
+                        "quoted": false,
+                        "trailing_comments": []
+                      },
+                      "schema": {
+                        "name": "db",
+                        "quoted": false,
+                        "trailing_comments": []
+                      },
+                      "catalog": null,
+                      "alias": null,
+                      "alias_explicit_as": false,
+                      "column_aliases": [],
+                      "trailing_comments": [],
+                      "when": null,
+                      "only": false,
+                      "final_": false,
+                      "hints": []
+                    }
+                  }
+                ]
+              },
+              "joins": [],
+              "lateral_views": [],
+              "where_clause": null,
+              "group_by": null,
+              "having": null,
+              "qualify": null,
+              "order_by": null,
+              "distribute_by": null,
+              "cluster_by": null,
+              "sort_by": null,
+              "limit": null,
+              "offset": null,
+              "fetch": null,
+              "distinct": false,
+              "distinct_on": null,
+              "top": null,
+              "with": null,
+              "sample": null,
+              "windows": null,
+              "hint": null,
+              "connect": null,
+              "into": null,
+              "locks": [],
+              "leading_comments": []
+            }
+          },
+          "not": false
+        }
+      }
+    },
+    "group_by": null,
+    "having": null,
+    "qualify": null,
+    "order_by": null,
+    "distribute_by": null,
+    "cluster_by": null,
+    "sort_by": null,
+    "limit": null,
+    "offset": null,
+    "fetch": null,
+    "distinct": false,
+    "distinct_on": null,
+    "top": null,
+    "with": null,
+    "sample": null,
+    "windows": null,
+    "hint": null,
+    "connect": null,
+    "into": null,
+    "locks": [],
+    "leading_comments": []
+  }
+}
