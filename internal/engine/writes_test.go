@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // normalizeSQL parses and regenerates sql through the engine, yielding the
 // engine's canonical rendering. Two SQL strings are semantically equal iff their
@@ -503,5 +506,203 @@ func TestSetViewBody_nonViewRejected(t *testing.T) {
 	}
 	if _, err := SetViewBody(ast, AST(`{"select":{}}`)); err == nil {
 		t.Errorf("SetViewBody on non-view kind: err=nil want error")
+	}
+}
+
+// --- Task 5: insert (target flags + FORMAT-payload-preserving GenerateInsert) ---
+
+func TestInspectWrite_insert(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "INSERT INTO db.t (x) VALUES (1)")
+	if info.Kind != NodeInsert || len(info.Slots) != 1 || info.Slots[0].Role != RoleInsert {
+		t.Fatalf("got %+v", info)
+	}
+	if info.Slots[0].Target.DB != "db" || info.Slots[0].Target.Table != "t" {
+		t.Errorf("target=%+v", info.Slots[0].Target)
+	}
+	if info.AsTableFunction || info.MissingTable {
+		t.Errorf("plain INSERT flagged AsTableFunction=%v MissingTable=%v", info.AsTableFunction, info.MissingTable)
+	}
+}
+
+// TestInspectWrite_insertFunctionRejectFlags pins the EMPIRICAL shape of
+// `INSERT INTO FUNCTION remote(...)`. The Phase-2 plan ASSUMED a top-level
+// `insert.table_function` key (mirroring the C++ guard insert_query->table_function,
+// writes.cc:504). Polyglot does NOT expose that key. The real shape (verified):
+//   - body["function_target"] is populated (a {"function":{…}} object), AND
+//   - body["table"] is STILL present but carries an EMPTY name ("name":"").
+//
+// So AsTableFunction is detected by the presence of `function_target`, and the
+// empty-named table means the table-absence MissingTable check does NOT double-fire
+// (table IS a map). The handler (Task 6) rejects on AsTableFunction first.
+func TestInspectWrite_insertFunctionRejectFlags(t *testing.T) {
+	e := newTestEngine(t)
+	info := inspectSQL(t, e, "INSERT INTO FUNCTION remote('h', db, t) VALUES (1)")
+	if !info.AsTableFunction {
+		t.Errorf("INSERT INTO FUNCTION: AsTableFunction=false")
+	}
+}
+
+func TestGenerateInsert_valuesKept(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "INSERT INTO db.t (x, y) VALUES (1, 'a'), (2, 'b')"
+	ast, err := e.ParseOne(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw, err := RewriteWriteTargets(ast, func(s WriteSlot) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "t2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GenerateInsert(e, orig, rw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, got, "INSERT INTO phys.t2 (x, y) VALUES (1, 'a'), (2, 'b')") {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestGenerateInsert_valuesSingleRow is the minimal rename: a single-row VALUES
+// insert has no FORMAT token, so GenerateInsert returns Generate()'s output with
+// no splice.
+func TestGenerateInsert_valuesSingleRow(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "INSERT INTO db.t (x) VALUES (1)"
+	ast, err := e.ParseOne(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw, err := RewriteWriteTargets(ast, func(s WriteSlot) TableDecision {
+		return TableDecision{Action: ActionRename, NewTable: "t"} // keep DB
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GenerateInsert(e, orig, rw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, got, "INSERT INTO phys.t (x) VALUES (1)") && !sqlEq(t, e, got, "INSERT INTO db.t (x) VALUES (1)") {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestGenerateInsert_formatPayloadPreserved(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "INSERT INTO db.t FORMAT JSONEachRow {\"x\":1}\n{\"x\":2}"
+	ast, err := e.ParseOne(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw, err := RewriteWriteTargets(ast, func(s WriteSlot) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "t2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GenerateInsert(e, orig, rw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := "INSERT INTO phys.t2 FORMAT JSONEachRow"
+	wantTail := "{\"x\":1}\n{\"x\":2}"
+	if !strings.HasPrefix(got, wantPrefix) || !strings.Contains(got, wantTail) {
+		t.Errorf("got %q\n want prefix %q + tail %q", got, wantPrefix, wantTail)
+	}
+}
+
+// TestGenerateInsert_formatCSV covers a FORMAT payload whose tail begins with a
+// newline (CSV rows). The splice boundary is the format-name token's byte end, so
+// the leading "\n" before the first CSV row is preserved.
+func TestGenerateInsert_formatCSV(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "INSERT INTO db.t FORMAT CSV\n1,2\n3,4"
+	ast, err := e.ParseOne(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw, err := RewriteWriteTargets(ast, func(s WriteSlot) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "t2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GenerateInsert(e, orig, rw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := "INSERT INTO phys.t2 FORMAT CSV"
+	wantTail := "\n1,2\n3,4"
+	if !strings.HasPrefix(got, wantPrefix) || !strings.Contains(got, wantTail) {
+		t.Errorf("got %q\n want prefix %q + tail %q", got, wantPrefix, wantTail)
+	}
+}
+
+// TestInsertFormatTail_noFormatNoSplice confirms a VALUES insert (no FORMAT token)
+// yields ok=false, so GenerateInsert returns the plain Generate() output unspliced.
+func TestInsertFormatTail_noFormatNoSplice(t *testing.T) {
+	e := newTestEngine(t)
+	tail, ok, err := insertFormatTail(e, "INSERT INTO db.t (x) VALUES (1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Errorf("VALUES insert: ok=true tail=%q want ok=false (no FORMAT clause)", tail)
+	}
+}
+
+// TestGenerateInsert_formatAsIdentifierNotSpliced guards the parity bug found in
+// review: `FORMAT` used as a column identifier (here a column named FORMAT in the
+// embedded SELECT) tokenizes as token_type=="FORMAT", but it is NOT a FORMAT data
+// clause. The AST gate (insert.query is a select, not a {"command":"FORMAT …"})
+// must suppress the splice so the SQL is not corrupted by a spurious tail.
+func TestGenerateInsert_formatAsIdentifierNotSpliced(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "INSERT INTO db.t (x) SELECT FORMAT FROM db.s"
+	ast, err := e.ParseOne(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw, err := RewriteWriteTargets(ast, func(s WriteSlot) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "t2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GenerateInsert(e, orig, rw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the INSERT target is rewritten; the embedded SELECT (FORMAT column,
+	// db.s source) is untouched and NO payload tail is appended.
+	if !sqlEq(t, e, got, "INSERT INTO phys.t2 (x) SELECT FORMAT FROM db.s") {
+		t.Errorf("FORMAT-as-identifier corrupted: got %q", got)
+	}
+}
+
+// TestInsertHasFormatClause_gate directly pins the AST gate across forms.
+func TestInsertHasFormatClause_gate(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql  string
+		want bool
+	}{
+		{"INSERT INTO db.t FORMAT JSONEachRow {\"x\":1}", true},
+		{"INSERT INTO db.t FORMAT CSV\n1,2", true},
+		{"INSERT INTO db.t (x) VALUES (1)", false},
+		{"INSERT INTO db.t SELECT * FROM db.s", false},
+		{"INSERT INTO db.t (x) SELECT FORMAT FROM db.s", false},
+	}
+	for _, c := range cases {
+		ast, err := e.ParseOne(c.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.sql, err)
+		}
+		if got := insertHasFormatClause(ast); got != c.want {
+			t.Errorf("%q: insertHasFormatClause=%v want %v", c.sql, got, c.want)
+		}
 	}
 }

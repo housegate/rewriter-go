@@ -181,6 +181,28 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 	case NodeAlterTable:
 		info.IfExists, _ = body["if_exists"].(bool)
 		info.CrossTable = alterHasCrossTableRef(body)
+	case NodeInsert:
+		// `INSERT INTO FUNCTION remote(...)`. The C++ guard is
+		// insert_query->table_function (writes.cc:504). The Phase-2 plan assumed a
+		// top-level `insert.table_function` key; Polyglot does NOT expose that.
+		// VERIFIED shape: the function lives under `function_target`
+		// ({"function":{…}}), and `table` is STILL present but with an EMPTY name
+		// ("name":""). So AsTableFunction keys off `function_target`. Because the
+		// empty-named table is a present map, the table-absence MissingTable check
+		// below does NOT double-fire on the FUNCTION form — but if it ever did, the
+		// handler (Task 6) rejects AsTableFunction first, surfacing the FUNCTION
+		// message ahead of any missing-table message.
+		if body["function_target"] != nil {
+			info.AsTableFunction = true
+		}
+		// MissingTable guards an INSERT whose target table node is absent
+		// altogether. No INSERT shape Polyglot emits drops `table` (plain, VALUES,
+		// SELECT, FORMAT, and INTO FUNCTION all carry a `table` map — FUNCTION just
+		// empty-names it), so this stays false in practice; it is a defensive guard
+		// only, kept symmetric with the C++ port.
+		if _, ok := body["table"].(map[string]any); !ok {
+			info.MissingTable = true
+		}
 	case NodeCreateView:
 		info.IsView = true
 		info.Materialized, _ = body["materialized"].(bool)
@@ -192,15 +214,16 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 	writeSlots(kind, body, func(role WriteRole, tbl map[string]any) {
 		info.Slots = append(info.Slots, WriteSlot{Role: role, Target: decodeTableTarget(tbl)})
 	})
-	// CREATE TABLE x AS table_function(...) reuses the clone_source slot for the
-	// function node, whose decoded Target has an empty name — it is NOT a
-	// rewriteable table. Drop it so callers see only the real create target.
-	// (The handler rejects AsTableFunction before rewriting anyway, but keeping
-	// Slots clean prevents any naive iterate-and-rewrite from corrupting the AST.)
+	// A table-function target leaves an empty-name placeholder slot: CREATE TABLE x
+	// AS table_function(...) under clone_source, INSERT INTO FUNCTION(...) under
+	// table. Neither is a rewriteable table — drop every empty-name slot so callers
+	// see only real targets (0 for INSERT…FUNCTION, 1 for CREATE…AS function). The
+	// handler rejects AsTableFunction before rewriting anyway, but keeping Slots
+	// clean prevents any naive iterate-and-rewrite from corrupting the AST.
 	if info.AsTableFunction {
 		kept := info.Slots[:0]
 		for _, s := range info.Slots {
-			if s.Role != RoleCloneSource {
+			if s.Target.Table != "" {
 				kept = append(kept, s)
 			}
 		}
@@ -277,6 +300,99 @@ func SetViewBody(ast AST, body AST) (AST, error) {
 		return nil, fmt.Errorf("engine: encode view: %w", err)
 	}
 	return AST(out), nil
+}
+
+// GenerateInsert generates the rewritten INSERT. Generate() reproduces VALUES
+// tuples (semantically — `(1,'a')` becomes `(1, 'a')`) and keeps `INSERT INTO
+// FUNCTION …`, but it DROPS a `FORMAT <fmt> <payload>` tail (Polyglot folds the
+// FORMAT clause into insert.query as {"command":{"this":"FORMAT <fmt>"}} and the
+// inline data payload is not modeled at all). So when the original carried a
+// FORMAT payload we splice the ORIGINAL bytes back, mirroring C++ ASTInsertQuery's
+// data/end splice (writes.cc:520-535). Boundary = the byte `end` of the
+// format-name token (the identifier right after FORMAT).
+func GenerateInsert(e Engine, originalSQL string, rewritten AST) (string, error) {
+	prelude, err := e.Generate(rewritten)
+	if err != nil {
+		return "", err
+	}
+	// Only splice when the AST confirms a FORMAT *data clause* (insert.query is a
+	// {"command":{"this":"FORMAT <fmt>"}}). This gate is load-bearing: the
+	// tokenizer emits token_type=="FORMAT" for FORMAT used as a plain identifier
+	// too (e.g. `INSERT INTO t (x) SELECT FORMAT FROM s`, where insert.query is a
+	// select), so a token-only scan would false-splice and corrupt a normal
+	// INSERT…SELECT. VALUES (query=nil) and INSERT…SELECT (query=select) never gate in.
+	if !insertHasFormatClause(rewritten) {
+		return prelude, nil
+	}
+	tail, ok, err := insertFormatTail(e, originalSQL)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return prelude, nil
+	}
+	return prelude + tail, nil
+}
+
+// insertHasFormatClause reports whether an INSERT AST carries a FORMAT data clause
+// — i.e. insert.query == {"command":{"this":"FORMAT <fmt>"}}. Verified shapes:
+// VALUES → query nil; INSERT…SELECT (incl. a column literally named FORMAT) →
+// query is a {"select":…}; only the data-FORMAT form folds into a command node.
+func insertHasFormatClause(ast AST) bool {
+	_, body, _, err := bodyOf(ast)
+	if err != nil || body == nil {
+		return false
+	}
+	q, ok := body["query"].(map[string]any)
+	if !ok {
+		return false
+	}
+	cmd, ok := q["command"].(map[string]any)
+	if !ok {
+		return false
+	}
+	this, _ := cmd["this"].(string)
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(this)), "FORMAT")
+}
+
+// insertFormatTail tokenizes originalSQL and returns the original substring from
+// the end of the format-name token to EOF (the payload tail, with its leading
+// whitespace/newline). ok=false when there is no FORMAT clause. Callers MUST first
+// confirm a FORMAT data clause via insertHasFormatClause — this scan keys off the
+// LAST FORMAT token (the data clause always trails any FORMAT-as-identifier and
+// the payload runs to EOF), so combined with the AST gate it cannot mis-target.
+//
+// Boundary note (VERIFIED against Polyglot's tokenizer): the token after FORMAT is
+// the format NAME (e.g. JSONEachRow / CSV); its span.end is the byte offset where
+// the inline payload begins. For `INSERT INTO db.t FORMAT JSONEachRow {"x":1}` the
+// name token ends at byte 35, so originalSQL[35:] = ` {"x":1}` (leading space
+// preserved → valid SQL). The payload itself tokenizes as a single VAR whose span
+// is collapsed to EOF, so we deliberately key off the format-NAME token's end.
+func insertFormatTail(e Engine, originalSQL string) (string, bool, error) {
+	toksAST, err := e.Tokenize(originalSQL)
+	if err != nil {
+		return "", false, err
+	}
+	var toks []struct {
+		TokenType string `json:"token_type"`
+		Span      struct {
+			Start int `json:"start"`
+			End   int `json:"end"`
+		} `json:"span"`
+	}
+	if err := json.Unmarshal(toksAST, &toks); err != nil {
+		return "", false, fmt.Errorf("engine: decode tokens: %w", err)
+	}
+	boundary, found := -1, false
+	for i, tk := range toks {
+		if tk.TokenType == "FORMAT" && i+1 < len(toks) {
+			boundary, found = toks[i+1].Span.End, true // keep scanning → last FORMAT wins
+		}
+	}
+	if found && boundary >= 0 && boundary <= len(originalSQL) {
+		return originalSQL[boundary:], true, nil
+	}
+	return "", false, nil
 }
 
 // cloneSourceIsTableFunction reports whether a create_table's `clone_source`
