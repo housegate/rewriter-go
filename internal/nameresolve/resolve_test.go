@@ -120,3 +120,56 @@ func TestApplyDynamic_remoteUpstreamMissingKey_invalid(t *testing.T) {
 		t.Fatalf("status = %v, want StatusInvalid", got.Status)
 	}
 }
+
+func TestFindActive_lastWinsStaticBeatsDynamic(t *testing.T) {
+	opts := []*pb.RewriteOption{
+		{Op: pb.RewriteOp_LimitRewrite},
+		{Op: pb.RewriteOp_TableNameRewrite, Value: &pb.RewriteOption_TableNameArgs{
+			TableNameArgs: &pb.RewriteTableNameArgs{DynamicArgs: dynArgs()}}},
+		{Op: pb.RewriteOp_TableNameRewrite, Value: &pb.RewriteOption_TableNameArgs{
+			TableNameArgs: &pb.RewriteTableNameArgs{StaticArgs: &pb.RewriteTableStaticArgs{}}}},
+	}
+	sel := FindActive(opts)
+	if sel.Mode != ModeStatic || sel.Static == nil {
+		t.Fatalf("got mode %v static=%v, want ModeStatic non-nil", sel.Mode, sel.Static)
+	}
+}
+
+func TestFindActive_none(t *testing.T) {
+	sel := FindActive([]*pb.RewriteOption{{Op: pb.RewriteOp_LimitRewrite}})
+	if sel.Mode != ModeNone {
+		t.Fatalf("got %v want ModeNone", sel.Mode)
+	}
+}
+
+func TestResolve_dispatch(t *testing.T) {
+	st := Selection{Mode: ModeStatic, Static: &pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.t": "t2"}}}
+	if got := Resolve("db", "t", st); got.NewTable != "t2" {
+		t.Fatalf("static dispatch: %+v", got)
+	}
+	dy := Selection{Mode: ModeDynamic, Dynamic: dynArgs()}
+	if got := Resolve("tenant1", "events", dy); got.PhysicalDB != "testnet" {
+		t.Fatalf("dynamic dispatch: %+v", got)
+	}
+	if got := Resolve("db", "t", Selection{Mode: ModeNone}); got.Status != StatusPassthrough {
+		t.Fatalf("none dispatch: %+v", got)
+	}
+}
+
+func TestResolveAccessed_dynamic(t *testing.T) {
+	sel := Selection{Mode: ModeDynamic, Dynamic: dynArgs()}
+	got := ResolveAccessed("tenant1", "events", sel)
+	want := Accessed{LogicalDB: "tenant1", PhysicalDB: "testnet", IsRemote: false}
+	if got != want {
+		t.Fatalf("got %+v want %+v", got, want)
+	}
+}
+
+func TestResolveAccessed_staticLeavesLogicalEmpty(t *testing.T) {
+	sel := Selection{Mode: ModeStatic, Static: &pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.t": "t2"}}}
+	got := ResolveAccessed("db", "t", sel)
+	want := Accessed{LogicalDB: "", PhysicalDB: "db", IsRemote: false} // static: physical=origin_db, logical empty
+	if got != want {
+		t.Fatalf("got %+v want %+v", got, want)
+	}
+}
