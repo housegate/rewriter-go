@@ -112,6 +112,106 @@ func TestRewriteSelect_invalidUnqualified_skipsLeniently(t *testing.T) {
 	}
 }
 
+// TestRewriteSelect_cteUnreferencedNotInjected verifies that an alias present in
+// CteMap but NOT referenced by the query is not injected into the WITH clause.
+// Mirrors C++ LargeMap_OnlyUsedInjected_Subset / RunByName_NoneUsedNoInject.
+func TestRewriteSelect_cteUnreferencedNotInjected(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT * FROM c")
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_CommonTableExprRewrite,
+		Value: &pb.RewriteOption_CommonTableExprArgs{CommonTableExprArgs: &pb.RewriteCommonTableExprArgs{
+			CteMap: map[string]*pb.RewriteCommonTableExprArgs_CommonTableExpr{
+				"c":      {Alias: "c", Sql: "SELECT 1"},
+				"unused": {Alias: "unused", Sql: "SELECT 2"},
+			}}}}}
+	resp, err := RewriteSelect(e, ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := resp.GetSqlAfterRewrite()
+	t.Logf("sql_after_rewrite: %q", sql)
+	if sql == "" {
+		t.Fatal("empty sql")
+	}
+	// Referenced alias must be injected.
+	if want := "WITH c AS (SELECT 1)"; !containsNorm(sql, want) {
+		t.Fatalf("want %q in %q", want, sql)
+	}
+	// Unreferenced alias must NOT appear.
+	if containsNorm(sql, "unused") {
+		t.Fatalf("unreferenced alias 'unused' leaked into output: %q", sql)
+	}
+}
+
+// TestRewriteSelect_cteNoneReferencedNoInject verifies that when NO alias in
+// CteMap is referenced by the query, no WITH clause is injected at all.
+// Mirrors C++ LargeMap_NoneUsed_NoInjection / RunByName_NoneUsedNoInject.
+func TestRewriteSelect_cteNoneReferencedNoInject(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT 1")
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_CommonTableExprRewrite,
+		Value: &pb.RewriteOption_CommonTableExprArgs{CommonTableExprArgs: &pb.RewriteCommonTableExprArgs{
+			CteMap: map[string]*pb.RewriteCommonTableExprArgs_CommonTableExpr{
+				"a": {Alias: "a", Sql: "SELECT 1"},
+				"b": {Alias: "b", Sql: "SELECT 2"},
+			}}}}}
+	resp, err := RewriteSelect(e, ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := resp.GetSqlAfterRewrite()
+	t.Logf("sql_after_rewrite: %q", sql)
+	if containsNorm(sql, "WITH") {
+		t.Fatalf("expected no WITH clause, got: %q", sql)
+	}
+}
+
+// TestRewriteSelect_cteUnreferencedBadParseStillRecorded verifies that a parse
+// failure for an UNREFERENCED alias is still recorded in failed_cte_aliases.
+// Mirrors C++ select.cc:775 — parseCTEMapToAST records ALL failures upfront,
+// not just referenced ones.
+func TestRewriteSelect_cteUnreferencedBadParseStillRecorded(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT * FROM good")
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_CommonTableExprRewrite,
+		Value: &pb.RewriteOption_CommonTableExprArgs{CommonTableExprArgs: &pb.RewriteCommonTableExprArgs{
+			CteMap: map[string]*pb.RewriteCommonTableExprArgs_CommonTableExpr{
+				"good": {Alias: "good", Sql: "SELECT 1"},
+				"bad":  {Alias: "bad", Sql: ")("}, // unreferenced AND bad
+			}}}}}
+	resp, err := RewriteSelect(e, ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := resp.GetSqlAfterRewrite()
+	t.Logf("sql_after_rewrite: %q", sql)
+	// Referenced good alias injected.
+	if want := "WITH good AS (SELECT 1)"; !containsNorm(sql, want) {
+		t.Fatalf("want %q in %q", want, sql)
+	}
+	// Unreferenced bad alias recorded even though it's not referenced.
+	failed := resp.GetFailedCteAliases()
+	if len(failed) != 1 || failed[0] != "bad" {
+		t.Fatalf("failed_cte_aliases = %v, want [bad]", failed)
+	}
+}
+
+// containsNorm is a simple contains check (no whitespace normalization needed
+// for these cases).
+func containsNorm(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
+		findSubstring(s, sub))
+}
+
+func findSubstring(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRewriteSelect_cteBodyTableRewritten(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("SELECT * FROM c")

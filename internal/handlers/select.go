@@ -21,26 +21,53 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 	}
 	sel := nameresolve.FindActive(opts)
 
-	// CTE injection (CommonTableExprRewrite): parse + inject bodies before the
-	// table walk so the bodies' tables are rewritten and the aliases are scoped.
-	bodies := map[string]engine.AST{}
+	// CTE injection (CommonTableExprRewrite): parse bodies, then inject ONLY the
+	// aliases actually referenced by the query (referenced-only, non-transitive).
+	// Mirrors the C++ ASTRewriteCTETransformer: collectCTEKeysForSelect walks only
+	// the main SELECT's AST (pre-injection), so body-to-body refs are NOT followed.
+	// Parse failures are recorded for ALL aliases regardless of reference
+	// (mirrors select.cc:775 — parseCTEMapToAST records all failures upfront).
 	for _, o := range opts {
 		if o.GetOp() != pb.RewriteOp_CommonTableExprRewrite {
 			continue
 		}
+		// Step 1: parse all bodies; record all parse failures (not just referenced ones).
+		allBodies := map[string]engine.AST{}
 		for alias, cte := range o.GetCommonTableExprArgs().GetCteMap() {
 			body, perr := e.ParseOne(cte.GetSql())
 			if perr != nil {
 				resp.FailedCteAliases = append(resp.FailedCteAliases, alias)
 				continue
 			}
-			bodies[alias] = body
+			allBodies[alias] = body
 		}
-	}
-	if len(bodies) > 0 {
-		var ierr error
-		if ast, ierr = engine.InjectCTEs(ast, bodies); ierr != nil {
-			return nil, ierr
+
+		// Step 2: collect bare table names referenced by the current AST.
+		// These are the candidate CTE-alias references.
+		bareNames, berr := engine.BareTableNames(ast)
+		if berr != nil {
+			return nil, berr
+		}
+
+		// Step 3: seed referenced set — only aliases that appear as bare refs.
+		referenced := map[string]bool{}
+		for _, name := range bareNames {
+			if _, ok := allBodies[name]; ok {
+				referenced[name] = true
+			}
+		}
+
+		// Step 4: build the referenced-only bodies map for injection.
+		bodies := map[string]engine.AST{}
+		for alias := range referenced {
+			bodies[alias] = allBodies[alias]
+		}
+
+		if len(bodies) > 0 {
+			var ierr error
+			if ast, ierr = engine.InjectCTEs(ast, bodies); ierr != nil {
+				return nil, ierr
+			}
 		}
 	}
 	sort.Strings(resp.FailedCteAliases) // deterministic order

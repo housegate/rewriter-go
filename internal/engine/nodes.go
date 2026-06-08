@@ -34,6 +34,48 @@ type TableDecision struct {
 	Remote   *RemoteSpec // ActionRemote: the remote() args
 }
 
+// BareTableNames returns every unqualified (no DB prefix) table name referenced
+// in the AST, without recursing into CTE bodies already in scope. This is used
+// to seed the referenced-CTE set: CTE aliases appear as bare table refs in the
+// outer query before any injection has happened.
+// Unlike CollectSelectTables it does NOT skip bare refs that match an in-scope
+// CTE alias — those are exactly the refs we want to collect.
+func BareTableNames(ast AST) ([]string, error) {
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode select: %w", err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	var walk func(node any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			if tbl, ok := n["table"].(map[string]any); ok {
+				tt := decodeTableTarget(tbl)
+				if tt.Table != "" && tt.DB == "" {
+					if !seen[tt.Table] {
+						seen[tt.Table] = true
+						out = append(out, tt.Table)
+					}
+				}
+				// Don't recurse further into this table-expression node;
+				// any children are column/subquery nodes, not table refs.
+				return
+			}
+			for _, v := range n {
+				walk(v)
+			}
+		case []any:
+			for _, v := range n {
+				walk(v)
+			}
+		}
+	}
+	walk(root)
+	return out, nil
+}
+
 // CollectSelectTables returns every real table reference in a SELECT AST, in
 // document order, recursing into JOINs, FROM-subqueries, and CTE bodies. Bare
 // references whose name matches an in-scope CTE alias are skipped (they are not
@@ -338,9 +380,10 @@ func SetLimit(ast AST, n int64) (AST, error) {
 	return encode()
 }
 
-// InjectCTEs prepends named CTEs (alias → body select AST) to the outer select's
-// WITH clause, creating the clause if absent. Aliases are inserted sorted for
-// determinism. Mirrors ASTRewriteCTETransformer.
+// InjectCTEs appends named CTEs (alias → body select AST) to the outer select's
+// WITH clause, creating the clause if absent. Aliases are inserted in
+// alphabetical order for determinism. Only referenced bodies should be passed
+// by the caller (see RewriteSelect). Mirrors ASTRewriteCTETransformer.
 func InjectCTEs(ast AST, bodies map[string]AST) (AST, error) {
 	if len(bodies) == 0 {
 		return ast, nil
