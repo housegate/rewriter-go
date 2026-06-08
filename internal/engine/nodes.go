@@ -64,6 +64,7 @@ func walkTables(node any, scope map[string]bool, out *[]TableTarget) {
 }
 
 // forkCTEScope copies the parent scope and adds this select's CTE aliases.
+// The returned map MUST be treated read-only: when parent has no new CTEs it is returned by reference (shared with callers up the stack).
 func forkCTEScope(sel map[string]any, parent map[string]bool) map[string]bool {
 	with, ok := sel["with"].(map[string]any)
 	if !ok {

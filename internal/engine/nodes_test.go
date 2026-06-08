@@ -56,6 +56,22 @@ func TestCollectSelectTables_cteAliasSkipped(t *testing.T) {
 	}
 }
 
+func TestCollectSelectTables_columnQualifierNotATable(t *testing.T) {
+	// ON-clause column qualifiers like `a.x = b.x` must NOT produce phantom
+	// TableTargets — they share the "table" JSON key with real table descriptors
+	// but their qualifier name is a flat string, caught by the tt.Table=="" guard.
+	got, err := CollectSelectTables(load(t, "select_three_join"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TableTarget{{Table: "a"}, {Table: "b"}, {Table: "c"}}
+	sortTargets(got)
+	sortTargets(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v want %+v", got, want)
+	}
+}
+
 // sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
 func sortTargets(s []TableTarget) {
 	sort.Slice(s, func(i, j int) bool {
