@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -21,6 +22,8 @@ type selectCase struct {
 	Static               *staticJSON       `json:"static"`
 	CTE                  map[string]string `json:"cte"`
 	LimitForce           *int32            `json:"limit_force"`
+	Offset               *int32            `json:"offset"`
+	Settings             map[string]int32  `json:"settings"`
 	WantCode             string            `json:"want_code"`
 	WantTableRewrites    map[string]string `json:"want_table_rewrites"`
 	WantFailedCteAliases []string          `json:"want_failed_cte_aliases"`
@@ -33,9 +36,14 @@ type dynamicJSON struct {
 	UpstreamLogical        string            `json:"upstream_logical_database_in_context"`
 	Delim                  string            `json:"delim"`
 }
+type tableWithDBJSON struct {
+	Database string `json:"database"`
+	Table    string `json:"table"`
+}
 type staticJSON struct {
-	TableMap       map[string]string          `json:"table_map"`
-	RemoteTableMap map[string]remoteTableJSON `json:"remote_table_map"`
+	TableMap             map[string]string            `json:"table_map"`
+	RemoteTableMap       map[string]remoteTableJSON   `json:"remote_table_map"`
+	TableWithDatabaseMap map[string]tableWithDBJSON   `json:"table_with_database_map"`
 }
 type accessedJSON struct {
 	OriginalDatabase string `json:"original_database"`
@@ -69,12 +77,35 @@ func (c selectCase) options() []*pb.RewriteOption {
 				sa.RemoteTableMap[k] = &pb.RewriteTableStaticArgs_RemoteTable{Addr: r.Addr, Database: r.Database, Table: r.Table, User: r.User, Password: r.Password}
 			}
 		}
+		if c.Static.TableWithDatabaseMap != nil {
+			sa.TableWithDatabaseMap = map[string]*pb.RewriteTableStaticArgs_TableWithDatabase{}
+			for k, v := range c.Static.TableWithDatabaseMap {
+				sa.TableWithDatabaseMap[k] = &pb.RewriteTableStaticArgs_TableWithDatabase{Database: v.Database, Table: v.Table}
+			}
+		}
 		opts = append(opts, &pb.RewriteOption{Op: pb.RewriteOp_TableNameRewrite,
 			Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{StaticArgs: sa}}})
 	}
 	if c.LimitForce != nil {
 		opts = append(opts, &pb.RewriteOption{Op: pb.RewriteOp_LimitRewrite,
 			Value: &pb.RewriteOption_LimitArgs{LimitArgs: &pb.RewriteLimitArgs{Value: &pb.RewriteLimitArgs_ForceLimit{ForceLimit: *c.LimitForce}}}})
+	}
+	if c.Offset != nil {
+		opts = append(opts, &pb.RewriteOption{Op: pb.RewriteOp_OffsetRewrite,
+			Value: &pb.RewriteOption_OffsetArgs{OffsetArgs: &pb.RewriteOffsetArgs{Offset: *c.Offset}}})
+	}
+	if c.Settings != nil {
+		var ss []*pb.RewriteSettingsArgs_Setting
+		keys := make([]string, 0, len(c.Settings))
+		for k := range c.Settings {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			ss = append(ss, &pb.RewriteSettingsArgs_Setting{Key: k, Value: &pb.RewriteSettingsArgs_Setting_IntValue{IntValue: c.Settings[k]}})
+		}
+		opts = append(opts, &pb.RewriteOption{Op: pb.RewriteOp_SettingsRewrite,
+			Value: &pb.RewriteOption_SettingsArgs{SettingsArgs: &pb.RewriteSettingsArgs{Settings: ss}}})
 	}
 	return opts
 }

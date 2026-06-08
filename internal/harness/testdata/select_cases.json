@@ -86,7 +86,31 @@
     "static": {"table_map": {"mydb.other": "other_renamed"}},
     "want_code": "Success",
     "want_table_rewrites": {},
-    "want_accessed": [{"original_database": "mydb", "original_table": "untouched", "logical_database": "", "physical_database": "mydb", "is_remote": false}],
+    "want_accessed": [{"original_database": "mydb", "original_table": "untouched", "logical_database": "", "physical_database": "", "is_remote": false}],
     "want_sql": "SELECT * FROM mydb.untouched"
+  },
+  {
+    "name": "static_table_with_database",
+    "sql": "SELECT a FROM db.w",
+    "static": {"table_with_database_map": {"db.w": {"database": "pw", "table": "wt"}}},
+    "want_code": "Success",
+    "want_table_rewrites": {"db.w": "pw.wt"},
+    "want_accessed": [{"original_database": "db", "original_table": "w", "logical_database": "", "physical_database": "pw", "is_remote": false}],
+    "want_sql": "SELECT a FROM pw.wt"
+  },
+  {
+    "name": "limit_offset",
+    "sql": "SELECT a FROM db.t",
+    "limit_force": 5,
+    "offset": 3,
+    "want_code": "Success",
+    "want_sql": "SELECT a FROM db.t LIMIT 5 OFFSET 3"
+  },
+  {
+    "name": "settings_number",
+    "sql": "SELECT a FROM db.t",
+    "settings": {"max_threads": 4},
+    "want_code": "Success",
+    "want_sql": "SELECT a FROM db.t SETTINGS max_threads = 4"
   }
 ]
