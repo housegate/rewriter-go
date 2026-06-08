@@ -706,3 +706,255 @@ func TestInsertHasFormatClause_gate(t *testing.T) {
 		}
 	}
 }
+
+// ---- Task 6: tier-C raw-SQL command sub-classification + table-span splice ----
+
+func TestInspectWrite_commandSubKinds(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql string
+		sub CommandSub
+	}{
+		{"RENAME TABLE db.a TO db.b", CmdRename},
+		{"RENAME TABLE db.a TO db.b, db.c TO db.d", CmdRename},
+		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
+		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
+		{"OPTIMIZE TABLE db.t", CmdBareReject},
+		{"USE db", CmdNone},
+		{"EXISTS TABLE db.t", CmdNone},
+	}
+	for _, c := range cases {
+		info := inspectSQL(t, e, c.sql)
+		if info.Kind != NodeCommand || info.Sub != c.sub {
+			t.Errorf("%q sub=%q want %q (kind=%q)", c.sql, info.Sub, c.sub, info.Kind)
+		}
+	}
+}
+
+func TestClassifyWriteCommand(t *testing.T) {
+	cases := []struct {
+		sql string
+		sub CommandSub
+	}{
+		{"RENAME TABLE db.a TO db.b", CmdRename},
+		{"  rename table db.a to db.b ", CmdRename},
+		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
+		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
+		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdNone}, // ALTER without UPDATE word → not alter_update
+		{"OPTIMIZE TABLE db.t", CmdBareReject},
+		{"UNDROP TABLE db.t", CmdBareReject},
+		{"MOVE db.t TO SHARD '...'", CmdBareReject},
+		{"BACKUP TABLE db.t TO Disk('d','f')", CmdBareReject},
+		{"RESTORE TABLE db.t FROM Disk('d','f')", CmdBareReject},
+		{"KILL QUERY WHERE 1", CmdBareReject},
+		{"USE db", CmdNone},
+		{"SHOW TABLES", CmdNone},
+		{"GRANT SELECT ON db.t TO user", CmdNone},
+		{"EXISTS TABLE db.t", CmdNone},
+		{"SHOW CREATE TABLE db.t", CmdNone},
+	}
+	for _, c := range cases {
+		if got := classifyWriteCommand(c.sql); got != c.sub {
+			t.Errorf("classifyWriteCommand(%q)=%q want %q", c.sql, got, c.sub)
+		}
+	}
+}
+
+func TestRawTableRefs_rename(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("RENAME TABLE db.a TO db.b, c TO d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, sub, err := RawTableRefs(e, ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub != CmdRename {
+		t.Errorf("sub=%q", sub)
+	}
+	want := []TableTarget{{DB: "db", Table: "a"}, {DB: "db", Table: "b"}, {Table: "c"}, {Table: "d"}}
+	if len(got) != len(want) {
+		t.Fatalf("refs=%+v want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].DB != want[i].DB || got[i].Table != want[i].Table {
+			t.Errorf("refs[%d]=%+v want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRawTableRefs_alterUpdateSingleTarget(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("ALTER TABLE db.t UPDATE x = 1 WHERE y = 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, sub, err := RawTableRefs(e, ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub != CmdAlterUpdate {
+		t.Errorf("sub=%q", sub)
+	}
+	// Only the single name-run after TABLE is a table ref; x/y are columns and
+	// must NOT be picked up.
+	if len(got) != 1 || got[0].DB != "db" || got[0].Table != "t" {
+		t.Errorf("refs=%+v want [{db t}]", got)
+	}
+}
+
+func TestRawTableRefs_nonWriteCommand(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("USE db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, sub, err := RawTableRefs(e, ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub != CmdNone || got != nil {
+		t.Errorf("USE db: refs=%+v sub=%q want nil/CmdNone", got, sub)
+	}
+}
+
+func TestSpliceRawTables_rename(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "RENAME TABLE db.a TO db.b"
+	out, err := SpliceRawTables(e, orig, map[string]string{"db.a": "phys.a1", "db.b": "phys.b1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, out, "RENAME TABLE phys.a1 TO phys.b1") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestSpliceRawTables_alterUpdate(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "ALTER TABLE db.t UPDATE x = 1 WHERE y = 2"
+	out, err := SpliceRawTables(e, orig, map[string]string{"db.t": "phys.t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, out, "ALTER TABLE phys.t1 UPDATE x = 1 WHERE y = 2") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestSpliceRawTables_exchange(t *testing.T) {
+	e := newTestEngine(t)
+	orig := "EXCHANGE TABLES db.a AND db.b"
+	out, err := SpliceRawTables(e, orig, map[string]string{"db.a": "p.a", "db.b": "p.b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, out, "EXCHANGE TABLES p.a AND p.b") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestSpliceRawTables_partialRewriteOnly(t *testing.T) {
+	// A rewrite map missing one of the refs leaves that ref untouched (handler
+	// validation pass may rewrite only some targets).
+	e := newTestEngine(t)
+	orig := "RENAME TABLE db.a TO db.b"
+	out, err := SpliceRawTables(e, orig, map[string]string{"db.a": "phys.a1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, out, "RENAME TABLE phys.a1 TO db.b") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestSpliceRawTables_bareNameKey(t *testing.T) {
+	// Unqualified names key by bare table name.
+	e := newTestEngine(t)
+	orig := "RENAME TABLE a TO b"
+	out, err := SpliceRawTables(e, orig, map[string]string{"a": "phys.a1", "b": "phys.b1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, out, "RENAME TABLE phys.a1 TO phys.b1") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestSpliceRawTables_quotedSourceKeyMatches(t *testing.T) {
+	// The tokenizer strips backticks from QUOTED_IDENTIFIER text, so a
+	// backtick-quoted source name keys by its UNQUOTED identifier text.
+	e := newTestEngine(t)
+	orig := "RENAME TABLE `db`.`weird.name` TO plain"
+	out, err := SpliceRawTables(e, orig, map[string]string{
+		"db.weird.name": QuoteQualified("phys", "x"),
+		"plain":         QuoteQualified("phys", "y"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, out, "RENAME TABLE phys.x TO phys.y") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestQuoteQualified(t *testing.T) {
+	cases := []struct {
+		db, table, want string
+	}{
+		{"", "t", "t"},
+		{"db", "t", "db.t"},
+		{"", "tenant1.a", "`tenant1.a`"},                // dotted single name must quote
+		{"testnet", "tenant1.a", "testnet.`tenant1.a`"}, // db plain, table dotted
+		{"a-b", "t", "`a-b`.t"},                         // hyphen forces quoting
+		{"", "1x", "`1x`"},                              // leading digit forces quoting
+	}
+	for _, c := range cases {
+		if got := QuoteQualified(c.db, c.table); got != c.want {
+			t.Errorf("QuoteQualified(%q,%q)=%q want %q", c.db, c.table, got, c.want)
+		}
+	}
+}
+
+func TestSpliceRawTables_dottedDynamicNameQuoted(t *testing.T) {
+	// A dynamic rename produces a dotted table name that MUST splice as a quoted
+	// single identifier, else it re-parses as a 3-part name.
+	//
+	// Faithful-behavior note (verified empirically): the source is
+	// `RENAME TABLE db.a TO db.b`, which has exactly TWO table refs (a, b) — one
+	// rename pair. After rewriting both to dotted dynamic names the statement is
+	// still one rename pair, so RawTableRefs returns 2 refs (NOT 4). The
+	// load-bearing assertion is that each rewritten dotted name survives as a
+	// SINGLE quoted identifier: QuoteQualified("testnet","tenant1.a") splices as
+	// `testnet.`tenant1.a``, which re-tokenizes with the backtick-quoted run as one
+	// QUOTED_IDENTIFIER → Table=="tenant1.a" (with backticks stripped), DB=="testnet".
+	// Were it spliced unquoted (`testnet.tenant1.a`) it would mis-parse as a 3-part
+	// name and refs[0].Table would collapse to "tenant1".
+	e := newTestEngine(t)
+	orig := "RENAME TABLE db.a TO db.b"
+	out, err := SpliceRawTables(e, orig, map[string]string{
+		"db.a": QuoteQualified("testnet", "tenant1.a"),
+		"db.b": QuoteQualified("testnet", "tenant1.b"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Re-parse: the rewritten names must survive as single identifiers, not split.
+	reparsed, perr := e.ParseOne(out)
+	if perr != nil {
+		t.Fatalf("re-parse %q: %v", out, perr)
+	}
+	refs, sub, err := RawTableRefs(e, reparsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub != CmdRename {
+		t.Errorf("sub=%q want %q", sub, CmdRename)
+	}
+	if len(refs) != 2 ||
+		refs[0].DB != "testnet" || refs[0].Table != "tenant1.a" ||
+		refs[1].DB != "testnet" || refs[1].Table != "tenant1.b" {
+		t.Errorf("dotted dynamic name not preserved as single identifier: out=%q refs=%+v", out, refs)
+	}
+}

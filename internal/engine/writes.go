@@ -210,6 +210,14 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 		if _, ok := body["query"].(map[string]any); ok {
 			info.HasViewBody = true
 		}
+	case NodeCommand:
+		// Tier-C: RENAME TABLE / EXCHANGE TABLES / ALTER…UPDATE (and the bare
+		// rejects) parse to an opaque command node {"this":"<raw sql>"} with no
+		// structured table refs. Sub-classify by leading keyword(s) so the
+		// dispatcher (Tasks 7-10) routes to the raw splice path or passes the
+		// statement through to later phases.
+		raw, _ := body["this"].(string)
+		info.Sub = classifyWriteCommand(raw)
 	}
 	writeSlots(kind, body, func(role WriteRole, tbl map[string]any) {
 		info.Slots = append(info.Slots, WriteSlot{Role: role, Target: decodeTableTarget(tbl)})
@@ -492,4 +500,208 @@ func structuredActionRefsTable(payload map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// classifyWriteCommand sub-classifies a raw `command` SQL string by leading
+// keyword(s). Returns CmdNone for non-write commands (USE/SHOW/GRANT/REVOKE/
+// EXISTS/SHOW CREATE) so the dispatcher passes them through to later phases.
+func classifyWriteCommand(sql string) CommandSub {
+	u := strings.ToUpper(strings.TrimSpace(sql))
+	switch {
+	case strings.HasPrefix(u, "RENAME TABLE"):
+		return CmdRename
+	case strings.HasPrefix(u, "EXCHANGE TABLE"): // EXCHANGE TABLES
+		return CmdExchange
+	case strings.HasPrefix(u, "ALTER TABLE") && containsWord(u, "UPDATE"):
+		return CmdAlterUpdate
+	case strings.HasPrefix(u, "OPTIMIZE"), strings.HasPrefix(u, "UNDROP"),
+		strings.HasPrefix(u, "MOVE"), strings.HasPrefix(u, "BACKUP"),
+		strings.HasPrefix(u, "RESTORE"), strings.HasPrefix(u, "KILL"):
+		return CmdBareReject
+	default:
+		return CmdNone
+	}
+}
+
+// containsWord reports whether upper-cased haystack contains word as a
+// whitespace-delimited token (avoids matching UPDATE inside an identifier).
+func containsWord(haystack, word string) bool {
+	for _, f := range strings.Fields(haystack) {
+		if f == word {
+			return true
+		}
+	}
+	return false
+}
+
+// rawToken is one lexer token from Engine.Tokenize. Empirically (probed against
+// Polyglot's ClickHouse tokenizer): plain identifiers are token_type=="VAR";
+// backtick-quoted identifiers are token_type=="QUOTED_IDENTIFIER" with the
+// backticks STRIPPED from text (Text=="weird.name" for `weird.name`) while span
+// still covers the full quoted run; the keywords TABLE/TO/AND/UPDATE/WHERE/RENAME/
+// ALTER and punctuation DOT/COMMA/EQ are their own token types. NOTE: EXCHANGE and
+// TABLES are emitted as VAR (not dedicated keywords), so the TABLE/TABLES boundary
+// is found by case-insensitive TEXT match, not token-type.
+type rawToken struct {
+	TokenType string `json:"token_type"`
+	Text      string `json:"text"`
+	Span      struct {
+		Start int `json:"start"`
+		End   int `json:"end"`
+	} `json:"span"`
+}
+
+// tokenizeRaw runs the engine lexer over sql and decodes the token stream.
+func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
+	toksAST, err := e.Tokenize(sql)
+	if err != nil {
+		return nil, err
+	}
+	var toks []rawToken
+	if err := json.Unmarshal(toksAST, &toks); err != nil {
+		return nil, fmt.Errorf("engine: decode tokens: %w", err)
+	}
+	return toks, nil
+}
+
+// tableRefSpan is one [db.]table name-run located in the raw token stream, with
+// the byte span [Start,End) it occupies in the ORIGINAL SQL (for splicing).
+type tableRefSpan struct {
+	Target TableTarget
+	Start  int
+	End    int
+}
+
+// isNameTok reports whether a token type denotes an identifier name-run element.
+// Plain names lex as VAR; backtick-quoted names lex as QUOTED_IDENTIFIER (with
+// the backticks stripped from .Text — see rawToken). Both can sit in a db/table
+// position.
+func isNameTok(tt string) bool {
+	return tt == "VAR" || tt == "QUOTED_IDENTIFIER"
+}
+
+// scanTableRefs extracts every [db.]table name-run in a table-name position for
+// the command sub-kind:
+//
+//	rename/exchange: every name-run after the TABLE/TABLES keyword is a table
+//	alter_update:    only the single name-run immediately after TABLE
+//
+// A name-run is name (DOT name)?. Non-name tokens (TO/AND/COMMA/keywords)
+// separate runs. The TABLE/TABLES boundary is matched on token TEXT (EXCHANGE
+// TABLES both lex as VAR, so a token-type gate would miss it). For a
+// QUOTED_IDENTIFIER the .Text already has its backticks stripped, so the Target
+// carries the unquoted identifier — matching the handler's unquoted rewrite key.
+func scanTableRefs(toks []rawToken, sub CommandSub) []tableRefSpan {
+	start := 0
+	for i, tk := range toks {
+		if strings.EqualFold(tk.Text, "TABLE") || strings.EqualFold(tk.Text, "TABLES") {
+			start = i + 1
+			break
+		}
+	}
+	var out []tableRefSpan
+	i := start
+	for i < len(toks) {
+		if !isNameTok(toks[i].TokenType) {
+			i++
+			continue
+		}
+		var span tableRefSpan
+		if i+2 < len(toks) && toks[i+1].TokenType == "DOT" && isNameTok(toks[i+2].TokenType) {
+			span.Target = TableTarget{DB: toks[i].Text, Table: toks[i+2].Text}
+			span.Start, span.End = toks[i].Span.Start, toks[i+2].Span.End
+			i += 3
+		} else {
+			span.Target = TableTarget{Table: toks[i].Text}
+			span.Start, span.End = toks[i].Span.Start, toks[i].Span.End
+			i++
+		}
+		out = append(out, span)
+		if sub == CmdAlterUpdate {
+			break
+		}
+	}
+	return out
+}
+
+// RawTableRefs returns the table refs in a tier-C raw command (read-only), in
+// document order, together with the command sub-kind. For a non-rewriteable
+// command (anything other than rename/exchange/alter_update) it returns no refs
+// and the classified sub-kind, so the handler can decide pass-through vs reject.
+func RawTableRefs(e Engine, ast AST) ([]TableTarget, CommandSub, error) {
+	_, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, CmdNone, err
+	}
+	raw, _ := body["this"].(string)
+	sub := classifyWriteCommand(raw)
+	if sub != CmdRename && sub != CmdExchange && sub != CmdAlterUpdate {
+		return nil, sub, nil
+	}
+	toks, err := tokenizeRaw(e, raw)
+	if err != nil {
+		return nil, sub, err
+	}
+	spans := scanTableRefs(toks, sub)
+	out := make([]TableTarget, 0, len(spans))
+	for _, s := range spans {
+		out = append(out, s.Target)
+	}
+	return out, sub, nil
+}
+
+// SpliceRawTables rewrites table-name spans of a tier-C raw command. rewrites
+// maps qualify(origDB,origTable) → new qualified name (the caller is expected to
+// pre-quote dotted/dynamic names via QuoteQualified). Spans are replaced
+// right-to-left so earlier byte offsets stay valid. A ref absent from the map is
+// left untouched.
+func SpliceRawTables(e Engine, originalSQL string, rewrites map[string]string) (string, error) {
+	sub := classifyWriteCommand(originalSQL)
+	// Only the tier-C table-bearing commands have a table-name grammar to splice.
+	// Guard symmetric with RawTableRefs so a misuse on a non-rewriteable command
+	// (e.g. "USE db") can't accidentally splice a same-named identifier.
+	if sub != CmdRename && sub != CmdExchange && sub != CmdAlterUpdate {
+		return originalSQL, nil
+	}
+	toks, err := tokenizeRaw(e, originalSQL)
+	if err != nil {
+		return "", err
+	}
+	spans := scanTableRefs(toks, sub)
+	out := originalSQL
+	for i := len(spans) - 1; i >= 0; i-- {
+		s := spans[i]
+		nv, ok := rewrites[qualifyTT(s.Target)]
+		if !ok {
+			continue
+		}
+		out = out[:s.Start] + nv + out[s.End:]
+	}
+	return out, nil
+}
+
+// qualifyTT builds "db.table" (or bare "table") — the rewrites map key used by
+// SpliceRawTables. Mirrors qualify() in the handler layer; both build the key
+// from UNQUOTED identifier text.
+func qualifyTT(tt TableTarget) string {
+	if tt.DB == "" {
+		return tt.Table
+	}
+	return tt.DB + "." + tt.Table
+}
+
+// QuoteQualified renders "db.table" with each segment backtick-quoted only when
+// needsQuoting (so a dotted dynamic table name like `tenant1.events` splices as a
+// single quoted identifier rather than re-parsing as a multi-part name).
+func QuoteQualified(db, table string) string {
+	q := func(s string) string {
+		if needsQuoting(s) {
+			return "`" + s + "`"
+		}
+		return s
+	}
+	if db == "" {
+		return q(table)
+	}
+	return q(db) + "." + q(table)
 }
