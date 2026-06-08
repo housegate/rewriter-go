@@ -58,8 +58,15 @@ func TestRewriteSelect_dynamicRename(t *testing.T) {
 	if got := resp.GetTableRewrites(); !mapEq(got, want) {
 		t.Fatalf("table_rewrites = %v, want %v", got, want)
 	}
-	if resp.GetSqlAfterRewrite() == "" {
-		t.Fatal("empty sql")
+	// The rewritten table name contains a dot, so it must be a single quoted
+	// identifier in the output (db=testnet, table="tenant1.events"), not a 3-part name.
+	reparsed, perr := e.ParseOne(resp.GetSqlAfterRewrite())
+	if perr != nil {
+		t.Fatalf("re-parse rewritten sql %q: %v", resp.GetSqlAfterRewrite(), perr)
+	}
+	refs, _ := engine.CollectSelectTables(reparsed)
+	if len(refs) != 1 || refs[0].DB != "testnet" || refs[0].Table != "tenant1.events" {
+		t.Fatalf("rewritten table not preserved as single identifier: sql=%q refs=%+v", resp.GetSqlAfterRewrite(), refs)
 	}
 	ats := resp.GetOriginalAccessedTables()
 	if len(ats) != 1 || ats[0].GetOriginalDatabase() != "tenant1" || ats[0].GetPhysicalDatabase() != "testnet" {

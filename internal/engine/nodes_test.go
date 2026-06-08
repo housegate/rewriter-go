@@ -164,6 +164,28 @@ func TestRewriteSelectTables_remoteWithAlias(t *testing.T) {
 	}
 }
 
+func TestRewriteSelectTables_dottedNameIsQuoted(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	out, err := RewriteSelectTables(load(t, "select"), func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "testnet", NewTable: "tenant1.events"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	// Re-parse the output and confirm it is db=testnet, table=tenant1.events
+	// (a single quoted identifier), NOT a 3-part name. Style (quotes) is irrelevant.
+	e, _ := NewPolyglot("")
+	defer e.Close()
+	reparsed, _ := e.ParseOne(got)
+	refs, _ := CollectSelectTables(reparsed)
+	if len(refs) != 1 || refs[0].DB != "testnet" || refs[0].Table != "tenant1.events" {
+		t.Fatalf("dotted name not preserved as single identifier; got SQL %q -> refs %+v", got, refs)
+	}
+}
+
 // sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
 func sortTargets(s []TableTarget) {
 	sort.Slice(s, func(i, j int) bool {
