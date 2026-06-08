@@ -62,6 +62,26 @@ func (f *fakeEngine) Tokenize(string) (engine.AST, error)                       
 func (f *fakeEngine) DiffSQL(string, string) (engine.AST, error)               { return engine.AST("{}"), nil }
 func (f *fakeEngine) Close() error                                             { return nil }
 
+func TestNativeRewrite_selectDynamic(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, _ := engine.NewPolyglot("")
+	defer e.Close()
+	r := New(e, WithOptions(func(account string) []*pb.RewriteOption {
+		return []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+			Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+				DynamicArgs: &pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"tenant1": "testnet"}, Delim: "_"}}}}}
+	}))
+	res, err := r.Rewrite(context.Background(), "SELECT a FROM tenant1.events", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success || len(res.TableRewrites) != 1 {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
 // A parse failure must surface as RewriteResult.code == SyntaxError with a NIL
 // Go error (the Go error channel is reserved for unexpected/internal failures),
 // and SQL must echo the input. Uses a fake engine so the contract is tested
