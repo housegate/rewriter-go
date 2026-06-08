@@ -1113,14 +1113,49 @@ func TestRewriteWrite_renameDictionaryRejected(t *testing.T) {
 func TestRewriteWrite_exchangeDictionariesRejected(t *testing.T) {
 	wantUnsupported(t, "EXCHANGE DICTIONARIES db.d1 AND db.d2")
 }
-func TestRewriteWrite_alterUserRejected(t *testing.T) {
-	wantUnsupported(t, "ALTER USER u IDENTIFIED BY 'p'")
-}
 func TestRewriteWrite_dropDictionaryRejected(t *testing.T) {
 	wantUnsupported(t, "DROP DICTIONARY db.d")
 }
 func TestRewriteWrite_alterDatabaseRejected(t *testing.T) {
 	wantUnsupported(t, "ALTER DATABASE db MODIFY SETTING x = 1")
+}
+func TestRewriteWrite_alterLiveViewRejected(t *testing.T) {
+	wantUnsupported(t, "ALTER LIVE VIEW db.lv REFRESH")
+}
+
+// ---- Access-entity DDL PASS-THROUGH (USER/ROLE/QUOTA/ROW POLICY/SETTINGS
+// PROFILE/NAMED COLLECTION) ----
+//
+// These are a SEPARATE ClickHouse AST type that C++ writes.cc does NOT match;
+// they fall through to the SELECT handler → Success. So our handler must NOT
+// reject them — it must pass through (handled=false) so native regenerates the
+// statement, matching C++. Task 13's broad ALTER /DROP prefixes wrongly rejected
+// these; this is the over-rejection fix. Probe-confirmed node kinds: ALTER USER +
+// DROP USER/ROLE/QUOTA/… land in a `command` node (CmdNone path); ALTER
+// ROLE/QUOTA + CREATE ROLE/QUOTA/ROW POLICY land in a `raw` node (dispatchRawReject
+// pass-through path).
+func TestRewriteWrite_alterUserPassthrough(t *testing.T) {
+	wantPassthrough(t, "ALTER USER u SETTINGS x = 1")
+	wantPassthrough(t, "ALTER USER u IDENTIFIED BY 'p'")
+}
+func TestRewriteWrite_alterRolePassthrough(t *testing.T) {
+	wantPassthrough(t, "ALTER ROLE r SETTINGS x = 1")
+}
+func TestRewriteWrite_alterQuotaPassthrough(t *testing.T) {
+	wantPassthrough(t, "ALTER QUOTA q FOR INTERVAL 1 DAY MAX queries = 1")
+}
+func TestRewriteWrite_dropUserPassthrough(t *testing.T) { wantPassthrough(t, "DROP USER u") }
+func TestRewriteWrite_dropRolePassthrough(t *testing.T) { wantPassthrough(t, "DROP ROLE r") }
+func TestRewriteWrite_dropQuotaPassthrough(t *testing.T) {
+	wantPassthrough(t, "DROP QUOTA q")
+}
+func TestRewriteWrite_dropNamedCollectionPassthrough(t *testing.T) {
+	wantPassthrough(t, "DROP NAMED COLLECTION n")
+}
+func TestRewriteWrite_createRolePassthrough(t *testing.T)  { wantPassthrough(t, "CREATE ROLE r") }
+func TestRewriteWrite_createQuotaPassthrough(t *testing.T) { wantPassthrough(t, "CREATE QUOTA q") }
+func TestRewriteWrite_createRowPolicyPassthrough(t *testing.T) {
+	wantPassthrough(t, "CREATE ROW POLICY p ON db.t")
 }
 
 // REGRESSION guards: Phase-3/4 pass-throughs must NOT be swallowed by the new

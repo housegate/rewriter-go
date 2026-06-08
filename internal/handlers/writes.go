@@ -417,14 +417,28 @@ func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.
 	return resp, true, nil
 }
 
-// dispatchRawReject rejects a `raw` node — DDL polyglot could not structure
-// (CREATE LIVE/WINDOW VIEW, ALTER DATABASE / other non-table ALTER, …). It reads
-// the original SQL (engine.RawSQL) and names the form when recognizable so the
-// message matches the C++ structured guard it stands in for (CREATE LIVE/WINDOW
-// VIEW → writes.cc:266-268; non-table ALTER → writes.cc:481-483). The reject uses
-// StatementType UNSPECIFIED — C++ sets no stmt type on these rejects.
+// dispatchRawReject inspects a `raw` node — DDL polyglot could not structure —
+// and rejects ONLY the forms C++ writes.cc rejects via a structured guard,
+// passing EVERYTHING ELSE through (handled=false) so native regenerates it to
+// Success, matching C++.
+//
+// C++-rejected raw forms:
+//   - CREATE LIVE VIEW / CREATE WINDOW VIEW → writes.cc:266-268
+//   - ALTER DATABASE / ALTER LIVE VIEW (ASTAlterQuery with alter_object != TABLE)
+//     → writes.cc:481-483 ("only ALTER TABLE is supported")
+//
+// Pass-through raw forms (a SEPARATE ClickHouse AST type writes.cc never matches
+// → fall through to SELECT → Success): ACCESS-ENTITY DDL that polyglot routes to
+// a raw node — ALTER ROLE / ALTER QUOTA / ALTER ROW POLICY / ALTER SETTINGS
+// PROFILE / ALTER NAMED COLLECTION, and CREATE ROLE / CREATE QUOTA / CREATE ROW
+// POLICY / CREATE SETTINGS PROFILE / CREATE NAMED COLLECTION (all probe-verified
+// to land in `raw`). These round-trip cleanly through engine.Generate, so the
+// pass-through regenerates the statement intact. Hence the ALTER case is
+// CONSERVATIVE: it rejects raw ALTER only when the object is clearly DATABASE or
+// LIVE VIEW; any other raw ALTER (i.e. access-entity) passes through.
+//
+// On a reject the StatementType is UNSPECIFIED — C++ sets no stmt type on these.
 func dispatchRawReject(e engine.Engine, ast engine.AST) (*pb.RewriteSQLResponse, bool, error) {
-	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 	raw, err := engine.RawSQL(ast)
 	if err != nil {
 		return nil, false, err
@@ -433,13 +447,39 @@ func dispatchRawReject(e engine.Engine, ast engine.AST) (*pb.RewriteSQLResponse,
 	switch {
 	case strings.HasPrefix(u, "CREATE LIVE VIEW"), strings.HasPrefix(u, "CREATE WINDOW VIEW"),
 		strings.HasPrefix(u, "CREATE OR REPLACE LIVE VIEW"), strings.HasPrefix(u, "CREATE OR REPLACE WINDOW VIEW"):
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectUnsupported(resp, "CREATE LIVE VIEW / WINDOW VIEW is not supported")
-	case strings.HasPrefix(u, "ALTER "):
+		return resp, true, nil
+	case strings.HasPrefix(u, "ALTER ") && rawAlterIsNonTableDDL(u):
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectUnsupported(resp, "only ALTER TABLE is supported")
+		return resp, true, nil
 	default:
-		rejectUnsupported(resp, "statement is not supported")
+		// Access-entity DDL (ALTER/CREATE ROLE/QUOTA/ROW POLICY/…) and any other
+		// raw form C++ doesn't reject: pass through → native regenerates → Success.
+		return nil, false, nil
 	}
-	return resp, true, nil
+}
+
+// rawAlterIsNonTableDDL reports whether an uppercased raw ALTER statement targets
+// DATABASE or a LIVE VIEW — the only raw ALTER objects C++ writes.cc rejects
+// (ASTAlterQuery with alter_object == DATABASE, plus the live-view variant).
+// Access-entity ALTERs (ALTER ROLE / QUOTA / ROW POLICY / SETTINGS PROFILE /
+// NAMED COLLECTION) deliberately do NOT match, so they pass through. Matched on
+// the object keyword right after ALTER (with an optional LIVE before VIEW).
+func rawAlterIsNonTableDDL(u string) bool {
+	fields := strings.Fields(u)
+	if len(fields) < 2 || fields[0] != "ALTER" {
+		return false
+	}
+	switch fields[1] {
+	case "DATABASE":
+		return true
+	case "LIVE": // ALTER LIVE VIEW …
+		return len(fields) >= 3 && fields[2] == "VIEW"
+	default:
+		return false
+	}
 }
 
 // dispatchDatabaseOutOfPhase rejects CREATE/DROP DATABASE as not-yet-supported.
