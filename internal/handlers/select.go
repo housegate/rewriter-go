@@ -63,6 +63,11 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 		return nil, err
 	}
 
+	rewritten, err = engine.ForceGlobalForRemoteAsymmetry(rewritten)
+	if err != nil {
+		return nil, err
+	}
+
 	sql, err := e.Generate(rewritten)
 	if err != nil {
 		return nil, err
