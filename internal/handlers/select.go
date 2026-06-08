@@ -34,6 +34,11 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 		return nil, err
 	}
 
+	rewritten, err = applyOptions(rewritten, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	sql, err := e.Generate(rewritten)
 	if err != nil {
 		return nil, err
