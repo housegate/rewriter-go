@@ -740,11 +740,13 @@ func TestClassifyWriteCommand(t *testing.T) {
 		{"  rename table db.a to db.b ", CmdRename},
 		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
 		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
-		// A non-UPDATE ALTER reaching the COMMAND path is a non-table ALTER
-		// (ALTER TABLE ADD/DROP/MODIFY all parse to a structured alter_table node,
-		// never a command), so it rejects — matching C++ "only ALTER TABLE is
-		// supported" (writes.cc:481-483). Task 13 added the broad "ALTER " reject.
-		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdBareReject},
+		// ALTER TABLE ADD/DROP/MODIFY parse to a STRUCTURED alter_table node, never
+		// a command, so classifyWriteCommand never actually sees this string in
+		// production. With the over-rejection fix the broad "ALTER " reject is gone,
+		// so a stray non-UPDATE ALTER TABLE string falls to the CmdNone default
+		// (pass-through) rather than CmdBareReject. The real ADD-COLUMN path is
+		// covered by the structured alter_table handler + corpus, not here.
+		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdNone},
 		{"OPTIMIZE TABLE db.t", CmdBareReject},
 		{"UNDROP TABLE db.t", CmdBareReject},
 		{"MOVE db.t TO SHARD '...'", CmdBareReject},
@@ -764,28 +766,40 @@ func TestClassifyWriteCommand(t *testing.T) {
 	}
 }
 
-// TestClassifyWriteCommand_rejectsDDL (Task 13) covers the command-node DDL forms
-// that polyglot flattens into {"command":{"this":…}} which C++ rejects as
-// UnsupportedStatement (writes.cc RENAME/EXCHANGE database/dictionary guards +
-// the ALTER non-table / DETACH / DROP DICTIONARY reject paths). These must
-// classify as CmdBareReject so the dispatcher rejects them, WITHOUT swallowing the
-// Phase-3/4 pass-throughs (USE/SHOW/GRANT/REVOKE/EXISTS → CmdNone) or the accepted
-// table forms (RENAME TABLE/EXCHANGE TABLES/ALTER TABLE…UPDATE).
+// TestClassifyWriteCommand_rejectsDDL covers the command-node DDL forms that
+// polyglot flattens into {"command":{"this":…}} which C++ writes.cc rejects as
+// UnsupportedStatement — but ONLY table/dictionary/database DDL: DETACH
+// (table/view), DROP DICTIONARY, RENAME DATABASE/DICTIONARY, EXCHANGE
+// DICTIONARIES, OPTIMIZE-family. These must classify as CmdBareReject.
+//
+// ACCESS-ENTITY DDL (USER/ROLE/QUOTA/ROW POLICY/SETTINGS PROFILE/NAMED
+// COLLECTION) is a SEPARATE ClickHouse AST type that writes.cc does NOT match —
+// it falls through to the SELECT handler → Success. So command-node access-entity
+// forms (ALTER USER, DROP USER/ROLE/QUOTA/NAMED COLLECTION, …) must classify as
+// CmdNone (pass-through), NOT a reject. (ALTER ROLE/QUOTA + CREATE ROLE/QUOTA land
+// in a `raw` node, not `command`, so they are covered by the handler's
+// dispatchRawReject pass-through, not here — verified via probe.)
 func TestClassifyWriteCommand_rejectsDDL(t *testing.T) {
 	cases := []struct {
 		sql string
 		sub CommandSub
 	}{
-		// command-node DDL rejects (verified `command.this` shapes via probe):
+		// command-node DDL rejects — table/dictionary/database only (writes.cc):
 		{"DETACH TABLE db.t", CmdBareReject},
 		{"DETACH VIEW db.v", CmdBareReject},
-		{"DROP DICTIONARY db.d", CmdBareReject}, // command-node DROP (DICTIONARY)
+		{"DROP DICTIONARY db.d", CmdBareReject}, // command-node DROP = DICTIONARY only
 		{"RENAME DATABASE db1 TO db2", CmdBareReject},
 		{"RENAME DICTIONARY db.d1 TO db.d2", CmdBareReject},
 		{"EXCHANGE DICTIONARIES db.d1 AND db.d2", CmdBareReject},
-		{"ALTER USER u IDENTIFIED BY 'p'", CmdBareReject}, // ALTER non-table
-		{"ALTER ROLE r SETTINGS x = 1", CmdBareReject},
-		{"ALTER QUOTA q FOR INTERVAL 1 DAY MAX queries = 1", CmdBareReject},
+		// access-entity command-node forms must PASS THROUGH (C++ Success), NOT reject:
+		{"ALTER USER u IDENTIFIED BY 'p'", CmdNone},
+		{"ALTER USER u SETTINGS x = 1", CmdNone},
+		{"DROP USER u", CmdNone},
+		{"DROP ROLE r", CmdNone},
+		{"DROP QUOTA q", CmdNone},
+		{"DROP ROW POLICY p ON db.t", CmdNone},
+		{"DROP SETTINGS PROFILE sp", CmdNone},
+		{"DROP NAMED COLLECTION n", CmdNone},
 		// accepted table forms must NOT regress to a reject:
 		{"RENAME TABLE db.a TO db.b", CmdRename},
 		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},

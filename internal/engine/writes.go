@@ -518,16 +518,32 @@ func structuredActionRefsTable(payload map[string]any) bool {
 }
 
 // classifyWriteCommand sub-classifies a raw `command` SQL string by leading
-// keyword(s). Returns CmdNone for non-write commands (USE/SHOW/GRANT/REVOKE/
-// EXISTS/SHOW CREATE) so the dispatcher passes them through to later phases.
+// keyword(s). It rejects ONLY the table/dictionary/database DDL that C++
+// writes.cc rejects via a structured AST guard; everything else returns CmdNone
+// so the dispatcher passes it through (handled=false) to later phases / the
+// SELECT handler — matching C++, which returns NotAWrite for any kind it doesn't
+// recognize.
+//
+// CRITICAL — access-entity DDL parity: ALTER USER / DROP USER / DROP ROLE /
+// DROP QUOTA / DROP ROW POLICY / DROP SETTINGS PROFILE / DROP NAMED COLLECTION
+// all flatten to a `command` node, but in C++ they are a SEPARATE AST type that
+// writes.cc never matches → they fall through to SELECT → Success. So they MUST
+// classify as CmdNone (pass-through), NOT a reject. That is why the broad "ALTER "
+// and "DROP " reject prefixes are gone: "DROP " is narrowed to "DROP DICTIONARY"
+// (the only command-node DROP C++ rejects), and there is no bare "ALTER " reject
+// at all (the only command-node ALTER C++ rejects, ALTER non-TABLE, lands in a
+// `raw` node — handled by the handler's dispatchRawReject, not here). No
+// access-entity form begins with RENAME / EXCHANGE / DETACH / OPTIMIZE-family, so
+// the retained reject prefixes never catch one (there is no RENAME USER, no
+// EXCHANGE USER; DETACH is only table/view/dictionary). Verified via probe.
 func classifyWriteCommand(sql string) CommandSub {
 	u := strings.ToUpper(strings.TrimSpace(sql))
 	switch {
-	// Accepted table forms FIRST — the broad reject prefixes below (RENAME /
-	// EXCHANGE / ALTER / DROP) would otherwise swallow them.
+	// Accepted table forms FIRST — the reject prefixes below (RENAME / EXCHANGE)
+	// would otherwise swallow them.
 	case strings.HasPrefix(u, "RENAME TABLE"):
 		return CmdRename
-	case strings.HasPrefix(u, "RENAME "): // RENAME DATABASE / RENAME DICTIONARY → reject (writes.cc:565-572)
+	case strings.HasPrefix(u, "RENAME "): // RENAME DATABASE / RENAME DICTIONARY → reject (writes.cc:564-572)
 		return CmdBareReject
 	case strings.HasPrefix(u, "EXCHANGE TABLE"): // EXCHANGE TABLES
 		return CmdExchange
@@ -535,19 +551,21 @@ func classifyWriteCommand(sql string) CommandSub {
 		return CmdBareReject
 	case strings.HasPrefix(u, "ALTER TABLE") && containsWord(u, "UPDATE"):
 		return CmdAlterUpdate
-	case strings.HasPrefix(u, "ALTER "): // ALTER USER/ROLE/QUOTA/… (non-table) → reject (writes.cc:481-483)
-		return CmdBareReject
 	case strings.HasPrefix(u, "DETACH"): // DETACH TABLE/VIEW → reject (writes.cc:383-385)
 		return CmdBareReject
-	case strings.HasPrefix(u, "DROP "): // command-node DROP = DROP DICTIONARY → reject (writes.cc:387-389). DROP TABLE/VIEW/DATABASE are structured nodes, never here.
+	case strings.HasPrefix(u, "DROP DICTIONARY"): // ONLY DICTIONARY → reject (writes.cc:387-389).
+		// DROP TABLE/VIEW/DATABASE are STRUCTURED nodes (never here); DROP
+		// USER/ROLE/QUOTA/ROW POLICY/SETTINGS PROFILE/NAMED COLLECTION are
+		// access-entity DDL C++ passes through → fall to CmdNone default below.
 		return CmdBareReject
 	case strings.HasPrefix(u, "OPTIMIZE"), strings.HasPrefix(u, "UNDROP"),
 		strings.HasPrefix(u, "MOVE"), strings.HasPrefix(u, "BACKUP"),
 		strings.HasPrefix(u, "RESTORE"), strings.HasPrefix(u, "KILL"):
 		return CmdBareReject
 	default:
-		// USE / SHOW / SHOW CREATE / GRANT / REVOKE / EXISTS — not a write this
-		// phase handles → pass through (Phase 3/4).
+		// USE / SHOW / SHOW CREATE / GRANT / REVOKE / EXISTS + ALL access-entity
+		// ALTER/DROP/CREATE command-node forms (ALTER USER, DROP USER/ROLE/QUOTA/…)
+		// — not a write this phase rejects → pass through (Phase 3/4 / SELECT).
 		return CmdNone
 	}
 }
