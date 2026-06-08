@@ -85,7 +85,12 @@ func visitTables(node any, scope map[string]bool, visit func(expr, tbl map[strin
 		}
 		if tbl, ok := n["table"].(map[string]any); ok {
 			tt := decodeTableTarget(tbl)
-			if tt.Table == "" { // column-qualifier false positive — recurse, don't visit
+			if tt.Table == "" {
+				// Column-qualifier false positive: the "table" key here holds a flat
+				// identifier (only name/quoted/trailing_comments), not a real table
+				// descriptor. Recursing is safe because there is no nested
+				// table-expression wrapper inside such a node — no real table will be
+				// re-visited.
 				for _, v := range n {
 					visitTables(v, scope, visit)
 				}
@@ -117,12 +122,29 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 		}
 		// existing tbl["alias"] is left untouched (preserves the user's alias).
 	case ActionRemote:
+		if d.Remote == nil {
+			return // misconfigured decision — leave the table untouched
+		}
 		delete(expr, "table")
 		fn := remoteFunc(d.Remote)
 		if tt.Alias != "" {
-			fn["alias"] = ident(tt.Alias)
+			// Polyglot places the alias on a wrapper node that contains the
+			// function under "this", not directly on the function node itself.
+			// Empirically: `remote(...) AS x` parses as
+			//   expr["alias"] = {"alias":{name:"x",...}, "this":{"function":{...}}}
+			// rather than fn["alias"] = {name:"x",...}.
+			expr["alias"] = map[string]any{
+				"alias":             ident(tt.Alias),
+				"alias_explicit_as": true,
+				"alias_keyword":     "AS",
+				"column_aliases":    []any{},
+				"pre_alias_comments": []any{},
+				"this":              map[string]any{"function": fn},
+				"trailing_comments": []any{},
+			}
+		} else {
+			expr["function"] = fn
 		}
-		expr["function"] = fn
 	case ActionSkip:
 		// no-op
 	}
@@ -133,10 +155,12 @@ func ident(s string) map[string]any {
 	return map[string]any{"name": s, "quoted": false, "trailing_comments": []any{}}
 }
 
+// litStr builds a string-literal argument node; used for addr, user, and password in remote().
 func litStr(s string) map[string]any {
 	return map[string]any{"literal": map[string]any{"literal_type": "string", "value": s}}
 }
 
+// colBare builds a bare identifier argument node; used for db and table in remote(), rendered unquoted.
 func colBare(s string) map[string]any {
 	return map[string]any{"column": map[string]any{
 		"name": ident(s), "table": nil, "join_mark": false, "trailing_comments": []any{},
@@ -157,7 +181,8 @@ func remoteFunc(r *RemoteSpec) map[string]any {
 }
 
 // forkCTEScope copies the parent scope and adds this select's CTE aliases.
-// The returned map MUST be treated read-only: when parent has no new CTEs it is returned by reference (shared with callers up the stack).
+// The returned map MUST be treated read-only: when parent has no new CTEs it
+// is returned by reference (shared with callers up the stack).
 func forkCTEScope(sel map[string]any, parent map[string]bool) map[string]bool {
 	with, ok := sel["with"].(map[string]any)
 	if !ok {
