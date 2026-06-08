@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -558,5 +559,167 @@ func TestRewriteWrite_createViewAccessedMergesBody(t *testing.T) {
 		if ats[i].GetOriginalTable() != w {
 			t.Fatalf("accessed[%d] = %q, want %q (full=%+v)", i, ats[i].GetOriginalTable(), w, ats)
 		}
+	}
+}
+
+// Task 9.1. INSERT INTO db.t (x) VALUES (1), static {db.t→t_phys}. Target
+// rewritten (db preserved); stmt=INSERT; 1 accessed (t); table_rewrites{db.t:db.t_phys}.
+// The original sql is threaded as the 3rd arg (used by the FORMAT-payload splice).
+func TestRewriteWrite_insertValues(t *testing.T) {
+	e := newEngine(t)
+	const src = "INSERT INTO db.t (x) VALUES (1)"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.t": "t_phys"}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_INSERT {
+		t.Fatalf("stmt = %v, want INSERT", resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "INSERT INTO db.t_phys (x) VALUES (1)") {
+		t.Fatalf("sql = %q, want ≈ INSERT INTO db.t_phys (x) VALUES (1)", resp.GetSqlAfterRewrite())
+	}
+	want := map[string]string{"db.t": "db.t_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	if ats := resp.GetOriginalAccessedTables(); len(ats) != 1 || ats[0].GetOriginalTable() != "t" {
+		t.Fatalf("accessed = %+v, want 1 {t}", ats)
+	}
+}
+
+// Task 9.2. INSERT INTO db.t FORMAT JSONEachRow <payload>. The inline data
+// payload lives off-AST; GenerateInsert must splice it back verbatim. The output
+// starts with the rewritten prelude and contains the literal payload. The payload
+// tail is NOT a re-parseable standalone statement, so assert via HasPrefix+Contains
+// rather than sqlSemEq.
+func TestRewriteWrite_insertFormatPreservesPayload(t *testing.T) {
+	e := newEngine(t)
+	const payload = `{"x":1}` + "\n" + `{"x":2}`
+	const src = "INSERT INTO db.t FORMAT JSONEachRow " + payload
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.t": "t_phys"}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_INSERT {
+		t.Fatalf("stmt = %v, want INSERT", resp.GetStatementType())
+	}
+	out := resp.GetSqlAfterRewrite()
+	if !strings.HasPrefix(out, "INSERT INTO db.t_phys FORMAT JSONEachRow") {
+		t.Fatalf("sql = %q, want prefix 'INSERT INTO db.t_phys FORMAT JSONEachRow'", out)
+	}
+	if !strings.Contains(out, payload) {
+		t.Fatalf("sql = %q, want to contain payload %q", out, payload)
+	}
+	want := map[string]string{"db.t": "db.t_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v", got, want)
+	}
+	if ats := resp.GetOriginalAccessedTables(); len(ats) != 1 || ats[0].GetOriginalTable() != "t" {
+		t.Fatalf("accessed = %+v, want 1 {t}", ats)
+	}
+}
+
+// Task 9.3. INSERT INTO db.t SELECT * FROM db.s, static {db.t→t_phys,
+// db.s→s_phys}. C++ parity: only the INSERT target is rewritten — the embedded
+// SELECT source db.s is LEFT db.s (the INSERT handler does not run the SELECT
+// pipeline on insert.query). So db.s is NOT in table_rewrites and accessed is
+// ONLY [t]. Verified empirically: GenerateInsert+applyStructuredSlots produce
+// exactly `INSERT INTO db.t_phys SELECT * FROM db.s`.
+func TestRewriteWrite_insertSelectSourceUntouched(t *testing.T) {
+	e := newEngine(t)
+	const src = "INSERT INTO db.t SELECT * FROM db.s"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.t": "t_phys",
+		"db.s": "s_phys",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_INSERT {
+		t.Fatalf("stmt = %v, want INSERT", resp.GetStatementType())
+	}
+	// Target rewritten, embedded SELECT source untouched (db.s stays db.s).
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "INSERT INTO db.t_phys SELECT * FROM db.s") {
+		t.Fatalf("sql = %q, want ≈ INSERT INTO db.t_phys SELECT * FROM db.s", resp.GetSqlAfterRewrite())
+	}
+	// Only the INSERT target is recorded — the SELECT source is NOT walked.
+	want := map[string]string{"db.t": "db.t_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, want) {
+		t.Fatalf("table_rewrites = %v, want %v (db.s must NOT be rewritten)", got, want)
+	}
+	if ats := resp.GetOriginalAccessedTables(); len(ats) != 1 || ats[0].GetOriginalTable() != "t" {
+		t.Fatalf("accessed = %+v, want exactly 1 {t} (embedded SELECT not walked)", ats)
+	}
+}
+
+// Task 9.4. INSERT INTO FUNCTION remote(...) → table function → UnsupportedStatement
+// with the INSERT-FUNCTION message (C++ writes.cc:504-506). Original sql is threaded.
+func TestRewriteWrite_insertFunctionRejected(t *testing.T) {
+	e := newEngine(t)
+	const src = "INSERT INTO FUNCTION remote('h', d, t) VALUES (1)"
+	ast := mustParse(t, e, src)
+
+	resp, handled, err := RewriteWrite(e, ast, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true (reject is handled)")
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("code = %v, want UnsupportedStatement (%s)", resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetMessage() != "INSERT INTO FUNCTION(...) is not supported" {
+		t.Fatalf("message = %q", resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_INSERT {
+		t.Fatalf("stmt = %v, want INSERT", resp.GetStatementType())
+	}
+}
+
+// Task 9.5. INSERT INTO db.t (x) VALUES (1) with nil opts → passthrough: sql
+// unchanged, no table_rewrites, but access still recorded (1 accessed {t}).
+func TestRewriteWrite_insertPassthrough(t *testing.T) {
+	e := newEngine(t)
+	const src = "INSERT INTO db.t (x) VALUES (1)"
+	ast := mustParse(t, e, src)
+
+	resp, handled, err := RewriteWrite(e, ast, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_INSERT {
+		t.Fatalf("stmt = %v, want INSERT", resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), src) {
+		t.Fatalf("sql = %q, want ≈ %q", resp.GetSqlAfterRewrite(), src)
+	}
+	if len(resp.GetTableRewrites()) != 0 {
+		t.Fatalf("table_rewrites = %v, want empty", resp.GetTableRewrites())
+	}
+	// Passthrough still records access (recordAccessedWrite runs before the mode switch).
+	if ats := resp.GetOriginalAccessedTables(); len(ats) != 1 || ats[0].GetOriginalTable() != "t" {
+		t.Fatalf("accessed = %+v, want 1 {t}", ats)
 	}
 }
