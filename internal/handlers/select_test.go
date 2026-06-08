@@ -111,3 +111,36 @@ func TestRewriteSelect_invalidUnqualified_skipsLeniently(t *testing.T) {
 		t.Fatalf("expected no rewrites, got %v", resp.GetTableRewrites())
 	}
 }
+
+func TestRewriteSelect_cteBodyTableRewritten(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT * FROM c")
+	opts := []*pb.RewriteOption{
+		{Op: pb.RewriteOp_CommonTableExprRewrite, Value: &pb.RewriteOption_CommonTableExprArgs{
+			CommonTableExprArgs: &pb.RewriteCommonTableExprArgs{
+				CteMap: map[string]*pb.RewriteCommonTableExprArgs_CommonTableExpr{
+					"c": {Alias: "c", Sql: "SELECT * FROM tenant1.events"},
+				}}}},
+		{Op: pb.RewriteOp_TableNameRewrite, Value: &pb.RewriteOption_TableNameArgs{
+			TableNameArgs: &pb.RewriteTableNameArgs{DynamicArgs: &pb.RewriteTableDynamicArgs{
+				DatabaseMap: map[string]string{"tenant1": "testnet"}, Delim: "_"}}}},
+	}
+	resp, err := RewriteSelect(e, ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The CTE body's table was rewritten by the same walk:
+	if resp.GetTableRewrites()["tenant1.events"] != "testnet.tenant1.events" {
+		t.Fatalf("cte body table not rewritten: %v", resp.GetTableRewrites())
+	}
+	// The outer `c` reference is scoped out — re-parsing the output yields only
+	// the rewritten body table, never `c` as a physical table:
+	reparsed, perr := e.ParseOne(resp.GetSqlAfterRewrite())
+	if perr != nil {
+		t.Fatalf("re-parse %q: %v", resp.GetSqlAfterRewrite(), perr)
+	}
+	refs, _ := engine.CollectSelectTables(reparsed)
+	if len(refs) != 1 || refs[0].DB != "testnet" || refs[0].Table != "tenant1.events" {
+		t.Fatalf("expected 1 ref {testnet, tenant1.events}, got %+v (sql=%q)", refs, resp.GetSqlAfterRewrite())
+	}
+}
