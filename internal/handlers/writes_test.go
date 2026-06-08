@@ -382,3 +382,181 @@ func TestRewriteWrite_updateDeleteRename(t *testing.T) {
 		}
 	})
 }
+
+// bodyTableRefs re-parses a CREATE VIEW's output SQL and returns the [db.]table
+// refs of its body SELECT. The body rewrite surfaces the SELECT layer's back-alias
+// (the renamed table is aliased back to its original qualified name — verified
+// parity-correct against C++ rewriteEmbeddedViewBody), so a semantic SQL compare
+// must carry that alias. Re-parsing + CollectSelectTables checks the physical
+// table ref directly and is robust to the exact alias rendering.
+func bodyTableRefs(t *testing.T, e engine.Engine, viewSQL string) []engine.TableTarget {
+	t.Helper()
+	ast := mustParse(t, e, viewSQL)
+	body, has, err := engine.ExtractViewBody(ast)
+	if err != nil || !has {
+		t.Fatalf("extract view body from %q: has=%v err=%v", viewSQL, has, err)
+	}
+	refs, err := engine.CollectSelectTables(body)
+	if err != nil {
+		t.Fatalf("collect body tables from %q: %v", viewSQL, err)
+	}
+	return refs
+}
+
+// Task 8.1. CREATE VIEW db.v AS SELECT * FROM db.s, static {db.v→v_phys,
+// db.s→s_phys}. The view NAME and the body table are both rewritten; the body
+// table is back-aliased to "db.s" (SELECT-layer behavior, parity-correct).
+// Both db.v and db.s appear in table_rewrites.
+func TestRewriteWrite_createViewBodyRewritten(t *testing.T) {
+	e := newEngine(t)
+	const src = "CREATE VIEW db.v AS SELECT * FROM db.s"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.v": "v_phys",
+		"db.s": "s_phys",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_CREATE_VIEW {
+		t.Fatalf("stmt = %v, want CREATE_VIEW", resp.GetStatementType())
+	}
+	// Back-aliased want (verified empirically against the SELECT transformer):
+	// the renamed body table carries an alias back to its original qualified name.
+	want := `CREATE VIEW db.v_phys AS SELECT * FROM db.s_phys "db.s"`
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), want) {
+		t.Fatalf("sql = %q, want ≈ %q", resp.GetSqlAfterRewrite(), want)
+	}
+	// Robust cross-check: re-parse output and inspect the body's physical ref.
+	refs := bodyTableRefs(t, e, resp.GetSqlAfterRewrite())
+	if len(refs) != 1 || refs[0].DB != "db" || refs[0].Table != "s_phys" {
+		t.Fatalf("body refs = %+v, want 1 {db, s_phys}", refs)
+	}
+	// Both the view name and the body table are recorded in table_rewrites.
+	wantRewrites := map[string]string{"db.v": "db.v_phys", "db.s": "db.s_phys"}
+	if got := resp.GetTableRewrites(); !mapEq(got, wantRewrites) {
+		t.Fatalf("table_rewrites = %v, want %v", got, wantRewrites)
+	}
+}
+
+// Task 8.2. CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s,
+// static {db.mv→mv2, db.dst→dst2, db.s→s2}. stmt=CREATE_MATERIALIZED_VIEW; the
+// name, the TO target, AND the body table are all rewritten.
+func TestRewriteWrite_createMVToTarget(t *testing.T) {
+	e := newEngine(t)
+	const src = "CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.mv":  "mv2",
+		"db.dst": "dst2",
+		"db.s":   "s2",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW {
+		t.Fatalf("stmt = %v, want CREATE_MATERIALIZED_VIEW", resp.GetStatementType())
+	}
+	want := `CREATE MATERIALIZED VIEW db.mv2 TO db.dst2 AS SELECT * FROM db.s2 "db.s"`
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), want) {
+		t.Fatalf("sql = %q, want ≈ %q", resp.GetSqlAfterRewrite(), want)
+	}
+	// Body physical ref cross-check.
+	refs := bodyTableRefs(t, e, resp.GetSqlAfterRewrite())
+	if len(refs) != 1 || refs[0].DB != "db" || refs[0].Table != "s2" {
+		t.Fatalf("body refs = %+v, want 1 {db, s2}", refs)
+	}
+	// name, TO target, AND body all present in table_rewrites.
+	wantRewrites := map[string]string{
+		"db.mv":  "db.mv2",
+		"db.dst": "db.dst2",
+		"db.s":   "db.s2",
+	}
+	if got := resp.GetTableRewrites(); !mapEq(got, wantRewrites) {
+		t.Fatalf("table_rewrites = %v, want %v", got, wantRewrites)
+	}
+}
+
+// Task 8.3. CREATE MATERIALIZED VIEW where the view NAME rejects (remote): the
+// C++ short-circuits at slot 1, so the TO target's access is NOT recorded and the
+// body is NOT processed. Exactly 1 accessed table (the name), 0 rewrites,
+// UnsupportedStatement.
+func TestRewriteWrite_createViewNameRejectShortCircuits(t *testing.T) {
+	e := newEngine(t)
+	const src = "CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s"
+	ast := mustParse(t, e, src)
+	opts := statOpt(&pb.RewriteTableStaticArgs{
+		RemoteTableMap: map[string]*pb.RewriteTableStaticArgs_RemoteTable{
+			"db.mv": {Addr: "h", Database: "d", Table: "x"}, // view name → remote → reject
+		},
+		TableMap: map[string]string{
+			"db.dst": "dst2", // would rewrite, but never reached
+			"db.s":   "s2",   // body never processed
+		},
+	})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW {
+		t.Fatalf("stmt = %v, want CREATE_MATERIALIZED_VIEW", resp.GetStatementType())
+	}
+	// Short-circuit: only the view name is recorded; TO target NOT recorded.
+	ats := resp.GetOriginalAccessedTables()
+	if len(ats) != 1 || ats[0].GetOriginalTable() != "mv" {
+		t.Fatalf("accessed = %+v, want exactly 1 (db.mv) — TO target must not be recorded", ats)
+	}
+	// No rewrites recorded (rejected before any rename; body never reached).
+	if got := resp.GetTableRewrites(); len(got) != 0 {
+		t.Fatalf("table_rewrites = %v, want empty (rejected before any rewrite)", got)
+	}
+}
+
+// Task 8.4. original_accessed_tables includes the view name (and MV TO target)
+// PLUS the body's accessed tables, in order: name/TO first (write slots, in
+// document order), then the body SELECT's accessed tables.
+func TestRewriteWrite_createViewAccessedMergesBody(t *testing.T) {
+	e := newEngine(t)
+	const src = "CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s"
+	ast := mustParse(t, e, src)
+	// No rename needed to observe accessed ordering; use a benign map so nothing
+	// rejects (all three pass through).
+	opts := statOpt(&pb.RewriteTableStaticArgs{TableMap: map[string]string{
+		"db.mv":  "mv2",
+		"db.dst": "dst2",
+		"db.s":   "s2",
+	}})
+
+	resp, handled, err := RewriteWrite(e, ast, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("handled=%v code=%v (%s)", handled, resp.GetCode(), resp.GetMessage())
+	}
+	ats := resp.GetOriginalAccessedTables()
+	// Expected order: write slots first (name, TO), then body (s).
+	wantOrder := []string{"mv", "dst", "s"}
+	if len(ats) != len(wantOrder) {
+		t.Fatalf("accessed = %+v, want %v", ats, wantOrder)
+	}
+	for i, w := range wantOrder {
+		if ats[i].GetOriginalTable() != w {
+			t.Fatalf("accessed[%d] = %q, want %q (full=%+v)", i, ats[i].GetOriginalTable(), w, ats)
+		}
+	}
+}
