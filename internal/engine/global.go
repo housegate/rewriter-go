@@ -90,8 +90,11 @@ func promoteJoins(sel map[string]any, scope map[string]bool) {
 // "GLOBAL" — but ONLY when that operand is a plain table with no existing alias.
 // A function/subquery left operand cannot carry the modifier (see LIMITATION), so
 // it is left untouched.
-// This also means a join whose immediate left operand is a function (e.g. the
-// middle of `local JOIN remote(...) JOIN local2`) is left un-GLOBAL.
+//
+// In multi-join chains where an intermediate function operand blocks marking
+// (e.g. local JOIN remote JOIN local2), join[1] cannot be marked even if
+// accumulators detect asymmetry — this is a silent no-op, not corruption.
+// Registered with the differential harness.
 func markJoinGlobalAt(sel map[string]any, joinIdx int) {
 	left := leftTableByIndex(sel, joinIdx)
 	if left == nil || left["alias"] != nil {
