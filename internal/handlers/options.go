@@ -10,6 +10,8 @@ import (
 // applyOptions applies LIMIT/OFFSET/SETTINGS options to the AST's outermost select.
 // TableNameRewrite is handled by the Task-7 table walk (ignored here);
 // CommonTableExprRewrite is Task 9.
+//
+// Note: each engine setter re-decodes/re-encodes the AST; for a single statement the cost is negligible. Revisit if more outer-select mutations are added.
 func applyOptions(ast engine.AST, opts []*pb.RewriteOption) (engine.AST, error) {
 	var (
 		forceLimit   *int64
@@ -42,7 +44,7 @@ func applyOptions(ast engine.AST, opts []*pb.RewriteOption) (engine.AST, error) 
 		if ast, err = engine.SetLimit(ast, *forceLimit); err != nil {
 			return nil, err
 		}
-	} else if replaceLimit != nil {
+	} else if replaceLimit != nil { // force wins over replace when both are present (force is applied unconditionally above)
 		cur, ok, err := engine.GetLimit(ast)
 		if err != nil {
 			return nil, err
@@ -75,6 +77,7 @@ func settingToEngine(s *pb.RewriteSettingsArgs_Setting) engine.Setting {
 	case *pb.RewriteSettingsArgs_Setting_StringValue:
 		return engine.Setting{Key: s.GetKey(), LiteralType: "string", Value: s.GetStringValue()}
 	case *pb.RewriteSettingsArgs_Setting_BoolValue:
+		// ClickHouse renders bool settings numerically, e.g. SETTINGS x = 1
 		v := "0"
 		if s.GetBoolValue() {
 			v = "1"
