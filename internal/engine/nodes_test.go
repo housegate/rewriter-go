@@ -98,7 +98,7 @@ func TestRewriteSelectTables_renameAndSetDB(t *testing.T) {
 	}
 	got := genOf(t, out)
 	t.Logf("RENAME got: %q", got)
-	want := "SELECT a FROM phys.t_x WHERE x IN (1, 2)"
+	want := "SELECT a FROM phys.t_x \"db.t\" WHERE x IN (1, 2)"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
@@ -118,7 +118,7 @@ func TestRewriteSelectTables_remote(t *testing.T) {
 	}
 	got := genOf(t, out)
 	t.Logf("REMOTE got: %q", got)
-	want := "SELECT a FROM remote('h:9000', phys, t_x, 'u', 'p') WHERE x IN (1, 2)"
+	want := "SELECT a FROM remote('h:9000', phys, t_x, 'u', 'p') AS \"db.t\" WHERE x IN (1, 2)"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}

@@ -114,7 +114,22 @@ func visitTables(node any, scope map[string]bool, visit func(expr, tbl map[strin
 	}
 }
 
+// originName returns the qualified original table name — "db.table" when the
+// source had a db prefix, or bare "table" when it did not. This is the value
+// C++ passes to setAlias when the user supplied no alias (origin_table_name /
+// origin_full_name in ASTTransformers.cc:157,179,192 and select.cc:201,225).
+func originName(tt TableTarget) string {
+	if tt.DB != "" {
+		return tt.DB + "." + tt.Table
+	}
+	return tt.Table
+}
+
 // applyDecision mutates the table-expression wrapper `expr` (expr["table"]==tbl) per d.
+// When the user supplied no alias, a back-alias equal to the original qualified name is
+// added to keep qualified column references (e.g. t.col) and result-column names stable
+// after renaming — matching ASTReplaceTransformer::transform (ASTTransformers.cc:154-192)
+// and dynamicRewriteWalk (select.cc:198-225).
 func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 	switch d.Action {
 	case ActionRename:
@@ -122,30 +137,38 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 		if d.NewDB != "" {
 			tbl["schema"] = ident(d.NewDB)
 		}
-		// existing tbl["alias"] is left untouched (preserves the user's alias).
+		if tt.Alias != "" {
+			// User alias already sits in tbl["alias"] — leave it untouched.
+		} else {
+			// Back-alias to the original qualified name so qualified column refs stay valid.
+			tbl["alias"] = ident(originName(tt))
+		}
 	case ActionRemote:
 		if d.Remote == nil {
 			return // misconfigured decision — leave the table untouched
 		}
 		delete(expr, "table")
 		fn := remoteFunc(d.Remote)
-		if tt.Alias != "" {
-			// Polyglot places the alias on a wrapper node that contains the
-			// function under "this", not directly on the function node itself.
-			// Empirically: `remote(...) AS x` parses as
-			//   expr["alias"] = {"alias":{name:"x",...}, "this":{"function":{...}}}
-			// rather than fn["alias"] = {name:"x",...}.
-			expr["alias"] = map[string]any{
-				"alias":             ident(tt.Alias),
-				"alias_explicit_as": true,
-				"alias_keyword":     "AS",
-				"column_aliases":    []any{},
-				"pre_alias_comments": []any{},
-				"this":              map[string]any{"function": fn},
-				"trailing_comments": []any{},
-			}
-		} else {
-			expr["function"] = fn
+		// The alias for a remote() always goes on the wrapper node (not the function
+		// itself). Use the user alias when present; otherwise back-alias to the original
+		// qualified name (mirrors ASTReplaceTransformer::transform, ASTTransformers.cc:175-179).
+		aliasName := tt.Alias
+		if aliasName == "" {
+			aliasName = originName(tt)
+		}
+		// Polyglot places the alias on a wrapper node that contains the
+		// function under "this", not directly on the function node itself.
+		// Empirically: `remote(...) AS x` parses as
+		//   expr["alias"] = {"alias":{name:"x",...}, "this":{"function":{...}}}
+		// rather than fn["alias"] = {name:"x",...}.
+		expr["alias"] = map[string]any{
+			"alias":              ident(aliasName),
+			"alias_explicit_as":  true,
+			"alias_keyword":      "AS",
+			"column_aliases":     []any{},
+			"pre_alias_comments": []any{},
+			"this":               map[string]any{"function": fn},
+			"trailing_comments":  []any{},
 		}
 	case ActionSkip:
 		// no-op

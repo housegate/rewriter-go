@@ -6,7 +6,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"tenant1.events": "testnet.tenant1.events"},
     "want_accessed": [{"original_database": "tenant1", "original_table": "events", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false}],
-    "want_sql": "SELECT a FROM testnet.\"tenant1.events\""
+    "want_sql": "SELECT a FROM testnet.\"tenant1.events\" \"tenant1.events\""
   },
   {
     "name": "dynamic_unqualified_no_context_lenient",
@@ -24,7 +24,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"db.t": "db.t2"},
     "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
-    "want_sql": "SELECT a FROM db.t2"
+    "want_sql": "SELECT a FROM db.t2 \"db.t\""
   },
   {
     "name": "static_remote_table",
@@ -33,7 +33,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"db.r": "pd.rt"},
     "want_accessed": [{"original_database": "db", "original_table": "r", "logical_database": "", "physical_database": "pd", "is_remote": true}],
-    "want_sql": "SELECT a FROM remote('h:9000', pd, rt, 'u', 'p')"
+    "want_sql": "SELECT a FROM remote('h:9000', pd, rt, 'u', 'p') AS \"db.r\""
   },
   {
     "name": "cte_alias_not_rewritten",
@@ -78,7 +78,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"tenant1.events": "testnet.tenant1.events"},
     "want_failed_cte_aliases": [],
-    "want_sql": "WITH c AS (SELECT * FROM testnet.\"tenant1.events\") SELECT * FROM c"
+    "want_sql": "WITH c AS (SELECT * FROM testnet.\"tenant1.events\" \"tenant1.events\") SELECT * FROM c"
   },
   {
     "name": "static_unmatched_passthrough",
@@ -96,7 +96,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"db.w": "pw.wt"},
     "want_accessed": [{"original_database": "db", "original_table": "w", "logical_database": "", "physical_database": "pw", "is_remote": false}],
-    "want_sql": "SELECT a FROM pw.wt"
+    "want_sql": "SELECT a FROM pw.wt \"db.w\""
   },
   {
     "name": "limit_offset",
