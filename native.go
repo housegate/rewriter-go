@@ -51,12 +51,31 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	}
 	resp.StatementType = r.classify(ast)
 
+	// Compute the account-derived rewrite policy ONCE; shared by the write and
+	// SELECT paths below (nil when no options builder is injected → round-trip).
+	var opts []*pb.RewriteOption
+	if r.options != nil {
+		opts = r.options(account)
+	}
+
+	// Phase 2: route writes (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME/EXCHANGE/
+	// views, + bare-rejects, + out-of-phase CREATE/DROP DATABASE) before SELECT.
+	if wresp, handled, werr := handlers.RewriteWrite(r.engine, ast, sql, opts); werr != nil {
+		return RewriteResult{}, werr // unexpected/internal → fail-open Go error
+	} else if handled {
+		// Design §8: RewriteResult.SQL must always be runnable — on a non-Success
+		// (rejected) write, echo the original input so the caller can forward it.
+		if wresp.GetCode() != pb.RewriteCode_Success && wresp.GetSqlAfterRewrite() == "" {
+			wresp.SqlAfterRewrite = sql
+		}
+		r.mu.Lock()
+		r.last = &callContext{sql: sql, account: account}
+		r.mu.Unlock()
+		return resultFromPB(wresp), nil
+	}
+
 	// Phase 1: route SELECT to the real handler; everything else stays pass-through.
 	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect {
-		var opts []*pb.RewriteOption
-		if r.options != nil {
-			opts = r.options(account)
-		}
 		hresp, herr := handlers.RewriteSelect(r.engine, ast, opts)
 		if herr != nil {
 			return RewriteResult{}, herr // unexpected/internal → fail-open Go error
