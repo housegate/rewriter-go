@@ -34,7 +34,8 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return dispatchSingle(e, ast, info, sel, pb.StatementType_STATEMENT_TYPE_DELETE)
 	case engine.NodeCreateView:
 		return dispatchView(e, ast, info, opts, sel)
-	// case engine.NodeInsert:               → Task 9
+	case engine.NodeInsert:
+		return dispatchInsert(e, ast, sql, info, sel)
 	// case engine.NodeCommand:              → Task 10
 	// case engine.NodeCreateDB, NodeDropDB: → Task 10
 	default:
@@ -245,6 +246,40 @@ func dispatchView(e engine.Engine, ast engine.AST, info engine.WriteInfo, opts [
 		return nil, false, err
 	}
 	resp.SqlAfterRewrite = sql
+	return resp, true, nil
+}
+
+// dispatchInsert ports C++ handleWriteQuery's INSERT block (writes.cc:503-537).
+// It rejects the two unrewriteable forms first — INSERT INTO FUNCTION(...) and a
+// missing target table — then rewrites the SINGLE insert target via the shared
+// applyStructuredSlots (which records access + table_rewrites and short-circuits
+// on a remote/invalid reject). The embedded SELECT of an INSERT…SELECT is NOT
+// walked: only insert.table is a slot, so its source stays as written (C++ only
+// rewrites insert_query->table). GenerateInsert regenerates the prelude and, for
+// a FORMAT data clause, splices the original inline payload back verbatim (a plain
+// VALUES / INSERT…SELECT has no payload tail and just round-trips through Generate).
+func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_INSERT)
+	if info.AsTableFunction {
+		rejectUnsupported(resp, "INSERT INTO FUNCTION(...) is not supported")
+		return resp, true, nil
+	}
+	if info.MissingTable {
+		rejectUnsupported(resp, "INSERT target table is missing")
+		return resp, true, nil
+	}
+	rewritten, ok, err := applyStructuredSlots(ast, info, sel, resp)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return resp, true, nil // reject populated by applyStructuredSlots
+	}
+	out, err := engine.GenerateInsert(e, sql, rewritten)
+	if err != nil {
+		return nil, false, err
+	}
+	resp.SqlAfterRewrite = out
 	return resp, true, nil
 }
 
