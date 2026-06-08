@@ -40,6 +40,28 @@ func TestApplyOptions_replaceLimitThreshold(t *testing.T) {
 	}
 }
 
+func TestApplyOptions_settings(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT a FROM db.t")
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_SettingsRewrite,
+		Value: &pb.RewriteOption_SettingsArgs{SettingsArgs: &pb.RewriteSettingsArgs{
+			Settings: []*pb.RewriteSettingsArgs_Setting{
+				{Key: "max_threads", Value: &pb.RewriteSettingsArgs_Setting_IntValue{IntValue: 4}},
+				{Key: "log_comment", Value: &pb.RewriteSettingsArgs_Setting_StringValue{StringValue: "hi"}},
+			}}}}}
+	out, err := applyOptions(ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.Generate(out)
+	// number setting renders without quotes; string setting renders with single quotes.
+	// Multiple settings are separated by ", ".
+	want := "SELECT a FROM db.t SETTINGS max_threads = 4, log_comment = 'hi'"
+	if got != want {
+		t.Fatalf("settings got %q want %q", got, want)
+	}
+}
+
 func TestApplyOptions_noOp(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("SELECT a FROM db.t WHERE x IN (1, 2)")
