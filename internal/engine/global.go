@@ -19,6 +19,8 @@ var remoteFuncNames = map[string]bool{
 // NOT synthesizable (an alias there renders as `AS GLOBAL`, corrupting the query),
 // so such joins are left un-GLOBAL — a known divergence registered with the
 // differential harness.
+// (Task 11 allow-lists: function-left GLOBAL joins, and any GLOBAL the C++ emits
+// that polyglot cannot represent.)
 func ForceGlobalForRemoteAsymmetry(ast AST) (AST, error) {
 	var root map[string]any
 	if err := json.Unmarshal(ast, &root); err != nil {
@@ -88,6 +90,8 @@ func promoteJoins(sel map[string]any, scope map[string]bool) {
 // "GLOBAL" — but ONLY when that operand is a plain table with no existing alias.
 // A function/subquery left operand cannot carry the modifier (see LIMITATION), so
 // it is left untouched.
+// This also means a join whose immediate left operand is a function (e.g. the
+// middle of `local JOIN remote(...) JOIN local2`) is left un-GLOBAL.
 func markJoinGlobalAt(sel map[string]any, joinIdx int) {
 	left := leftTableByIndex(sel, joinIdx)
 	if left == nil || left["alias"] != nil {
@@ -122,11 +126,14 @@ func leftTableByIndex(sel map[string]any, joinIdx int) map[string]any {
 	return nil
 }
 
-// promoteINs: when the select's FROM has a remote source, set in.global=true on
+// promoteINs: when the select's FROM or JOINs has a remote source, set in.global=true on
 // any IN-family node (outside FROM/JOINS/WITH) whose RHS has a local source.
 // select.cc:550-562 + forceGlobalInWalk:474-497.
+//
+// "Remote source present" considers the whole table list (FROM + JOINs),
+// matching the C++ which tests subtreeHasRemoteSource(tables).
 func promoteINs(sel map[string]any, scope map[string]bool) {
-	if !subtreeHasRemoteSource(sel["from"]) {
+	if !subtreeHasRemoteSource(sel["from"]) && !subtreeHasRemoteSource(sel["joins"]) {
 		return
 	}
 	for k, v := range sel {
