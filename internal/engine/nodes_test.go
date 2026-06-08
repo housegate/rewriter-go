@@ -211,6 +211,34 @@ func TestLimitOps(t *testing.T) {
 	}
 }
 
+func TestInjectCTEs(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	defer e.Close()
+	body, err := e.ParseOne("SELECT * FROM db.src")
+	if err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	out, err := InjectCTEs(load(t, "select"), map[string]AST{"c": body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	t.Logf("InjectCTEs got: %q", got)
+	want := "WITH c AS (SELECT * FROM db.src) SELECT a FROM db.t WHERE x IN (1, 2)"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
 // sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
 func sortTargets(s []TableTarget) {
 	sort.Slice(s, func(i, j int) bool {

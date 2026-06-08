@@ -21,6 +21,30 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 	}
 	sel := nameresolve.FindActive(opts)
 
+	// CTE injection (CommonTableExprRewrite): parse + inject bodies before the
+	// table walk so the bodies' tables are rewritten and the aliases are scoped.
+	bodies := map[string]engine.AST{}
+	for _, o := range opts {
+		if o.GetOp() != pb.RewriteOp_CommonTableExprRewrite {
+			continue
+		}
+		for alias, cte := range o.GetCommonTableExprArgs().GetCteMap() {
+			body, perr := e.ParseOne(cte.GetSql())
+			if perr != nil {
+				resp.FailedCteAliases = append(resp.FailedCteAliases, alias)
+				continue
+			}
+			bodies[alias] = body
+		}
+	}
+	if len(bodies) > 0 {
+		var ierr error
+		if ast, ierr = engine.InjectCTEs(ast, bodies); ierr != nil {
+			return nil, ierr
+		}
+	}
+	sort.Strings(resp.FailedCteAliases) // deterministic order
+
 	originals, err := engine.CollectSelectTables(ast)
 	if err != nil {
 		return nil, err
