@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -13,12 +14,11 @@ import (
 // the same contract as RewriteWrite. native.go calls it after RewriteWrite and
 // before the SELECT/pass-through fallback.
 //
-// Incremental wiring (Phase-3 Task 3): only USE is dispatched here today. The
-// CREATE DATABASE / DROP DATABASE branches land in Task 6 and the SHOW TABLES /
-// SHOW DATABASES branches in Tasks 4-5; until then those kinds fall through
-// (handled=false) so nothing regresses (Phase-2 RewriteWrite still rejects
-// create/drop-db; SHOW passes through; native routing to RewriteDBLevel is wired
-// in Task 7).
+// Incremental wiring (Phase-3): USE / SHOW TABLES / SHOW DATABASES are dispatched
+// here today (Tasks 3-5). The CREATE DATABASE / DROP DATABASE branches land in
+// Task 6; until then those kinds fall through (handled=false) so nothing
+// regresses (Phase-2 RewriteWrite still rejects create/drop-db; native routing to
+// RewriteDBLevel is wired in Task 7).
 func RewriteDBLevel(e engine.Engine, ast engine.AST, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, bool, error) {
 	kind, err := engine.NodeKind(ast)
 	if err != nil {
@@ -39,7 +39,7 @@ func RewriteDBLevel(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewr
 		}
 		if info.Kind == engine.DBShow {
 			if info.ShowWhat == "DATABASES" {
-				return nil, false, nil // SHOW DATABASES → Task 5 (falls through for now)
+				return dispatchShowDatabases(e, ast, sql, info, dyn)
 			}
 			return dispatchShowTables(e, ast, sql, info, dyn)
 		}
@@ -163,6 +163,64 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	resp.SqlAfterRewrite = "SELECT multiIf(startsWith(name, '" + ep + "'), substring(name, length('" + ep + "') + 1), name) AS name FROM (SELECT name FROM " + source + " WHERE database = '" + ephys + "' AND startsWith(name, '" + ep + "'))"
 	recordDatabaseRewrite(resp, logical, physical)
 	return resp, true, nil
+}
+
+// dispatchShowDatabases ports show_databases.cc handleShowDatabasesQuery. With no
+// dynamic_args it passes through. Otherwise it enumerates the LOGICAL database
+// names from database_map (sorted by logical name, since protobuf map order is
+// unspecified) as a UNION ALL of synthetic `SELECT '<logical>' AS name` rows.
+// Trust anchor: an entry is surfaced only when its physical DB is declared in
+// known_physical_databases — otherwise it is skipped (no subquery, no
+// database_rewrites entry), and physical names never leak to the caller. When no
+// entry survives, an empty-body sentinel (a SELECT of the empty string with
+// WHERE 0) is used. An optional outer LIKE/ILIKE clause filters the logical names.
+func dispatchShowDatabases(e engine.Engine, ast engine.AST, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
+	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES)
+	if dyn == nil {
+		return passthroughDB(e, ast, sql, resp)
+	}
+	// Sort database_map by logical (protobuf map order is unspecified).
+	type ent struct{ logical, physical string }
+	var entries []ent
+	for l, p := range dyn.GetDatabaseMap() {
+		entries = append(entries, ent{l, p})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].logical < entries[j].logical })
+
+	known := map[string]bool{}
+	for _, p := range dyn.GetKnownPhysicalDatabases() {
+		known[p] = true
+	}
+	var subqueries []string
+	for _, en := range entries {
+		if !known[en.physical] {
+			continue // trust anchor: physical must be declared known
+		}
+		subqueries = append(subqueries, "SELECT '"+escapeSQLLiteral(en.logical)+"' AS name")
+		recordDatabaseRewrite(resp, en.logical, en.physical)
+	}
+	body := "SELECT '' AS name WHERE 0"
+	if len(subqueries) > 0 {
+		body = strings.Join(subqueries, " UNION ALL ")
+	}
+	resp.SqlAfterRewrite = "SELECT name FROM (" + body + ")" + buildLikeClause(info) + " ORDER BY name"
+	return resp, true, nil
+}
+
+// buildLikeClause renders " WHERE name <op> '<pat>'" or "" when no LIKE. Mirrors
+// the C++ buildLikeClause (show_databases.cc:20-29).
+func buildLikeClause(info engine.DBLevelInfo) string {
+	if !info.HasLike {
+		return ""
+	}
+	op := "LIKE"
+	if info.LikeCaseInsensitive {
+		op = "ILIKE"
+	}
+	if info.LikeNot {
+		op = "NOT " + op
+	}
+	return " WHERE name " + op + " '" + escapeSQLLiteral(info.Like) + "'"
 }
 
 // escapeSQLLiteral doubles every single quote for embedding inside a single-quoted
