@@ -473,3 +473,67 @@ func TestNativeRewrite_selectAndWriteStillWork(t *testing.T) {
 		t.Fatalf("DROP sql = %q, want ≈ DROP TABLE db.t_phys", drop.SQL)
 	}
 }
+
+func TestNativeRewrite_phase4(t *testing.T) {
+	e := newEngine(t)
+	optFn := func(string) []*pb.RewriteOption {
+		return []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+			Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+				DynamicArgs: &pb.RewriteTableDynamicArgs{
+					DatabaseMap:            map[string]string{"logical1": "phys1"},
+					KnownPhysicalDatabases: []string{"phys1"},
+					Delim:                  "_",
+				}}}}}
+	}
+	r := New(e, WithOptions(optFn))
+	defer r.Close()
+
+	t.Run("exists table rewritten", func(t *testing.T) {
+		res, err := r.Rewrite(context.Background(), "EXISTS logical1.t", "acct")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_EXISTS_TABLE {
+			t.Fatalf("code=%v stmt=%v", res.Code, res.StatementType)
+		}
+		if res.SQL != "EXISTS TABLE phys1.`logical1.t`" {
+			t.Errorf("sql=%q", res.SQL)
+		}
+	})
+
+	t.Run("show create no longer mis-stamped", func(t *testing.T) {
+		res, err := r.Rewrite(context.Background(), "SHOW CREATE TABLE logical1.t", "acct")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.StatementType != pb.StatementType_STATEMENT_TYPE_SHOW_CREATE_TABLE {
+			t.Errorf("stmt=%v", res.StatementType)
+		}
+		if res.SQL != "SHOW CREATE TABLE phys1.`logical1.t`" {
+			t.Errorf("sql=%q", res.SQL)
+		}
+	})
+
+	t.Run("grant produces deltas + marker", func(t *testing.T) {
+		res, err := r.Rewrite(context.Background(), "GRANT SELECT ON logical1.t TO u", "acct")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_GRANT {
+			t.Fatalf("code=%v stmt=%v", res.Code, res.StatementType)
+		}
+		if res.SQL != "SELECT 'GRANT SELECT ON logical1.t TO u' AS gstmt" || len(res.PrivilegesDeltas) != 1 {
+			t.Errorf("sql=%q deltas=%d", res.SQL, len(res.PrivilegesDeltas))
+		}
+	})
+
+	t.Run("grant reject echoes input (design §8)", func(t *testing.T) {
+		res, _ := r.Rewrite(context.Background(), "GRANT SELECT ON *.* TO u", "acct")
+		if res.Code != pb.RewriteCode_UnsupportedStatement {
+			t.Fatalf("code=%v", res.Code)
+		}
+		if res.SQL != "GRANT SELECT ON *.* TO u" {
+			t.Errorf("sql=%q want input echo", res.SQL)
+		}
+	})
+}

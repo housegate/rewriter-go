@@ -45,10 +45,9 @@ func RewriteDBLevel(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewr
 			}
 			if info.ShowWhat == "CREATE" {
 				// SHOW CREATE {TABLE|DATABASE|VIEW|...} is NOT an ASTShowTablesQuery in
-				// ClickHouse — C++ routes it to a dedicated show_create handler (Phase 4),
-				// not show_tables. Don't let dispatchShowTables mis-stamp it SHOW_TABLES;
-				// defer so the native pass-through classifies it (SHOW_CREATE_TABLE) until
-				// the Phase-4 handler lands.
+				// ClickHouse — don't let dispatchShowTables mis-stamp it SHOW_TABLES.
+				// Defer so native routes it to RewriteExistsShowCreate (Phase 4), which
+				// classifies it as SHOW_CREATE_TABLE and rewrites the single target.
 				return nil, false, nil
 			}
 			return dispatchShowTables(e, ast, sql, info, dyn)
