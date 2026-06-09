@@ -71,6 +71,12 @@ func (f *fakeEngine) ParseOne(sql string) (engine.AST, error) {
 	}
 	return engine.AST(`{"select":{}}`), nil
 }
+func (f *fakeEngine) ParseGeneric(sql string) (engine.AST, error) {
+	if f.parseErr != nil {
+		return nil, f.parseErr
+	}
+	return engine.AST(`{"select":{}}`), nil
+}
 func (f *fakeEngine) Generate(ast engine.AST) (string, error) { return "GENERATED", nil }
 func (f *fakeEngine) RenameTables(a engine.AST, m map[string]string) (engine.AST, error) {
 	return a, nil

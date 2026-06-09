@@ -22,6 +22,13 @@ func (f *fakeEngine) ParseOne(sql string) (AST, error) {
 	b, _ := json.Marshal(map[string]string{"sql": sql})
 	return AST(b), nil
 }
+func (f *fakeEngine) ParseGeneric(sql string) (AST, error) {
+	if f.parseErr[sql] {
+		return nil, errFakeParse
+	}
+	b, _ := json.Marshal(map[string]string{"sql": sql})
+	return AST(b), nil
+}
 func (f *fakeEngine) Generate(ast AST) (string, error) {
 	var head struct {
 		SQL string `json:"sql"`

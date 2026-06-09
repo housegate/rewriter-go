@@ -39,6 +39,14 @@ func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
 	return AST(ast), nil
 }
 
+func (e *polyglotEngine) ParseGeneric(sql string) (AST, error) {
+	ast, err := e.c.ParseOne(sql, "generic")
+	if err != nil {
+		return nil, fmt.Errorf("engine: parse(generic): %w", err)
+	}
+	return AST(ast), nil
+}
+
 // Generate takes a single-statement AST (from ParseOne / RenameTables /
 // QualifyTables — all produce single objects). The polyglot Generate call
 // expects an array, so we wrap and unwrap.
