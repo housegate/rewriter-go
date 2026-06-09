@@ -41,9 +41,9 @@ type tableWithDBJSON struct {
 	Table    string `json:"table"`
 }
 type staticJSON struct {
-	TableMap             map[string]string            `json:"table_map"`
-	RemoteTableMap       map[string]remoteTableJSON   `json:"remote_table_map"`
-	TableWithDatabaseMap map[string]tableWithDBJSON   `json:"table_with_database_map"`
+	TableMap             map[string]string          `json:"table_map"`
+	RemoteTableMap       map[string]remoteTableJSON `json:"remote_table_map"`
+	TableWithDatabaseMap map[string]tableWithDBJSON `json:"table_with_database_map"`
 }
 type accessedJSON struct {
 	OriginalDatabase string `json:"original_database"`
@@ -111,9 +111,9 @@ func (c selectCase) options() []*pb.RewriteOption {
 }
 
 var codeByName = map[string]pb.RewriteCode{
-	"Success":              pb.RewriteCode_Success,
-	"SyntaxError":          pb.RewriteCode_SyntaxError,
-	"UnsupportedStatement": pb.RewriteCode_UnsupportedStatement,
+	"Success":               pb.RewriteCode_Success,
+	"SyntaxError":           pb.RewriteCode_SyntaxError,
+	"UnsupportedStatement":  pb.RewriteCode_UnsupportedStatement,
 	"InvalidRewriteRequest": pb.RewriteCode_InvalidRewriteRequest,
 }
 
