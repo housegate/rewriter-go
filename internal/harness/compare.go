@@ -47,6 +47,9 @@ func Compare(got, want *pb.RewriteSQLResponse, semanticEq SemanticEq) Diff {
 	if !reflect.DeepEqual(got.GetFailedCteAliases(), want.GetFailedCteAliases()) {
 		add("failed_cte_aliases", got.GetFailedCteAliases(), want.GetFailedCteAliases())
 	}
+	if !privilegeDeltasEqual(got.GetPrivilegesDeltas(), want.GetPrivilegesDeltas()) {
+		add("privileges_deltas", got.GetPrivilegesDeltas(), want.GetPrivilegesDeltas())
+	}
 
 	gs, ws := got.GetSqlAfterRewrite(), want.GetSqlAfterRewrite()
 	if semanticEq == nil {
@@ -59,6 +62,42 @@ func Compare(got, want *pb.RewriteSQLResponse, semanticEq SemanticEq) Diff {
 		add("sql_after_rewrite(semantic)", gs, ws)
 	}
 	return d
+}
+
+// privilegeDeltasEqual compares two PrivilegeDelta lists field-by-field (proto
+// messages can't be reflect.DeepEqual'd — they carry unexported state). Order is
+// significant: the per-privilege fan-out preserves source order.
+func privilegeDeltasEqual(a, b []*pb.PrivilegeDelta) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.GetAction() != y.GetAction() || x.GetScope() != y.GetScope() ||
+			x.GetOriginalDatabase() != y.GetOriginalDatabase() ||
+			x.GetLogicalDatabase() != y.GetLogicalDatabase() ||
+			x.GetPhysicalDatabase() != y.GetPhysicalDatabase() ||
+			x.GetOriginalTable() != y.GetOriginalTable() ||
+			x.GetPhysicalTable() != y.GetPhysicalTable() ||
+			x.GetGrantOption() != y.GetGrantOption() ||
+			!reflect.DeepEqual(x.GetPrivileges(), y.GetPrivileges()) ||
+			!granteesEqual(x.GetGrantees(), y.GetGrantees()) {
+			return false
+		}
+	}
+	return true
+}
+
+func granteesEqual(a, b []*pb.PrivilegeDelta_Grantee) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].GetName() != b[i].GetName() || a[i].GetIsCurrentUser() != b[i].GetIsCurrentUser() {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeWS collapses runs of whitespace to single spaces (trimmed).

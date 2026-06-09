@@ -1,0 +1,114 @@
+[
+  {
+    "name": "exists_none_bare",
+    "sql": "EXISTS t",
+    "want_code": "Success", "want_stmt": "EXISTS_TABLE",
+    "want_sql": "EXISTS TABLE t",
+    "want_accessed": [{"original_table": "t"}]
+  },
+  {
+    "name": "exists_dynamic_rewrite",
+    "sql": "EXISTS logical1.t",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "EXISTS_TABLE",
+    "want_sql": "EXISTS TABLE phys1.`logical1.t`",
+    "want_table_rewrites": {"logical1.t": "phys1.logical1.t"},
+    "want_accessed": [{"original_database": "logical1", "original_table": "t", "logical_database": "logical1", "physical_database": "phys1"}]
+  },
+  {
+    "name": "exists_database_rejected",
+    "sql": "EXISTS DATABASE logical1",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "UnsupportedStatement", "want_stmt": "EXISTS_TABLE", "reject": true
+  },
+  {
+    "name": "show_create_dynamic_rewrite",
+    "sql": "SHOW CREATE TABLE logical1.t",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "SHOW_CREATE_TABLE",
+    "want_sql": "SHOW CREATE TABLE phys1.`logical1.t`",
+    "want_table_rewrites": {"logical1.t": "phys1.logical1.t"},
+    "want_accessed": [{"original_database": "logical1", "original_table": "t", "logical_database": "logical1", "physical_database": "phys1"}]
+  },
+  {
+    "name": "show_create_view_rejected",
+    "sql": "SHOW CREATE VIEW v",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "UnsupportedStatement", "want_stmt": "SHOW_CREATE_TABLE", "reject": true
+  },
+  {
+    "name": "grant_select_table",
+    "sql": "GRANT SELECT ON logical1.t TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "GRANT", "sql_exact": true,
+    "want_sql": "SELECT 'GRANT SELECT ON logical1.t TO u' AS gstmt",
+    "want_privileges_deltas": [{"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"name": "u"}], "grant_option": false}]
+  },
+  {
+    "name": "grant_two_privs_two_grantees_option",
+    "sql": "GRANT SELECT, INSERT ON logical1.t TO u1, u2 WITH GRANT OPTION",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "GRANT", "sql_exact": true,
+    "want_sql": "SELECT 'GRANT SELECT, INSERT ON logical1.t TO u1, u2 WITH GRANT OPTION' AS gstmt",
+    "want_privileges_deltas": [
+      {"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"name": "u1"}, {"name": "u2"}], "grant_option": true},
+      {"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["INSERT"], "grantees": [{"name": "u1"}, {"name": "u2"}], "grant_option": true}
+    ]
+  },
+  {
+    "name": "grant_database_scope",
+    "sql": "GRANT SELECT ON logical1.* TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "GRANT", "sql_exact": true,
+    "want_sql": "SELECT 'GRANT SELECT ON logical1.* TO u' AS gstmt",
+    "want_privileges_deltas": [{"action": "GRANT", "scope": "DATABASE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "privileges": ["SELECT"], "grantees": [{"name": "u"}], "grant_option": false}]
+  },
+  {
+    "name": "revoke_select",
+    "sql": "REVOKE SELECT ON logical1.t FROM u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "REVOKE", "sql_exact": true,
+    "want_sql": "SELECT 'REVOKE SELECT ON logical1.t FROM u' AS rstmt",
+    "want_privileges_deltas": [{"action": "REVOKE", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"name": "u"}], "grant_option": false}]
+  },
+  {
+    "name": "grant_current_user",
+    "sql": "GRANT SELECT ON logical1.t TO CURRENT_USER",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "GRANT", "sql_exact": true,
+    "want_sql": "SELECT 'GRANT SELECT ON logical1.t TO CURRENT_USER' AS gstmt",
+    "want_privileges_deltas": [{"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"is_current_user": true}], "grant_option": false}]
+  },
+  {
+    "name": "grant_on_cluster_stripped",
+    "sql": "GRANT SELECT ON logical1.t ON CLUSTER c TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "Success", "want_stmt": "GRANT", "sql_exact": true,
+    "want_sql": "SELECT 'GRANT SELECT ON logical1.t TO u' AS gstmt",
+    "want_privileges_deltas": [{"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"name": "u"}], "grant_option": false}]
+  },
+  {
+    "name": "grant_global_scope_rejected",
+    "sql": "GRANT SELECT ON *.* TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+  },
+  {
+    "name": "grant_column_rejected",
+    "sql": "GRANT SELECT(c) ON logical1.t TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+  },
+  {
+    "name": "grant_role_membership_rejected",
+    "sql": "GRANT role1 TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+  },
+  {
+    "name": "grant_unresolvable_db_invalid",
+    "sql": "GRANT SELECT ON unknown.t TO u",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "InvalidRewriteRequest", "want_stmt": "GRANT", "reject": true
+  }
+]

@@ -40,3 +40,22 @@ func TestCompareSQLSemantic(t *testing.T) {
 		t.Fatalf("with semantic compare, should match; got %v", d.Mismatches)
 	}
 }
+
+func TestCompare_privilegeDeltas(t *testing.T) {
+	mk := func() *pb.RewriteSQLResponse {
+		return &pb.RewriteSQLResponse{PrivilegesDeltas: []*pb.PrivilegeDelta{{
+			Action: pb.PrivilegeDelta_ACTION_GRANT, Scope: pb.PrivilegeDelta_SCOPE_TABLE,
+			LogicalDatabase: "l", PhysicalDatabase: "p", OriginalTable: "t", PhysicalTable: "l.t",
+			Privileges: []string{"SELECT"},
+			Grantees:   []*pb.PrivilegeDelta_Grantee{{Name: "u"}},
+		}}}
+	}
+	if d := Compare(mk(), mk(), nil); !d.Equal() {
+		t.Errorf("identical deltas should match: %v", d.Mismatches)
+	}
+	diff := mk()
+	diff.PrivilegesDeltas[0].Privileges = []string{"INSERT"}
+	if d := Compare(diff, mk(), nil); d.Equal() {
+		t.Error("differing privileges should not match")
+	}
+}

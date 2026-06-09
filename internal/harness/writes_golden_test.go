@@ -246,6 +246,7 @@ func pbFromResult(r rewriter.RewriteResult) *pb.RewriteSQLResponse {
 		TableRewrites:          r.TableRewrites,
 		DatabaseRewrites:       r.DatabaseRewrites,
 		OriginalAccessedTables: r.OriginalAccessedTables,
+		PrivilegesDeltas:       r.PrivilegesDeltas,
 		ExistenceClause:        r.ExistenceClause,
 		FailedCteAliases:       r.FailedCTEAliases,
 	}
