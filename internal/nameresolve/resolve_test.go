@@ -173,3 +173,99 @@ func TestResolveAccessed_staticLeavesLogicalEmpty(t *testing.T) {
 		t.Fatalf("got %+v want %+v", got, want)
 	}
 }
+
+// --- db-level helpers (Phase 3) ---
+
+// dynOpt wraps dynamic args in a TableNameRewrite option.
+func dynOpt(a *pb.RewriteTableDynamicArgs) *pb.RewriteOption {
+	return &pb.RewriteOption{
+		Op:    pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{DynamicArgs: a}},
+	}
+}
+
+func TestFindDynamicArgs(t *testing.T) {
+	// Dynamic option present → returns its args.
+	a := dynArgs()
+	opts := []*pb.RewriteOption{
+		{Op: pb.RewriteOp_LimitRewrite},
+		dynOpt(a),
+	}
+	if got := FindDynamicArgs(opts); got != a {
+		t.Fatalf("FindDynamicArgs = %p, want %p", got, a)
+	}
+
+	// Static-only option → nil (dynamic_args ignored entirely).
+	staticOnly := []*pb.RewriteOption{
+		{Op: pb.RewriteOp_TableNameRewrite, Value: &pb.RewriteOption_TableNameArgs{
+			TableNameArgs: &pb.RewriteTableNameArgs{StaticArgs: &pb.RewriteTableStaticArgs{}}}},
+	}
+	if got := FindDynamicArgs(staticOnly); got != nil {
+		t.Fatalf("FindDynamicArgs(static-only) = %+v, want nil", got)
+	}
+
+	// No options → nil.
+	if got := FindDynamicArgs(nil); got != nil {
+		t.Fatalf("FindDynamicArgs(nil) = %+v, want nil", got)
+	}
+
+	// Last-wins across multiple dynamic options.
+	a2 := dynArgs()
+	multi := []*pb.RewriteOption{dynOpt(a), dynOpt(a2)}
+	if got := FindDynamicArgs(multi); got != a2 {
+		t.Fatalf("FindDynamicArgs(multi) = %p, want last %p", got, a2)
+	}
+}
+
+func TestResolvePhysicalDatabaseExported(t *testing.T) {
+	a := dynArgs() // database_map: tenant1→testnet; known_physical: [system]
+
+	if phys, ok := ResolvePhysicalDatabase("tenant1", a); !ok || phys != "testnet" {
+		t.Fatalf("database_map hit: got (%q,%v), want (testnet,true)", phys, ok)
+	}
+	if phys, ok := ResolvePhysicalDatabase("system", a); !ok || phys != "system" {
+		t.Fatalf("known_physical passthrough: got (%q,%v), want (system,true)", phys, ok)
+	}
+	if phys, ok := ResolvePhysicalDatabase("nope", a); ok || phys != "" {
+		t.Fatalf("unresolvable: got (%q,%v), want (\"\",false)", phys, ok)
+	}
+}
+
+func TestIsLogicalRemoteMapped(t *testing.T) {
+	a := dynArgs()
+	a.LogicalDatabaseToRemoteUpstreamIndex = map[string]string{"tenant1": "us"}
+
+	if !IsLogicalRemoteMapped("tenant1", a) {
+		t.Fatalf("mapped logical: got false, want true")
+	}
+	if IsLogicalRemoteMapped("other", a) {
+		t.Fatalf("unmapped logical: got true, want false")
+	}
+	if IsLogicalRemoteMapped("", a) {
+		t.Fatalf("empty logical: got true, want false")
+	}
+}
+
+func TestBuildDynamicTablePrefix(t *testing.T) {
+	// No extras → "<logical>."
+	a := dynArgs() // delim "_", no extras
+	if got := BuildDynamicTablePrefix("tenant1", a); got != "tenant1." {
+		t.Fatalf("no-extra prefix = %q, want tenant1.", got)
+	}
+
+	// Extras with delim "_" → "<logical>_x_y."
+	a2 := dynArgs()
+	a2.ExtraArguments = []string{"x", "y"}
+	if got := BuildDynamicTablePrefix("tenant1", a2); got != "tenant1_x_y." {
+		t.Fatalf("extras prefix = %q, want tenant1_x_y.", got)
+	}
+
+	// Parity cross-check: prefix == everything buildDynamicTableName emits before origin_table.
+	a3 := dynArgs()
+	a3.ExtraArguments = []string{"x"}
+	full := buildDynamicTableName("tenant1", "events", a3) // "tenant1_x.events"
+	prefix := BuildDynamicTablePrefix("tenant1", a3)       // "tenant1_x."
+	if full != prefix+"events" {
+		t.Fatalf("parity: buildDynamicTableName=%q != prefix(%q)+origin_table", full, prefix)
+	}
+}

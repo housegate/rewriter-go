@@ -106,6 +106,59 @@ func buildDynamicTableName(logical, originTable string, a *pb.RewriteTableDynami
 	return b.String()
 }
 
+// FindDynamicArgs returns the dynamic_args from the last TableNameRewrite option
+// that carries them, or nil. Unlike FindActive, it ignores static_args entirely —
+// db-level handlers (USE/SHOW/CREATE-DB/DROP-DB) only consult dynamic_args.
+// Mirrors C++ findDynamicArgs.
+func FindDynamicArgs(opts []*pb.RewriteOption) *pb.RewriteTableDynamicArgs {
+	var found *pb.RewriteTableDynamicArgs
+	for _, o := range opts {
+		if o.GetOp() != pb.RewriteOp_TableNameRewrite {
+			continue
+		}
+		if d := o.GetTableNameArgs().GetDynamicArgs(); d != nil {
+			found = d
+		}
+	}
+	return found
+}
+
+// ResolvePhysicalDatabase is the exported wrapper over resolvePhysicalDatabase
+// (database_map, then known_physical passthrough). ok=false when unresolvable.
+func ResolvePhysicalDatabase(logical string, a *pb.RewriteTableDynamicArgs) (string, bool) {
+	return resolvePhysicalDatabase(logical, a)
+}
+
+// IsLogicalRemoteMapped reports whether logical is in
+// logical_database_to_remote_upstream_index. Mirrors C++ isLogicalRemoteMapped.
+func IsLogicalRemoteMapped(logical string, a *pb.RewriteTableDynamicArgs) bool {
+	if logical == "" {
+		return false
+	}
+	_, ok := a.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]
+	return ok
+}
+
+// BuildDynamicTablePrefix returns "<logical>[<delim><extra>...]." — the physical
+// table-name prefix (everything buildDynamicTableName emits before original_table,
+// including the trailing "."). NOTE: buildDynamicTableName short-circuits to "" on
+// an empty original_table (the USE sentinel), so this builds the prefix directly.
+// Mirrors C++ buildDynamicTablePrefix.
+func BuildDynamicTablePrefix(logical string, a *pb.RewriteTableDynamicArgs) string {
+	delim := a.GetDelim()
+	if delim == "" {
+		delim = "_"
+	}
+	var b strings.Builder
+	b.WriteString(logical)
+	for _, extra := range a.GetExtraArguments() {
+		b.WriteString(delim)
+		b.WriteString(extra)
+	}
+	b.WriteString(".")
+	return b.String()
+}
+
 // Mode is the active table-rewrite mode for a statement.
 type Mode int
 
