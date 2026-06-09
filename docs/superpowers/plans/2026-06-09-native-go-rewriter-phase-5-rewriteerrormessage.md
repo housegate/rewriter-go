@@ -1130,6 +1130,202 @@ git commit -m "test(harness): IN-split preprocess decision (§6f) + differential
 
 ---
 
+## Task 7: engine — pre-parse nesting-depth guard (fuzz finding)
+
+**Why:** The Task-6 fuzz harness surfaced a real fail-open hole. A deeply-nested input
+(`SELECT ~` + ~600 `(`) makes polyglot's Rust recursive-descent parser **overflow its
+stack → SIGSEGV during the FFI call**, which Go cannot `recover()` — the in-process host
+crashes (the C++ gRPC service is shielded by its process boundary; the native lib is not).
+Empirically (darwin/arm64): `ParseOne`/`ParseGeneric` crash at bracket-nesting depth ~180
+(safe ≤175); `Tokenize` is immune (a lexer, no structural recursion). This also corrects the
+§6f premise: polyglot DOES have a recursive-descent depth limit (on nesting), it just
+manifests as a crash rather than a graceful error. The fix is a cheap, string-literal-aware
+depth pre-scan (no FFI) at the engine seam that returns an error BEFORE the dangerous parse,
+so native fails open (`ParseOne` error → `SyntaxError` → echo input; `ParseGeneric` error in
+GRANT → `!Structured` → Unsupported reject).
+
+**Files:** Create `internal/engine/guard.go`, `internal/engine/guard_test.go`; Modify
+`internal/engine/polyglot.go` (guard `ParseOne` + `ParseGeneric`); Modify `native_test.go`
+(fail-open assertion); restore the fuzz regression seed.
+
+- [ ] **Step 1: Write the failing test** (`internal/engine/guard_test.go`) — pure, no FFI:
+
+```go
+package engine
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestExceedsNestingDepth(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"flat", "SELECT 1", false},
+		{"shallow", "SELECT f(g(h(x)))", false},
+		{"large flat IN (depth 1)", "SELECT x IN (" + strings.Repeat("1,", 1000) + "1)", false},
+		{"at limit", "SELECT " + strings.Repeat("(", 100) + "1" + strings.Repeat(")", 100), false},
+		{"over limit parens", "SELECT " + strings.Repeat("(", 101) + "1" + strings.Repeat(")", 101), true},
+		{"over limit brackets", "SELECT " + strings.Repeat("[", 101) + "1" + strings.Repeat("]", 101), true},
+		{"deep parens in STRING literal do not count", "SELECT '" + strings.Repeat("(", 500) + "'", false},
+		{"doubled-quote escape inside string", "SELECT 'O''" + strings.Repeat("(", 500) + "'", false},
+	}
+	for _, c := range cases {
+		if got := exceedsNestingDepth(c.sql, maxParseDepth); got != c.want {
+			t.Errorf("%s: exceedsNestingDepth=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+```
+
+- [ ] **Step 2: Run to verify it fails** — `go test ./internal/engine -run TestExceedsNestingDepth` → FAIL (undefined).
+
+- [ ] **Step 3: Write the guard** (`internal/engine/guard.go`):
+
+```go
+package engine
+
+// maxParseDepth bounds bracket nesting handed to the polyglot parser. The Rust
+// recursive-descent parser overflows its stack (SIGSEGV during the FFI call,
+// which Go cannot recover) on deeply-nested input — empirically around depth ~180
+// on darwin/arm64. We cap well below that: legitimate SQL essentially never nests
+// expression brackets past ~40, and an over-cap statement fails open (the parser
+// guard returns an error → SyntaxError → the caller forwards the original SQL to
+// ClickHouse, whose own parser handles up to max_parser_depth=1000). Lower this if
+// a platform with a smaller stack is found to crash below it.
+const maxParseDepth = 100
+
+// exceedsNestingDepth reports whether sql nests () or [] brackets deeper than max,
+// counting ONLY brackets OUTSIDE string/identifier literals (so parens inside a
+// quoted string don't trip the guard and cause a spurious fail-open). O(len(sql)),
+// no FFI — safe to run before every parse. Quote runs ('...', "...", `...`) are
+// skipped, honoring ClickHouse's doubled-quote ('') and backslash (\') escapes; an
+// unterminated quote consumes to EOF (such SQL fails to parse anyway). The scan is
+// conservative-by-construction: any miscount of literal content can only ADD to the
+// depth (a string treated as code), never hide real structural nesting.
+func exceedsNestingDepth(sql string, max int) bool {
+	depth := 0
+	for i := 0; i < len(sql); {
+		c := sql[i]
+		switch c {
+		case '\'', '"', '`':
+			q := c
+			i++
+			for i < len(sql) {
+				if sql[i] == '\\' && i+1 < len(sql) {
+					i += 2
+					continue
+				}
+				if sql[i] == q {
+					if i+1 < len(sql) && sql[i+1] == q { // doubled-quote escape
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case '(', '[':
+			depth++
+			if depth > max {
+				return true
+			}
+			i++
+		case ')', ']':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return false
+}
+```
+
+- [ ] **Step 4: Guard the two parse entry points** in `internal/engine/polyglot.go` — add at the TOP of `ParseOne` (before `e.c.ParseOne`):
+
+```go
+	if exceedsNestingDepth(sql, maxParseDepth) {
+		return nil, fmt.Errorf("engine: parse: input bracket nesting exceeds limit %d", maxParseDepth)
+	}
+```
+
+and the identical guard at the top of `ParseGeneric` (before `e.c.ParseOne(sql, "generic")`):
+
+```go
+	if exceedsNestingDepth(sql, maxParseDepth) {
+		return nil, fmt.Errorf("engine: parse(generic): input bracket nesting exceeds limit %d", maxParseDepth)
+	}
+```
+
+(Do NOT guard `Tokenize` — it's a lexer and does not stack-overflow on nesting; the db-level/exists/grant token extractors must keep working.)
+
+- [ ] **Step 5: FFI fail-open test** — add to `internal/engine/guard_test.go` (FFI-gated):
+
+```go
+func TestParseDeepNestingFailsOpen(t *testing.T) {
+	e := newTestEngine(t) // skips when FFI absent
+	// ~600-deep — far past the ~180 crash point. Must return an error, NOT crash.
+	sql := "SELECT ~" + strings.Repeat("(", 600) + "1" + strings.Repeat(")", 600)
+	if _, err := e.ParseOne(sql); err == nil {
+		t.Error("ParseOne deep-nest: err=nil, want guard error")
+	}
+	if _, err := e.ParseGeneric(sql); err == nil {
+		t.Error("ParseGeneric deep-nest: err=nil, want guard error")
+	}
+}
+```
+
+- [ ] **Step 6: Native fail-open test** — add to `native_test.go`:
+
+```go
+func TestNativeRewrite_deepNestingFailsOpen(t *testing.T) {
+	e := newEngine(t)
+	r := New(e)
+	defer r.Close()
+	sql := "SELECT ~" + strings.Repeat("(", 600) + "1" + strings.Repeat(")", 600)
+	res, err := r.Rewrite(context.Background(), sql, "acct")
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err) // must be a code, not a crash/Go error
+	}
+	if res.Code != pb.RewriteCode_SyntaxError {
+		t.Errorf("code=%v, want SyntaxError (fail-open)", res.Code)
+	}
+	if res.SQL != sql {
+		t.Errorf("SQL must echo input on SyntaxError")
+	}
+}
+```
+
+(`native_test.go` needs `strings` imported — add it if absent.)
+
+- [ ] **Step 7: Restore the fuzz regression seed** — the Task-6 fuzz run wrote the crashing input to `internal/harness/testdata/fuzz/FuzzRewrite/228ec4e8a09600bf` (preserved at `/tmp/fuzzcrash/228ec4e8a09600bf`). With the guard in place it now fails open, so commit it as a permanent regression seed:
+
+```bash
+mkdir -p internal/harness/testdata/fuzz/FuzzRewrite
+cp /tmp/fuzzcrash/228ec4e8a09600bf internal/harness/testdata/fuzz/FuzzRewrite/228ec4e8a09600bf
+```
+
+Verify it now replays WITHOUT crashing: `POLYGLOT_SQL_FFI_PATH=$PWD/third_party/lib/libpolyglot_sql_ffi.dylib go test ./internal/harness -run FuzzRewrite -v` → PASS (the seed corpus, including this file, runs and fails open). If `/tmp/fuzzcrash/` is gone, regenerate by running `... -fuzz FuzzRewrite -fuzztime 30s` (it will no longer find a NEW crash; if it does, that's a separate finding — report it).
+
+- [ ] **Step 8: Verify + commit** — `go test ./internal/engine -run 'TestExceedsNestingDepth|TestParseDeepNestingFailsOpen'` (FFI) PASS; `…go test . -run TestNativeRewrite_deepNestingFailsOpen` PASS; the WHOLE suite with FFI green (critically `go test ./internal/harness` no longer crashes on the seed); `go test ./...` no-FFI green; `gofmt`/`vet`/`build` clean. Commit:
+
+```bash
+gofmt -w internal/engine/guard.go internal/engine/guard_test.go internal/engine/polyglot.go native_test.go
+git add internal/engine/guard.go internal/engine/guard_test.go internal/engine/polyglot.go native_test.go internal/harness/testdata/fuzz/FuzzRewrite/228ec4e8a09600bf
+git commit -m "fix(engine): pre-parse nesting-depth guard — fail open instead of FFI stack-overflow crash"
+```
+
+Also update the §6f decision note in `internal/harness/preprocess_test.go`'s doc comment (one line) to record that native skips the IN-split BUT adds a nesting-depth guard (the polyglot parser has its own recursive-descent limit, just on nesting depth rather than IN-list length).
+
+---
+
 ## Self-Review (run against design spec §9 + doRewriteErrorMessage)
 
 **Spec coverage:**
