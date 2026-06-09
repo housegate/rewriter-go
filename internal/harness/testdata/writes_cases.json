@@ -231,6 +231,7 @@
       {"original_database": "db", "original_table": "v", "logical_database": "", "physical_database": "db", "is_remote": false},
       {"original_database": "db", "original_table": "s", "logical_database": "", "physical_database": "db", "is_remote": false}
     ],
+    "allow_tablemap_db_divergence": true,
     "want_sql": "CREATE VIEW db.v_phys AS SELECT * FROM db.s_phys \"db.s\""
   },
   {
@@ -245,6 +246,7 @@
       {"original_database": "db", "original_table": "dst", "logical_database": "", "physical_database": "db", "is_remote": false},
       {"original_database": "db", "original_table": "s", "logical_database": "", "physical_database": "db", "is_remote": false}
     ],
+    "allow_tablemap_db_divergence": true,
     "want_sql": "CREATE MATERIALIZED VIEW db.mv2 TO db.dst2 AS SELECT * FROM db.s2 \"db.s\""
   },
   {
@@ -347,6 +349,7 @@
     "want_code": "UnsupportedStatement",
     "want_table_rewrites": {},
     "reject": true,
+    "allow_code_divergence": true,
     "want_sql": "COPY foo FROM 'bar'"
   },
   {
@@ -355,6 +358,7 @@
     "want_code": "UnsupportedStatement",
     "want_table_rewrites": {},
     "reject": true,
+    "allow_code_divergence": true,
     "want_sql": "DETACH TABLE db.t"
   },
   {

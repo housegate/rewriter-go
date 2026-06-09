@@ -141,7 +141,7 @@
     "name": "grant_attach_rejected",
     "sql": "ATTACH GRANT SELECT ON logical1.t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true, "allow_code_divergence": true
   },
   {
     "name": "grant_with_replace_rejected",

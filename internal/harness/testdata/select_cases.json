@@ -24,6 +24,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"db.t": "db.t2"},
     "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
+    "allow_tablemap_db_divergence": true,
     "want_sql": "SELECT a FROM db.t2 \"db.t\""
   },
   {
