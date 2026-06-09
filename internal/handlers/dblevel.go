@@ -14,11 +14,11 @@ import (
 // the same contract as RewriteWrite. native.go calls it after RewriteWrite and
 // before the SELECT/pass-through fallback.
 //
-// Incremental wiring (Phase-3): USE / SHOW TABLES / SHOW DATABASES are dispatched
-// here today (Tasks 3-5). The CREATE DATABASE / DROP DATABASE branches land in
-// Task 6; until then those kinds fall through (handled=false) so nothing
-// regresses (Phase-2 RewriteWrite still rejects create/drop-db; native routing to
-// RewriteDBLevel is wired in Task 7).
+// CREATE DATABASE / DROP DATABASE are validated against database_map and rewritten
+// to a synthetic debug SELECT (the proxy does its own database bookkeeping; we
+// never ship the DDL to the physical ClickHouse). Everything else this handler
+// doesn't recognize falls through (handled=false) so the caller routes it onward
+// (native wires RewriteDBLevel after RewriteWrite in Task 7).
 func RewriteDBLevel(e engine.Engine, ast engine.AST, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, bool, error) {
 	kind, err := engine.NodeKind(ast)
 	if err != nil {
@@ -27,8 +27,10 @@ func RewriteDBLevel(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewr
 	dyn := nameresolve.FindDynamicArgs(opts)
 
 	switch kind {
-	// case engine.NodeCreateDB: → Task 6 (dispatchCreateDatabase)
-	// case engine.NodeDropDB:   → Task 6 (dispatchDropDatabase)
+	case engine.NodeCreateDB:
+		return dispatchCreateDatabase(e, ast, dyn)
+	case engine.NodeDropDB:
+		return dispatchDropDatabase(e, ast, dyn)
 	case engine.NodeCommand:
 		info, perr := engine.ParseDBLevel(e, sql)
 		if perr != nil {
@@ -73,6 +75,99 @@ func recordDatabaseRewrite(resp *pb.RewriteSQLResponse, origin, newDB string) {
 		resp.DatabaseRewrites = map[string]string{}
 	}
 	resp.DatabaseRewrites[origin] = newDB
+}
+
+// recordAccessedDatabase appends one db-level AccessedTable (original_table="").
+// physical = ResolvePhysicalDatabase(target) when resolvable, else "". Mirrors C++
+// recordAccessedDatabase (name_rewrite.h:254-276).
+func recordAccessedDatabase(resp *pb.RewriteSQLResponse, target string, dyn *pb.RewriteTableDynamicArgs) {
+	phys := ""
+	if dyn != nil {
+		if p, ok := nameresolve.ResolvePhysicalDatabase(target, dyn); ok {
+			phys = p
+		}
+	}
+	resp.OriginalAccessedTables = append(resp.OriginalAccessedTables, &pb.AccessedTable{
+		OriginalDatabase: target, OriginalTable: "",
+		LogicalDatabase: target, PhysicalDatabase: phys, IsRemote: false,
+	})
+}
+
+// dispatchCreateDatabase ports the C++ CREATE DATABASE branch (writes.cc:277-345).
+// CREATE DATABASE is never shipped to the physical ClickHouse — the proxy does its
+// own database bookkeeping. We validate the request against database_map /
+// known_physical_databases and rewrite to a debug `SELECT '<canonical DDL>' AS
+// cdstmt` so the user's intent lands in query_log. recordAccessedDatabase runs
+// BEFORE validation so a rejected request still surfaces the target. The debug
+// literal embeds Generate(ast) (canonical formatAst), NOT the raw sql.
+func dispatchCreateDatabase(e engine.Engine, ast engine.AST, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
+	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE)
+	target, ifNotExists, _, err := engine.DatabaseTarget(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	if dyn == nil {
+		rejectDBUnsupported(resp, "CREATE DATABASE requires a TableNameRewrite/dynamic_args option to validate against")
+		return resp, true, nil
+	}
+	recordAccessedDatabase(resp, target, dyn) // before validation
+	if phys, hit := dyn.GetDatabaseMap()[target]; hit && !ifNotExists {
+		rejectDBInvalid(resp, "CREATE DATABASE target '"+target+"' already exists (mapped to physical '"+phys+"'); use IF NOT EXISTS to suppress this error")
+		return resp, true, nil
+	}
+	if phys := dyn.GetUpstreamPhysicalDatabaseInContext(); phys != "" {
+		known := false
+		for _, p := range dyn.GetKnownPhysicalDatabases() {
+			if p == phys {
+				known = true
+				break
+			}
+		}
+		if !known {
+			rejectDBInvalid(resp, "CREATE DATABASE: upstream_physical_database_in_context '"+phys+"' is not in known_physical_databases")
+			return resp, true, nil
+		}
+	}
+	gen, gerr := e.Generate(ast)
+	if gerr != nil {
+		return nil, false, gerr
+	}
+	resp.SqlAfterRewrite = "SELECT '" + escapeSQLLiteral(gen) + "' AS cdstmt"
+	return resp, true, nil
+}
+
+// dispatchDropDatabase ports the C++ DROP DATABASE branch (writes.cc:403-463).
+// Symmetric to CREATE: never emitted against the physical CH (a logical DB shares
+// its physical with siblings via prefix-sharing; a CH-level DROP DATABASE would
+// nuke unrelated tenants). On a database_map hit it records the logical→physical
+// rewrite so an external GC can reclaim the prefixed tables asynchronously; a miss
+// without IF EXISTS rejects (we don't manage that logical DB). The result is a
+// debug `SELECT '<canonical DDL>' AS ddstmt`.
+func dispatchDropDatabase(e engine.Engine, ast engine.AST, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
+	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_DROP_DATABASE)
+	target, _, ifExists, err := engine.DatabaseTarget(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	if dyn == nil {
+		rejectDBUnsupported(resp, "DROP DATABASE requires a TableNameRewrite/dynamic_args option to validate against")
+		return resp, true, nil
+	}
+	recordAccessedDatabase(resp, target, dyn)
+	if phys, hit := dyn.GetDatabaseMap()[target]; !hit {
+		if !ifExists {
+			rejectDBInvalid(resp, "DROP DATABASE target '"+target+"' is not in database_map; use IF EXISTS to suppress this error")
+			return resp, true, nil
+		}
+	} else {
+		recordDatabaseRewrite(resp, target, phys)
+	}
+	gen, gerr := e.Generate(ast)
+	if gerr != nil {
+		return nil, false, gerr
+	}
+	resp.SqlAfterRewrite = "SELECT '" + escapeSQLLiteral(gen) + "' AS ddstmt"
+	return resp, true, nil
 }
 
 // passthroughDB regenerates the original AST (canonical form) for a db-level

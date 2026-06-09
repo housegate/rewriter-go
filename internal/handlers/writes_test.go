@@ -991,26 +991,11 @@ func TestRewriteWrite_existsNotAWrite(t *testing.T) {
 	}
 }
 
-// Task 10.10. CREATE DATABASE db → handled (out-of-phase reject),
-// UnsupportedStatement, stmt=CREATE_DATABASE. Phase 3 replaces this.
-func TestRewriteWrite_createDatabaseOutOfPhase(t *testing.T) {
-	e := newEngine(t)
-	ast := mustParse(t, e, "CREATE DATABASE db")
-
-	resp, handled, err := RewriteWrite(e, ast, "CREATE DATABASE db", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !handled {
-		t.Fatal("handled = false, want true (out-of-phase reject is handled)")
-	}
-	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
-		t.Fatalf("code = %v, want UnsupportedStatement (%s)", resp.GetCode(), resp.GetMessage())
-	}
-	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE {
-		t.Fatalf("stmt = %v, want CREATE_DATABASE", resp.GetStatementType())
-	}
-}
+// NOTE: CREATE DATABASE / DROP DATABASE are no longer handled by RewriteWrite —
+// the Phase-2 out-of-phase stub was removed in Phase-3 Task 6. RewriteWrite now
+// returns handled=false for those kinds (they fall through to RewriteDBLevel,
+// which performs the db-level debug rewrite). See dblevel_test.go for coverage:
+// TestRewriteDBLevel_createDatabaseDebugRewrite / _dropDatabaseDebugRewrite et al.
 
 // ---- Task 13: reject-guard parity (writes.cc forms polyglot flattens) ----
 
@@ -1170,23 +1155,11 @@ func TestRewriteWrite_revokeStillPassthrough(t *testing.T) {
 }
 func TestRewriteWrite_showStillPassthrough(t *testing.T) { wantPassthrough(t, "SHOW TABLES") }
 
-// Task 10.11. DROP DATABASE db → handled (out-of-phase reject),
-// UnsupportedStatement, stmt=DROP_DATABASE.
-func TestRewriteWrite_dropDatabaseOutOfPhase(t *testing.T) {
-	e := newEngine(t)
-	ast := mustParse(t, e, "DROP DATABASE db")
-
-	resp, handled, err := RewriteWrite(e, ast, "DROP DATABASE db", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !handled {
-		t.Fatal("handled = false, want true (out-of-phase reject is handled)")
-	}
-	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
-		t.Fatalf("code = %v, want UnsupportedStatement (%s)", resp.GetCode(), resp.GetMessage())
-	}
-	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_DROP_DATABASE {
-		t.Fatalf("stmt = %v, want DROP_DATABASE", resp.GetStatementType())
-	}
+// CREATE/DROP DATABASE now pass through RewriteWrite (handled=false) to
+// RewriteDBLevel — regression guard mirroring the USE/SHOW/EXISTS pass-throughs.
+func TestRewriteWrite_createDatabasePassthrough(t *testing.T) {
+	wantPassthrough(t, "CREATE DATABASE db")
+}
+func TestRewriteWrite_dropDatabasePassthrough(t *testing.T) {
+	wantPassthrough(t, "DROP DATABASE db")
 }
