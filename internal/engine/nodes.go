@@ -449,8 +449,8 @@ func SetSettings(ast AST, settings []Setting) (AST, error) {
 	arr, _ := sel["settings"].([]any)
 	for _, s := range settings {
 		arr = append(arr, map[string]any{"eq": map[string]any{
-			"left":  colBare(s.Key),
-			"right": map[string]any{"literal": map[string]any{"literal_type": s.LiteralType, "value": s.Value}},
+			"left":          colBare(s.Key),
+			"right":         map[string]any{"literal": map[string]any{"literal_type": s.LiteralType, "value": s.Value}},
 			"left_comments": []any{}, "operator_comments": []any{}, "trailing_comments": []any{},
 		}})
 	}
