@@ -38,10 +38,10 @@ func Compare(got, want *pb.RewriteSQLResponse, semanticEq SemanticEq) Diff {
 	if got.GetExistenceClause() != want.GetExistenceClause() {
 		add("existence_clause", got.GetExistenceClause(), want.GetExistenceClause())
 	}
-	if !reflect.DeepEqual(got.GetTableRewrites(), want.GetTableRewrites()) {
+	if !mapEq(got.GetTableRewrites(), want.GetTableRewrites()) {
 		add("table_rewrites", got.GetTableRewrites(), want.GetTableRewrites())
 	}
-	if !reflect.DeepEqual(got.GetDatabaseRewrites(), want.GetDatabaseRewrites()) {
+	if !mapEq(got.GetDatabaseRewrites(), want.GetDatabaseRewrites()) {
 		add("database_rewrites", got.GetDatabaseRewrites(), want.GetDatabaseRewrites())
 	}
 	if !reflect.DeepEqual(got.GetFailedCteAliases(), want.GetFailedCteAliases()) {
@@ -94,6 +94,22 @@ func granteesEqual(a, b []*pb.PrivilegeDelta_Grantee) bool {
 	}
 	for i := range a {
 		if a[i].GetName() != b[i].GetName() || a[i].GetIsCurrentUser() != b[i].GetIsCurrentUser() {
+			return false
+		}
+	}
+	return true
+}
+
+// mapEq compares two string maps treating nil and empty as equal. proto3 emits a
+// nil map for an empty map on the wire (the C++ oracle), while the native rewriter
+// often inits an empty non-nil map (newWriteResp/newDBResp) — semantically
+// identical, so reflect.DeepEqual (which distinguishes nil from {}) is wrong here.
+func mapEq(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
 			return false
 		}
 	}
