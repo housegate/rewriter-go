@@ -149,13 +149,23 @@ func newGrantResp(stmt pb.StatementType) *pb.RewriteSQLResponse {
 
 // buildGrantees translates principal names to proto Grantees. CURRENT_USER
 // becomes a flagged grantee; an empty list is an Invalid reject (a well-formed
-// GRANT always names a grantee). ClickHouse's parser treats `TO ALL` / `FROM ALL`
-// as an ordinary quoted identifier named `ALL` (NOT the set.all keyword polyglot
-// can't distinguish), so the C++ oracle emits a normal grantee with name="ALL" —
-// we mirror that by letting ALL fall through to the default Grantee{Name: name}.
+// GRANT always names a grantee).
+//
+// ALL / ANY is asymmetric, matching ClickHouse's parser (ParserRolesOrUsersSet
+// recognizes the ALL/ANY keyword → set.all ONLY when allow_all is set, and
+// allow_all == is_revoke):
+//   - GRANT (allow_all=false): `TO ALL` parses as an ordinary identifier named
+//     `ALL`, so the C++ oracle emits a normal grantee name="ALL" — we mirror it
+//     via the default Grantee{Name: name}.
+//   - REVOKE (allow_all=true): `FROM ALL` is the keyword → C++ rejects it as
+//     UnsupportedStatement (grant.cc buildGrantees), so we reject here too.
 func buildGrantees(resp *pb.RewriteSQLResponse, kw string, principals []string) ([]*pb.PrivilegeDelta_Grantee, bool) {
 	var out []*pb.PrivilegeDelta_Grantee
 	for _, name := range principals {
+		if kw == "REVOKE" && (strings.EqualFold(name, "ALL") || strings.EqualFold(name, "ANY")) {
+			rejectUnsupported(resp, "REVOKE FROM "+strings.ToUpper(name)+" is not supported")
+			return nil, false
+		}
 		if strings.EqualFold(name, "CURRENT_USER") {
 			out = append(out, &pb.PrivilegeDelta_Grantee{IsCurrentUser: true})
 			continue

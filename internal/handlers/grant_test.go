@@ -95,6 +95,15 @@ func TestRewriteGrant(t *testing.T) {
 		}
 	})
 
+	t.Run("revoke from all rejected", func(t *testing.T) {
+		// REVOKE (allow_all=true) → `FROM ALL` is the set.all KEYWORD, not a name →
+		// the C++ oracle rejects it (unlike GRANT TO ALL). Mirror that.
+		resp, _, _ := RewriteGrant(e, parse(t, e, "REVOKE SELECT ON logical1.t FROM ALL"), "REVOKE SELECT ON logical1.t FROM ALL", dynOpts(dyn))
+		if resp.Code != pb.RewriteCode_UnsupportedStatement {
+			t.Errorf("code=%v, want UnsupportedStatement (%s)", resp.Code, resp.Message)
+		}
+	})
+
 	t.Run("on cluster stripped in marker", func(t *testing.T) {
 		resp, _, _ := RewriteGrant(e, parse(t, e, "GRANT SELECT ON logical1.t ON CLUSTER c TO u"), "GRANT SELECT ON logical1.t ON CLUSTER c TO u", dynOpts(dyn))
 		if resp.SqlAfterRewrite != "SELECT 'GRANT SELECT ON logical1.t TO u' AS gstmt" {

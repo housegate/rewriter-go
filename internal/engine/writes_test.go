@@ -60,6 +60,10 @@ func TestExistenceClause(t *testing.T) {
 		{"DROP VIEW IF EXISTS db.v", false, true},
 		{"DROP DATABASE IF EXISTS db", false, true},
 		{"TRUNCATE TABLE IF EXISTS db.t", false, true},
+		// Raw/command nodes polyglot doesn't structure — recovered from raw text.
+		{"CREATE LIVE VIEW IF NOT EXISTS db.lv AS SELECT 1", true, false},
+		{"DROP DICTIONARY IF EXISTS db.d", false, true},
+		{"DETACH TABLE IF EXISTS db.t", false, true},
 		{"SELECT 1", false, false}, // non-DDL → neither
 	}
 	for _, c := range cases {

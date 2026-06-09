@@ -173,6 +173,38 @@ func ExistenceClause(ast AST) (ifNotExists, ifExists bool, err error) {
 	case NodeDropTable, NodeDropView, NodeDropDB, NodeTruncate:
 		ix, _ := body["if_exists"].(bool)
 		return false, ix, nil
+	case NodeRaw, NodeCommand:
+		// Exotic DDL polyglot routes to raw/command nodes (CREATE LIVE/WINDOW VIEW,
+		// DROP DICTIONARY, DETACH, ...). The C++ stamps existence_clause from the
+		// parsed ASTCreateQuery/ASTDropQuery before any handler, so it survives the
+		// eventual reject — recover it from the raw text.
+		var raw string
+		if kind == NodeRaw {
+			raw, _ = RawSQL(ast)
+		} else {
+			raw, _ = CommandSQL(ast)
+		}
+		return existenceFromRawSQL(raw)
+	default:
+		return false, false, nil
+	}
+}
+
+// existenceFromRawSQL recovers IF [NOT] EXISTS from a raw/command DDL string for
+// the statements polyglot doesn't structure: a leading CREATE carries IF NOT
+// EXISTS; a leading DROP / TRUNCATE / DETACH (all ASTDropQuery in ClickHouse)
+// carries IF EXISTS. Other leading keywords (USE/GRANT/SHOW/...) have neither.
+func existenceFromRawSQL(sql string) (ifNotExists, ifExists bool, _ error) {
+	u := strings.ToUpper(sql)
+	fields := strings.Fields(u)
+	if len(fields) == 0 {
+		return false, false, nil
+	}
+	switch fields[0] {
+	case "CREATE":
+		return strings.Contains(u, "IF NOT EXISTS"), false, nil
+	case "DROP", "TRUNCATE", "DETACH":
+		return false, strings.Contains(u, "IF EXISTS"), nil
 	default:
 		return false, false, nil
 	}
