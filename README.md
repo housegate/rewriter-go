@@ -53,6 +53,33 @@ Tests that need the engine skip themselves when `POLYGLOT_SQL_FFI_PATH` is unset
 `go test ./...` alone still runs the pure-Go units (comparator, corpus, fidelity-metric,
 contract tests).
 
+### CI oracle differential (the true parity gate)
+
+The `oracle` CI job (`.github/workflows/ci.yml`) runs the C++ `rewriter-grpc` image as a
+service and runs the harness with `REWRITER_ORACLE_ADDR` set, so every golden corpus is
+diffed field-by-field against the real C++ behavior. To run it locally:
+
+```bash
+docker run -d -p 50051:50051 \
+  us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:0.11.0 \
+  /clickhousegate_rewriter 50051
+make ffi
+POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.$(uname | grep -qi darwin && echo dylib || echo so)" \
+  REWRITER_ORACLE_ADDR=localhost:50051 go test ./internal/harness -count=1
+```
+
+- The oracle image lives in a **private GCP Artifact Registry**, so the CI job needs a repo
+  secret **`GCP_ORACLE_KEY`** — a GCP service-account JSON key with `roles/artifactregistry.reader`
+  on the `sentio-352722` `sentio` repo. Without it the job is skipped (the `if` guard), so the
+  rest of CI still runs.
+- `ORACLE_TAG` (in the workflow) must track the C++ version whose source was ported — bump it
+  in lockstep when porting newer C++ behavior.
+- A small, documented allow-list of intentional divergences is carved out per-case in the
+  corpora (`allow_*_divergence` flags): the `IN(>50)` OR-batch preprocess we skip (§6f), admin
+  statements polyglot parses but ClickHouse's parser rejects (COPY / ATTACH GRANT →
+  `SyntaxError`), the `GRANT … TO ALL` marker backtick-quoting, and the static-`table_map`
+  db-qualifier (a C++-internal inconsistency, flagged for review).
+
 ## Design
 
 See [`docs/superpowers/specs/2026-06-03-native-go-rewriter-design.md`](docs/superpowers/specs/2026-06-03-native-go-rewriter-design.md)
