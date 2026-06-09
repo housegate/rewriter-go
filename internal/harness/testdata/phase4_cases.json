@@ -156,10 +156,13 @@
     "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
-    "name": "grant_to_all_rejected",
+    "name": "grant_to_all",
     "sql": "GRANT SELECT ON logical1.t TO ALL",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
+    "want_code": "Success", "want_stmt": "GRANT", "sql_exact": true,
+    "want_sql": "SELECT 'GRANT SELECT ON logical1.t TO ALL' AS gstmt",
+    "allow_sql_divergence": true,
+    "want_privileges_deltas": [{"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"name": "ALL"}], "grant_option": false}]
   },
   {
     "name": "grant_unqualified_no_upstream_invalid",

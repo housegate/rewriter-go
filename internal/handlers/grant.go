@@ -147,28 +147,20 @@ func newGrantResp(stmt pb.StatementType) *pb.RewriteSQLResponse {
 	return &pb.RewriteSQLResponse{Code: pb.RewriteCode_Success, Message: "success", StatementType: stmt}
 }
 
-// buildGrantees translates principal names to proto Grantees. Rejects the
-// variants the privilege-delta path doesn't model — ALL — and an empty list (a
-// well-formed GRANT always names a grantee). CURRENT_USER becomes a flagged
-// grantee. Mirrors grant.cc buildGrantees (ALL/EXCEPT → Unsupported; the EXCEPT
-// form fails the generic parse upstream and is rejected as `<kw> form is not
-// supported`, so only ALL is reachable here).
+// buildGrantees translates principal names to proto Grantees. CURRENT_USER
+// becomes a flagged grantee; an empty list is an Invalid reject (a well-formed
+// GRANT always names a grantee). ClickHouse's parser treats `TO ALL` / `FROM ALL`
+// as an ordinary quoted identifier named `ALL` (NOT the set.all keyword polyglot
+// can't distinguish), so the C++ oracle emits a normal grantee with name="ALL" —
+// we mirror that by letting ALL fall through to the default Grantee{Name: name}.
 func buildGrantees(resp *pb.RewriteSQLResponse, kw string, principals []string) ([]*pb.PrivilegeDelta_Grantee, bool) {
-	dir := "GRANT TO "
-	if kw == "REVOKE" {
-		dir = "REVOKE FROM "
-	}
 	var out []*pb.PrivilegeDelta_Grantee
 	for _, name := range principals {
-		switch {
-		case strings.EqualFold(name, "ALL"):
-			rejectUnsupported(resp, dir+"ALL is not supported")
-			return nil, false
-		case strings.EqualFold(name, "CURRENT_USER"):
+		if strings.EqualFold(name, "CURRENT_USER") {
 			out = append(out, &pb.PrivilegeDelta_Grantee{IsCurrentUser: true})
-		default:
-			out = append(out, &pb.PrivilegeDelta_Grantee{Name: name})
+			continue
 		}
+		out = append(out, &pb.PrivilegeDelta_Grantee{Name: name})
 	}
 	if len(out) == 0 {
 		rejectInvalid(resp, kw+" has no grantees")

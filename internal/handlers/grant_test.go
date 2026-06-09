@@ -82,6 +82,19 @@ func TestRewriteGrant(t *testing.T) {
 		}
 	})
 
+	t.Run("to all grantee", func(t *testing.T) {
+		// ClickHouse parses `TO ALL` as a quoted identifier named ALL → the C++
+		// oracle emits a normal grantee name="ALL" (it does NOT reject). Mirror that.
+		resp, _, _ := RewriteGrant(e, parse(t, e, "GRANT SELECT ON logical1.t TO ALL"), "GRANT SELECT ON logical1.t TO ALL", dynOpts(dyn))
+		if resp.Code != pb.RewriteCode_Success {
+			t.Fatalf("code=%v (%s)", resp.Code, resp.Message)
+		}
+		g := resp.PrivilegesDeltas[0].GetGrantees()
+		if len(g) != 1 || g[0].GetName() != "ALL" || g[0].GetIsCurrentUser() {
+			t.Errorf("grantee=%+v", g)
+		}
+	})
+
 	t.Run("on cluster stripped in marker", func(t *testing.T) {
 		resp, _, _ := RewriteGrant(e, parse(t, e, "GRANT SELECT ON logical1.t ON CLUSTER c TO u"), "GRANT SELECT ON logical1.t ON CLUSTER c TO u", dynOpts(dyn))
 		if resp.SqlAfterRewrite != "SELECT 'GRANT SELECT ON logical1.t TO u' AS gstmt" {
@@ -101,7 +114,6 @@ func TestRewriteGrant(t *testing.T) {
 		{"attach grant", "ATTACH GRANT SELECT ON logical1.t TO u", dynOpts(dyn), pb.RewriteCode_UnsupportedStatement},
 		{"with replace", "GRANT SELECT ON logical1.t TO u WITH REPLACE OPTION", dynOpts(dyn), pb.RewriteCode_UnsupportedStatement},
 		{"current grants", "GRANT CURRENT GRANTS ON logical1.t TO u", dynOpts(dyn), pb.RewriteCode_UnsupportedStatement},
-		{"to all", "GRANT SELECT ON logical1.t TO ALL", dynOpts(dyn), pb.RewriteCode_UnsupportedStatement},
 		{"no dynamic args", "GRANT SELECT ON logical1.t TO u", nil, pb.RewriteCode_UnsupportedStatement},
 		{"unresolvable db", "GRANT SELECT ON unknown.t TO u", dynOpts(dyn), pb.RewriteCode_InvalidRewriteRequest},
 		{"unqualified no upstream", "GRANT SELECT ON t TO u", dynOpts(dyn), pb.RewriteCode_InvalidRewriteRequest},
