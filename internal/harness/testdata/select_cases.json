@@ -33,7 +33,7 @@
     "want_code": "Success",
     "want_table_rewrites": {"db.r": "pd.rt"},
     "want_accessed": [{"original_database": "db", "original_table": "r", "logical_database": "", "physical_database": "pd", "is_remote": true}],
-    "want_sql": "SELECT a FROM remote('h:9000', pd, rt, 'u', 'p') AS \"db.r\""
+    "want_sql": "SELECT a FROM remote('h:9000', 'pd', 'rt', 'u', 'p') AS \"db.r\""
   },
   {
     "name": "cte_alias_not_rewritten",
