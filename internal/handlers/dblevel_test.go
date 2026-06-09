@@ -162,6 +162,104 @@ func TestRewriteDBLevel_showClustersPassthrough(t *testing.T) {
 	}
 }
 
+// SHOW DATABASES with a 3-entry database_map enumerates the LOGICAL names as a
+// UNION ALL of synthetic SELECTs, sorted by logical name. The "ghost" entry's
+// physical ("orphan") is NOT in known_physical_databases, so it is skipped — no
+// subquery and no database_rewrites entry. tenant1/tenant2 survive (alphabetical).
+func TestRewriteDBLevel_showDatabasesSynthetic(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "SHOW DATABASES")
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{
+		DatabaseMap: map[string]string{
+			"tenant2": "phys2",
+			"tenant1": "phys1",
+			"ghost":   "orphan",
+		},
+		KnownPhysicalDatabases: []string{"phys1", "phys2"},
+	})
+	resp, handled, err := RewriteDBLevel(e, ast, "SHOW DATABASES", opts)
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES {
+		t.Fatalf("code=%v stmt=%v msg=%q", resp.GetCode(), resp.GetStatementType(), resp.GetMessage())
+	}
+	want := "SELECT name FROM (" +
+		"SELECT 'tenant1' AS name UNION ALL SELECT 'tenant2' AS name" +
+		") ORDER BY name"
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), want) {
+		t.Errorf("sql=%q\nwant=%q", resp.GetSqlAfterRewrite(), want)
+	}
+	rw := resp.GetDatabaseRewrites()
+	if rw["tenant1"] != "phys1" || rw["tenant2"] != "phys2" {
+		t.Errorf("database_rewrites missing tenant1/tenant2: %v", rw)
+	}
+	if _, ok := rw["ghost"]; ok {
+		t.Errorf("ghost (untrusted physical) must not appear in database_rewrites: %v", rw)
+	}
+	if len(rw) != 2 {
+		t.Errorf("database_rewrites should have exactly 2 entries, got %v", rw)
+	}
+}
+
+// SHOW DATABASES NOT ILIKE '<pat>' renders the outer " WHERE name NOT ILIKE 'p%'"
+// clause (case_insensitive + not_like → "NOT ILIKE"), with the pattern escaped.
+func TestRewriteDBLevel_showDatabasesLike(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "SHOW DATABASES NOT ILIKE 'p%'")
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{
+		DatabaseMap:            map[string]string{"tenant1": "phys1"},
+		KnownPhysicalDatabases: []string{"phys1"},
+	})
+	resp, handled, err := RewriteDBLevel(e, ast, "SHOW DATABASES NOT ILIKE 'p%'", opts)
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code=%v msg=%q", resp.GetCode(), resp.GetMessage())
+	}
+	want := "SELECT name FROM (SELECT 'tenant1' AS name) WHERE name NOT ILIKE 'p%' ORDER BY name"
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), want) {
+		t.Errorf("sql=%q\nwant=%q", resp.GetSqlAfterRewrite(), want)
+	}
+}
+
+// SHOW DATABASES with an empty database_map → empty-body sentinel
+// (SELECT empty-string AS name WHERE 0); no database_rewrites entries.
+func TestRewriteDBLevel_showDatabasesEmpty(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "SHOW DATABASES")
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{KnownPhysicalDatabases: []string{"phys1"}})
+	resp, handled, err := RewriteDBLevel(e, ast, "SHOW DATABASES", opts)
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	want := "SELECT name FROM (SELECT '' AS name WHERE 0) ORDER BY name"
+	if resp.GetCode() != pb.RewriteCode_Success || !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), want) {
+		t.Errorf("code=%v sql=%q\nwant=%q", resp.GetCode(), resp.GetSqlAfterRewrite(), want)
+	}
+	if len(resp.GetDatabaseRewrites()) != 0 {
+		t.Errorf("database_rewrites=%v", resp.GetDatabaseRewrites())
+	}
+}
+
+// SHOW DATABASES with no dynamic_args → passthrough (Success, stmt SHOW_DATABASES,
+// verbatim SHOW DATABASES), no database_rewrites.
+func TestRewriteDBLevel_showDatabasesPassthroughNoDynamic(t *testing.T) {
+	e := newEngine(t)
+	ast := mustParse(t, e, "SHOW DATABASES")
+	resp, handled, err := RewriteDBLevel(e, ast, "SHOW DATABASES", nil)
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES {
+		t.Fatalf("code=%v stmt=%v", resp.GetCode(), resp.GetStatementType())
+	}
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "SHOW DATABASES") || len(resp.GetDatabaseRewrites()) != 0 {
+		t.Errorf("sql=%q rewrites=%v", resp.GetSqlAfterRewrite(), resp.GetDatabaseRewrites())
+	}
+}
+
 // A remote-mapped logical routes the enumeration through remote('addr', system,
 // tables, user, password); the (database, prefix) filter still uses the physical
 // name resolved from database_map.
