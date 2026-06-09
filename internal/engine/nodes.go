@@ -260,12 +260,14 @@ func colBare(s string) map[string]any {
 }
 
 // remoteFunc builds {"name":"remote","args":[addr, db, table, user, pw], ...}.
-// addr/user/pw are string literals; db/table are bare column identifiers.
+// All five args are string literals, matching ClickHouse's canonical remote()
+// form `remote('addr', 'db', 'table', 'user', 'password')` (the C++ oracle quotes
+// db/table as string literals, not bare identifiers).
 func remoteFunc(r *RemoteSpec) map[string]any {
 	return map[string]any{
 		"name": "remote",
 		"args": []any{
-			litStr(r.Addr), colBare(r.DB), colBare(r.Table), litStr(r.User), litStr(r.Password),
+			litStr(r.Addr), litStr(r.DB), litStr(r.Table), litStr(r.User), litStr(r.Password),
 		},
 		"distinct": false, "trailing_comments": []any{},
 		"use_bracket_syntax": false, "no_parens": false, "quoted": false,

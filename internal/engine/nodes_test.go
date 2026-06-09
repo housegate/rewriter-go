@@ -118,7 +118,7 @@ func TestRewriteSelectTables_remote(t *testing.T) {
 	}
 	got := genOf(t, out)
 	t.Logf("REMOTE got: %q", got)
-	want := "SELECT a FROM remote('h:9000', phys, t_x, 'u', 'p') AS \"db.t\" WHERE x IN (1, 2)"
+	want := "SELECT a FROM remote('h:9000', 'phys', 't_x', 'u', 'p') AS \"db.t\" WHERE x IN (1, 2)"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
@@ -158,7 +158,7 @@ func TestRewriteSelectTables_remoteWithAlias(t *testing.T) {
 	t.Logf("REMOTE_WITH_ALIAS got: %q", got)
 
 	// The alias wrapper node causes polyglot to render `remote(...) AS x`.
-	want := "SELECT * FROM remote('h:9000', phys, t_x, 'u', 'p') AS x"
+	want := "SELECT * FROM remote('h:9000', 'phys', 't_x', 'u', 'p') AS x"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
