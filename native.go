@@ -74,6 +74,20 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		return resultFromPB(wresp), nil
 	}
 
+	// Phase 3: route db-level statements (USE / SHOW TABLES / SHOW DATABASES /
+	// CREATE DATABASE / DROP DATABASE) after writes, before SELECT.
+	if dresp, handled, derr := handlers.RewriteDBLevel(r.engine, ast, sql, opts); derr != nil {
+		return RewriteResult{}, derr
+	} else if handled {
+		if dresp.GetCode() != pb.RewriteCode_Success && dresp.GetSqlAfterRewrite() == "" {
+			dresp.SqlAfterRewrite = sql // §8: always-runnable
+		}
+		r.mu.Lock()
+		r.last = &callContext{sql: sql, account: account}
+		r.mu.Unlock()
+		return resultFromPB(dresp), nil
+	}
+
 	// Phase 1: route SELECT to the real handler; everything else stays pass-through.
 	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect {
 		hresp, herr := handlers.RewriteSelect(r.engine, ast, opts)

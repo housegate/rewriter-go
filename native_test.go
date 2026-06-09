@@ -300,9 +300,10 @@ func TestNativeRewrite_invalidWriteSurfacesCode(t *testing.T) {
 	}
 }
 
-//  7. CREATE DATABASE is out of phase (Phase-3 stub) → UnsupportedStatement, but
-//     classify still labels it CREATE_DATABASE.
-func TestNativeRewrite_createDatabaseOutOfPhase(t *testing.T) {
+//  7. CREATE DATABASE with NO dynamic_args → RewriteDBLevel's no-dynamic reject
+//     (UnsupportedStatement), stmt still CREATE_DATABASE, and §8 echoes the input
+//     SQL so the result stays runnable.
+func TestNativeRewrite_createDatabaseNoDynamicArgsRejected(t *testing.T) {
 	e := newEngine(t)
 	r := New(e)
 	defer r.Close()
@@ -317,11 +318,14 @@ func TestNativeRewrite_createDatabaseOutOfPhase(t *testing.T) {
 	if res.StatementType != pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE {
 		t.Fatalf("stmt = %v, want CREATE_DATABASE", res.StatementType)
 	}
+	if res.SQL != "CREATE DATABASE db" {
+		t.Errorf("SQL = %q, want input echoed (§8)", res.SQL)
+	}
 }
 
-//  8. USE db is a command (CmdNone) → RewriteWrite returns handled=false, so it
-//     falls through to the pass-through (regenerate) path. Confirms write routing
-//     did NOT swallow non-write commands. classify labels it USE.
+//  8. USE db with no opts → RewriteWrite handled=false → RewriteDBLevel's USE
+//     passthrough (regenerate). Confirms write routing did NOT swallow non-write
+//     commands and db-level routing handles a no-dynamic USE. classify labels it USE.
 func TestNativeRewrite_useStillPassthrough(t *testing.T) {
 	e := newEngine(t)
 	r := New(e)
@@ -339,5 +343,127 @@ func TestNativeRewrite_useStillPassthrough(t *testing.T) {
 	}
 	if res.SQL == "" {
 		t.Fatal("pass-through SQL must always be set")
+	}
+}
+
+// --- Task 7: db-level routing in NativeRewriter.Rewrite ---------------------
+//
+// These exercise the dispatch added AFTER RewriteWrite and BEFORE the SELECT/
+// pass-through branches: USE / SHOW DATABASES / SHOW TABLES / CREATE DATABASE /
+// DROP DATABASE go to handlers.RewriteDBLevel; SELECT and writes still route
+// first (no regression).
+
+//  1. USE tenant1 under a database_map {tenant1→testnet} routes through
+//     RewriteDBLevel (no longer the bare pass-through): rewritten to `USE testnet`
+//     with a database_rewrites{tenant1:testnet} entry.
+func TestNativeRewrite_useRouted(t *testing.T) {
+	e := newEngine(t)
+	r := New(e, WithOptions(dynOptFn(&pb.RewriteTableDynamicArgs{
+		DatabaseMap: map[string]string{"tenant1": "testnet"},
+	})))
+	defer r.Close()
+
+	res, err := r.Rewrite(context.Background(), "USE tenant1", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success {
+		t.Fatalf("code = %v (%s), want Success", res.Code, res.Message)
+	}
+	if res.StatementType != pb.StatementType_STATEMENT_TYPE_USE {
+		t.Fatalf("stmt = %v, want USE", res.StatementType)
+	}
+	if !nativeSQLSemEq(t, e, res.SQL, "USE testnet") {
+		t.Fatalf("sql = %q, want ≈ USE testnet", res.SQL)
+	}
+	if want := map[string]string{"tenant1": "testnet"}; !nativeMapEq(res.DatabaseRewrites, want) {
+		t.Fatalf("database_rewrites = %v, want %v", res.DatabaseRewrites, want)
+	}
+}
+
+//  2. SHOW DATABASES under a database_map (with known_physical_databases) routes
+//     through RewriteDBLevel and gets the synthetic enumeration: Success,
+//     SHOW_DATABASES (no longer a bare pass-through).
+func TestNativeRewrite_showDatabasesRouted(t *testing.T) {
+	e := newEngine(t)
+	r := New(e, WithOptions(dynOptFn(&pb.RewriteTableDynamicArgs{
+		DatabaseMap:            map[string]string{"tenant1": "testnet"},
+		KnownPhysicalDatabases: []string{"testnet"},
+	})))
+	defer r.Close()
+
+	res, err := r.Rewrite(context.Background(), "SHOW DATABASES", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success {
+		t.Fatalf("code = %v (%s), want Success", res.Code, res.Message)
+	}
+	if res.StatementType != pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES {
+		t.Fatalf("stmt = %v, want SHOW_DATABASES", res.StatementType)
+	}
+	if !nativeSQLSemEq(t, e, res.SQL,
+		"SELECT name FROM (SELECT 'tenant1' AS name) ORDER BY name") {
+		t.Fatalf("sql = %q, want synthetic SHOW DATABASES enumeration", res.SQL)
+	}
+}
+
+//  3. CREATE DATABASE newdb under dynamic_args routes through RewriteDBLevel and
+//     gets the Task-6 DEBUG rewrite (`SELECT '...' AS cdstmt`) — NOT the removed
+//     Phase-2 out-of-phase UnsupportedStatement. This is the key end-to-end proof
+//     that db-level routing replaced the old write-path reject.
+func TestNativeRewrite_createDatabaseRouted(t *testing.T) {
+	e := newEngine(t)
+	r := New(e, WithOptions(dynOptFn(&pb.RewriteTableDynamicArgs{
+		DatabaseMap: map[string]string{"tenant1": "testnet"},
+	})))
+	defer r.Close()
+
+	res, err := r.Rewrite(context.Background(), "CREATE DATABASE newdb", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success {
+		t.Fatalf("code = %v (%s), want Success (debug rewrite, not out-of-phase reject)", res.Code, res.Message)
+	}
+	if res.StatementType != pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE {
+		t.Fatalf("stmt = %v, want CREATE_DATABASE", res.StatementType)
+	}
+	if !nativeSQLSemEq(t, e, res.SQL, "SELECT 'CREATE DATABASE newdb' AS cdstmt") {
+		t.Fatalf("sql = %q, want ≈ SELECT 'CREATE DATABASE newdb' AS cdstmt", res.SQL)
+	}
+}
+
+//  4. SELECT and writes still route FIRST (no regression): SELECT 1 → SELECT
+//     handler; DROP TABLE db.t → RewriteWrite (DROP_TABLE), never reaching the
+//     db-level branch.
+func TestNativeRewrite_selectAndWriteStillWork(t *testing.T) {
+	e := newEngine(t)
+	r := New(e, WithOptions(statOptFn(map[string]string{"db.t": "t_phys"})))
+	defer r.Close()
+
+	sel, err := r.Rewrite(context.Background(), "SELECT 1", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.Code != pb.RewriteCode_Success {
+		t.Fatalf("SELECT code = %v (%s), want Success", sel.Code, sel.Message)
+	}
+	if sel.StatementType != pb.StatementType_STATEMENT_TYPE_SELECT {
+		t.Fatalf("SELECT stmt = %v, want SELECT", sel.StatementType)
+	}
+
+	drop, err := r.Rewrite(context.Background(), "DROP TABLE db.t", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drop.Code != pb.RewriteCode_Success {
+		t.Fatalf("DROP code = %v (%s), want Success", drop.Code, drop.Message)
+	}
+	if drop.StatementType != pb.StatementType_STATEMENT_TYPE_DROP_TABLE {
+		t.Fatalf("DROP stmt = %v, want DROP_TABLE (writes route before db-level)", drop.StatementType)
+	}
+	if !nativeSQLSemEq(t, e, drop.SQL, "DROP TABLE db.t_phys") {
+		t.Fatalf("DROP sql = %q, want ≈ DROP TABLE db.t_phys", drop.SQL)
 	}
 }
