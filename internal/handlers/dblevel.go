@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strings"
+
 	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
@@ -35,7 +37,12 @@ func RewriteDBLevel(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewr
 		if info.Kind == engine.DBUse {
 			return dispatchUse(e, ast, sql, info, dyn)
 		}
-		// SHOW TABLES / SHOW DATABASES → Tasks 4-5 (dispatchShowTables/dispatchShowDatabases)
+		if info.Kind == engine.DBShow {
+			if info.ShowWhat == "DATABASES" {
+				return nil, false, nil // SHOW DATABASES → Task 5 (falls through for now)
+			}
+			return dispatchShowTables(e, ast, sql, info, dyn)
+		}
 	}
 	return nil, false, nil // not handled yet → caller falls through
 }
@@ -108,4 +115,58 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 		return resp, true, nil
 	}
 	return passthroughDB(e, ast, sql, resp)
+}
+
+// dispatchShowTables ports show_tables.cc handleShowTablesQuery. Only SHOW TABLES
+// proper is rewritten into a synthetic system.tables enumeration; SHOW CLUSTERS/
+// DICTIONARIES/SETTINGS/MERGES/CACHES (and a no-dynamic request) pass through.
+// The FROM clause (logical db) wins over upstream_logical_database_in_context; an
+// unresolvable physical or a dangling remote-upstream key is InvalidRewriteRequest.
+// A remote-mapped logical routes the enumeration through remote(...), but the
+// (database, prefix) filter still uses the database_map physical name.
+func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
+	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_SHOW_TABLES)
+	// Only SHOW TABLES proper is rewritten; SHOW CLUSTERS/DICTIONARIES/SETTINGS/
+	// MERGES/CACHES (and a no-dynamic request) pass through.
+	if info.ShowWhat != "TABLES" || dyn == nil {
+		return passthroughDB(e, ast, sql, resp)
+	}
+	fromLogical := info.DB
+	if dot := strings.IndexByte(fromLogical, '.'); dot >= 0 {
+		fromLogical = fromLogical[:dot]
+	}
+	logical := fromLogical
+	if logical == "" {
+		logical = dyn.GetUpstreamLogicalDatabaseInContext()
+	}
+	if logical == "" {
+		rejectDBInvalid(resp, "SHOW TABLES has no FROM clause and no upstream_logical_database_in_context is set; caller must send `USE <db>` or use `SHOW TABLES FROM <db>`")
+		return resp, true, nil
+	}
+	physical, ok := nameresolve.ResolvePhysicalDatabase(logical, dyn)
+	if !ok {
+		rejectDBInvalid(resp, "SHOW TABLES target logical database '"+logical+"' is not in database_map and not a known physical database; user does not have this database")
+		return resp, true, nil
+	}
+	source := "system.tables"
+	if key, ok := dyn.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]; ok {
+		up, ok := dyn.GetRemoteUpstreams()[key]
+		if !ok {
+			rejectDBInvalid(resp, "SHOW TABLES target logical database '"+logical+"' is mapped to remote upstream key '"+key+"' but that key is not in remote_upstreams")
+			return resp, true, nil
+		}
+		source = "remote('" + escapeSQLLiteral(up.GetAddr()) + "', system, tables, '" + escapeSQLLiteral(up.GetUser()) + "', '" + escapeSQLLiteral(up.GetPassword()) + "')"
+	}
+	prefix := nameresolve.BuildDynamicTablePrefix(logical, dyn)
+	ep := escapeSQLLiteral(prefix)
+	ephys := escapeSQLLiteral(physical)
+	resp.SqlAfterRewrite = "SELECT multiIf(startsWith(name, '" + ep + "'), substring(name, length('" + ep + "') + 1), name) AS name FROM (SELECT name FROM " + source + " WHERE database = '" + ephys + "' AND startsWith(name, '" + ep + "'))"
+	recordDatabaseRewrite(resp, logical, physical)
+	return resp, true, nil
+}
+
+// escapeSQLLiteral doubles every single quote for embedding inside a single-quoted
+// ClickHouse string literal. Mirrors C++ escapeSqlLiteral (common.h).
+func escapeSQLLiteral(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
