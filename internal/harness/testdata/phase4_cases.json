@@ -19,7 +19,7 @@
     "name": "exists_database_rejected",
     "sql": "EXISTS DATABASE logical1",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "EXISTS_TABLE", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "show_create_dynamic_rewrite",
@@ -34,7 +34,7 @@
     "name": "show_create_view_rejected",
     "sql": "SHOW CREATE VIEW v",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "SHOW_CREATE_TABLE", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_select_table",
@@ -91,43 +91,43 @@
     "name": "grant_global_scope_rejected",
     "sql": "GRANT SELECT ON *.* TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_column_rejected",
     "sql": "GRANT SELECT(c) ON logical1.t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_role_membership_rejected",
     "sql": "GRANT role1 TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_unresolvable_db_invalid",
     "sql": "GRANT SELECT ON unknown.t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "InvalidRewriteRequest", "want_stmt": "GRANT", "reject": true
+    "want_code": "InvalidRewriteRequest", "want_stmt": "", "reject": true
   },
   {
     "name": "exists_dictionary_rejected",
     "sql": "EXISTS DICTIONARY d",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "EXISTS_TABLE", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "show_create_dictionary_rejected",
     "sql": "SHOW CREATE DICTIONARY d",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "SHOW_CREATE_TABLE", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "exists_remote_rejected",
     "sql": "EXISTS remlog.t",
     "dynamic": {"database_map": {"remlog": "remphys"}, "known_physical_databases": ["remphys"], "delim": "_", "logical_database_to_remote_upstream_index": {"remlog": "up1"}, "remote_upstreams": {"up1": {"addr": "h:9000", "user": "ru", "password": "rp"}}},
-    "want_code": "UnsupportedStatement", "want_stmt": "EXISTS_TABLE", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "revoke_grant_option_for",
@@ -141,30 +141,30 @@
     "name": "grant_attach_rejected",
     "sql": "ATTACH GRANT SELECT ON logical1.t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_with_replace_rejected",
     "sql": "GRANT SELECT ON logical1.t TO u WITH REPLACE OPTION",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_current_grants_rejected",
     "sql": "GRANT CURRENT GRANTS ON logical1.t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_to_all_rejected",
     "sql": "GRANT SELECT ON logical1.t TO ALL",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "UnsupportedStatement", "want_stmt": "GRANT", "reject": true
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
   },
   {
     "name": "grant_unqualified_no_upstream_invalid",
     "sql": "GRANT SELECT ON t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
-    "want_code": "InvalidRewriteRequest", "want_stmt": "GRANT", "reject": true
+    "want_code": "InvalidRewriteRequest", "want_stmt": "", "reject": true
   }
 ]

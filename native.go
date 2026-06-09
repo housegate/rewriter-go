@@ -45,6 +45,21 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 	r.mu.Unlock()
 }
 
+// finalizeNonSuccess normalizes a handled non-Success response to match the C++
+// oracle: the C++ sets statement_type ONLY in setSuccessResponse, so on a reject
+// it stays UNSPECIFIED — native's classify() stamps it, so clear it here. Also
+// echoes the original SQL so RewriteResult.SQL stays runnable (design §8). No-op
+// on Success.
+func finalizeNonSuccess(resp *pb.RewriteSQLResponse, sql string) {
+	if resp.GetCode() == pb.RewriteCode_Success {
+		return
+	}
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	if resp.GetSqlAfterRewrite() == "" {
+		resp.SqlAfterRewrite = sql
+	}
+}
+
 // Option configures a NativeRewriter.
 type Option func(*NativeRewriter)
 
@@ -86,11 +101,8 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if wresp, handled, werr := handlers.RewriteWrite(r.engine, ast, sql, opts); werr != nil {
 		return RewriteResult{}, werr // unexpected/internal → fail-open Go error
 	} else if handled {
-		// Design §8: RewriteResult.SQL must always be runnable — on a non-Success
-		// (rejected) write, echo the original input so the caller can forward it.
-		if wresp.GetCode() != pb.RewriteCode_Success && wresp.GetSqlAfterRewrite() == "" {
-			wresp.SqlAfterRewrite = sql
-		}
+		// Design §8 + oracle parity: echo input + clear statement_type on reject.
+		finalizeNonSuccess(wresp, sql)
 		r.stash(sql, account, wresp)
 		return resultFromPB(wresp), nil
 	}
@@ -100,9 +112,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if dresp, handled, derr := handlers.RewriteDBLevel(r.engine, ast, sql, opts); derr != nil {
 		return RewriteResult{}, derr
 	} else if handled {
-		if dresp.GetCode() != pb.RewriteCode_Success && dresp.GetSqlAfterRewrite() == "" {
-			dresp.SqlAfterRewrite = sql // §8: always-runnable
-		}
+		finalizeNonSuccess(dresp, sql)
 		r.stash(sql, account, dresp)
 		return resultFromPB(dresp), nil
 	}
@@ -114,18 +124,14 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(r.engine, ast, sql, opts); xerr != nil {
 		return RewriteResult{}, xerr
 	} else if handled {
-		if xresp.GetCode() != pb.RewriteCode_Success && xresp.GetSqlAfterRewrite() == "" {
-			xresp.SqlAfterRewrite = sql // §8: always-runnable
-		}
+		finalizeNonSuccess(xresp, sql)
 		r.stash(sql, account, xresp)
 		return resultFromPB(xresp), nil
 	}
 	if gresp, handled, gerr := handlers.RewriteGrant(r.engine, ast, sql, opts); gerr != nil {
 		return RewriteResult{}, gerr
 	} else if handled {
-		if gresp.GetCode() != pb.RewriteCode_Success && gresp.GetSqlAfterRewrite() == "" {
-			gresp.SqlAfterRewrite = sql // §8: always-runnable
-		}
+		finalizeNonSuccess(gresp, sql)
 		r.stash(sql, account, gresp)
 		return resultFromPB(gresp), nil
 	}
