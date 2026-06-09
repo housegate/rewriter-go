@@ -45,12 +45,17 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 	r.mu.Unlock()
 }
 
-// finalizeNonSuccess normalizes a handled non-Success response to match the C++
-// oracle: the C++ sets statement_type ONLY in setSuccessResponse, so on a reject
-// it stays UNSPECIFIED — native's classify() stamps it, so clear it here. Also
-// echoes the original SQL so RewriteResult.SQL stays runnable (design §8). No-op
-// on Success.
-func finalizeNonSuccess(resp *pb.RewriteSQLResponse, sql string) {
+// finalize normalizes a handled response to match the C++ oracle. existence_clause
+// is stamped on EVERY response — Success AND reject — because the proto contract
+// requires it accurate even on a non-Success response (it is derived from the AST,
+// which a reject still has; only a SyntaxError, which never parses, leaves it
+// UNSPECIFIED). On a non-Success response it ALSO clears statement_type (the C++
+// sets that only in setSuccessResponse, so a reject stays UNSPECIFIED — native's
+// classify() stamps it, so clear it here) and echoes the original SQL so
+// RewriteResult.SQL stays runnable (design §8). NOTE: unlike statement_type,
+// existence_clause is NOT cleared on a reject.
+func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause) {
+	resp.ExistenceClause = ec
 	if resp.GetCode() == pb.RewriteCode_Success {
 		return
 	}
@@ -89,6 +94,17 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	}
 	resp.StatementType = r.classify(ast)
 
+	// existence_clause is derived from the AST (IF [NOT] EXISTS) and stamped on
+	// EVERY handled response below — it survives rejects (proto contract), unlike
+	// statement_type. Computed once here; only a SyntaxError (handled above, no
+	// AST) leaves it UNSPECIFIED.
+	ec := pb.ExistenceClause_EXISTENCE_CLAUSE_UNSPECIFIED
+	if inx, ix, _ := engine.ExistenceClause(ast); inx {
+		ec = pb.ExistenceClause_EXISTENCE_CLAUSE_IF_NOT_EXISTS
+	} else if ix {
+		ec = pb.ExistenceClause_EXISTENCE_CLAUSE_IF_EXISTS
+	}
+
 	// Compute the account-derived rewrite policy ONCE; shared by the write and
 	// SELECT paths below (nil when no options builder is injected → round-trip).
 	var opts []*pb.RewriteOption
@@ -101,8 +117,9 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if wresp, handled, werr := handlers.RewriteWrite(r.engine, ast, sql, opts); werr != nil {
 		return RewriteResult{}, werr // unexpected/internal → fail-open Go error
 	} else if handled {
-		// Design §8 + oracle parity: echo input + clear statement_type on reject.
-		finalizeNonSuccess(wresp, sql)
+		// Design §8 + oracle parity: stamp existence_clause; echo input + clear
+		// statement_type on reject.
+		finalize(wresp, sql, ec)
 		r.stash(sql, account, wresp)
 		return resultFromPB(wresp), nil
 	}
@@ -112,7 +129,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if dresp, handled, derr := handlers.RewriteDBLevel(r.engine, ast, sql, opts); derr != nil {
 		return RewriteResult{}, derr
 	} else if handled {
-		finalizeNonSuccess(dresp, sql)
+		finalize(dresp, sql, ec)
 		r.stash(sql, account, dresp)
 		return resultFromPB(dresp), nil
 	}
@@ -124,14 +141,14 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(r.engine, ast, sql, opts); xerr != nil {
 		return RewriteResult{}, xerr
 	} else if handled {
-		finalizeNonSuccess(xresp, sql)
+		finalize(xresp, sql, ec)
 		r.stash(sql, account, xresp)
 		return resultFromPB(xresp), nil
 	}
 	if gresp, handled, gerr := handlers.RewriteGrant(r.engine, ast, sql, opts); gerr != nil {
 		return RewriteResult{}, gerr
 	} else if handled {
-		finalizeNonSuccess(gresp, sql)
+		finalize(gresp, sql, ec)
 		r.stash(sql, account, gresp)
 		return resultFromPB(gresp), nil
 	}
@@ -142,6 +159,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		if herr != nil {
 			return RewriteResult{}, herr // unexpected/internal → fail-open Go error
 		}
+		finalize(hresp, sql, ec) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
 		r.stash(sql, account, hresp)
 		return resultFromPB(hresp), nil
 	}
@@ -152,6 +170,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
+	finalize(resp, sql, ec)
 	r.stash(sql, account, resp)
 	return resultFromPB(resp), nil
 }

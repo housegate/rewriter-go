@@ -44,6 +44,41 @@ func inspectSQL(t *testing.T, e Engine, sql string) WriteInfo {
 	return info
 }
 
+func TestExistenceClause(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql          string
+		wantIfNot    bool
+		wantIfExists bool
+	}{
+		{"CREATE TABLE IF NOT EXISTS db.t (x Int32) ENGINE = Memory", true, false},
+		{"CREATE TABLE db.t (x Int32) ENGINE = Memory", false, false},
+		{"CREATE DATABASE IF NOT EXISTS db", true, false},
+		{"CREATE VIEW IF NOT EXISTS db.v AS SELECT 1", true, false},
+		{"DROP TABLE IF EXISTS db.t", false, true},
+		{"DROP TABLE db.t", false, false},
+		{"DROP VIEW IF EXISTS db.v", false, true},
+		{"DROP DATABASE IF EXISTS db", false, true},
+		{"TRUNCATE TABLE IF EXISTS db.t", false, true},
+		{"SELECT 1", false, false}, // non-DDL → neither
+	}
+	for _, c := range cases {
+		t.Run(c.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(c.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			inx, ix, err := ExistenceClause(ast)
+			if err != nil {
+				t.Fatalf("ExistenceClause: %v", err)
+			}
+			if inx != c.wantIfNot || ix != c.wantIfExists {
+				t.Errorf("ExistenceClause = (ifNotExists=%v, ifExists=%v), want (%v, %v)", inx, ix, c.wantIfNot, c.wantIfExists)
+			}
+		})
+	}
+}
+
 func TestInspectWrite_simpleTargets(t *testing.T) {
 	e := newTestEngine(t)
 	cases := []struct {

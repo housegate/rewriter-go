@@ -148,6 +148,36 @@ func bodyOf(ast AST) (kind string, body map[string]any, root map[string]any, err
 	return kind, body, root, nil
 }
 
+// ExistenceClause reads the AST's IF [NOT] EXISTS clause and reports which form
+// is present. IfNotExists is set for the CREATE family (CREATE TABLE / DATABASE /
+// VIEW carrying `if_not_exists`); IfExists for the DROP/TRUNCATE family (DROP
+// TABLE / VIEW / DATABASE and TRUNCATE carrying `if_exists`). Any other kind (and
+// a kind without the flag) yields (false, false, nil). This mirrors the flags
+// WriteInfo.IfExists/IfNotExists and DatabaseTarget already read, surfaced as a
+// single AST-driven helper so native.go can stamp existence_clause on EVERY
+// response (it must survive rejects — the proto contract requires it accurate on a
+// non-Success response; only a SyntaxError, which never parses, leaves it
+// UNSPECIFIED).
+func ExistenceClause(ast AST) (ifNotExists, ifExists bool, err error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil {
+		return false, false, err
+	}
+	if body == nil {
+		return false, false, nil
+	}
+	switch kind {
+	case NodeCreateTable, NodeCreateDB, NodeCreateView:
+		inx, _ := body["if_not_exists"].(bool)
+		return inx, false, nil
+	case NodeDropTable, NodeDropView, NodeDropDB, NodeTruncate:
+		ix, _ := body["if_exists"].(bool)
+		return false, ix, nil
+	default:
+		return false, false, nil
+	}
+}
+
 // InspectWrite returns the read view of a write statement. Task 2 fills the
 // simple single-target kinds' flags and slots; later tasks extend the switch.
 func InspectWrite(ast AST) (WriteInfo, error) {
