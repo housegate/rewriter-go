@@ -14,7 +14,10 @@ import (
 // §6f/§10): the native rewriter intentionally does NOT split large IN clauses
 // into OR-batches the way the C++ QueryPreprocessor does (threshold 50). Polyglot
 // (Rust) parses arbitrarily large IN lists without ClickHouse's recursive-descent
-// stack limit, so the guard is unnecessary. Against the C++ oracle a 51+-element
+// stack limit, so this guard is unnecessary — BUT polyglot has its own
+// recursive-descent limit on bracket-nesting DEPTH (not IN-list length), guarded
+// separately by engine.exceedsNestingDepth (see internal/engine/guard.go). Against
+// the C++ oracle a 51+-element
 // IN is an ALLOW-LISTED divergence (C++ OR-batches; native keeps the flat IN —
 // the two are semantically equal). This test pins native's flat-IN behavior; it
 // deliberately performs NO oracle comparison.
