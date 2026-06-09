@@ -493,7 +493,10 @@ git commit -m "feat(reverse): Myers offset map + error-position remap"
 ```go
 package reverse
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestInvert(t *testing.T) {
 	t.Run("per-table dotted dynamic name", func(t *testing.T) {
@@ -538,6 +541,17 @@ func TestInvert(t *testing.T) {
 			t.Errorf("skip: %q", got)
 		}
 	})
+
+	t.Run("oversized SQL skips position-remap but still substitutes", func(t *testing.T) {
+		// Over the maxRemapSQL cap: buildOffsetMap is skipped (no OOM), but the
+		// per-table substitution still runs.
+		big := strings.Repeat("x", maxRemapSQL+1)
+		got := Invert("Table phys1.t missing", big, big+" changed",
+			map[string]string{"logical1.t": "phys1.t"}, nil)
+		if got != "Table logical1.t missing" {
+			t.Errorf("got %q", got)
+		}
+	})
 }
 ```
 
@@ -556,14 +570,26 @@ func TestInvert(t *testing.T) {
 // Empty error returns unchanged. Map entries whose origin==rewritten or whose
 // rewritten value is empty are skipped. Caller (native.go) invokes this only when
 // the stashed rewrite was Success.
+// maxRemapSQL bounds the position-remap stage. buildOffsetMap is a Myers diff —
+// O((N+M)*D) time and memory — so for very large SQL (well past any real query)
+// the byte-position remap is skipped. The native rewriter runs in-process with no
+// gRPC message-size limit shielding it (unlike the C++ service), so this cap is
+// the "caller is responsible for bounding input size" guard the C++ buildOffsetMap
+// documents. The cheap parts — the whole-SQL block swap and the boundary-delimited
+// per-table/per-database substitutions — still run, so name inversion is unaffected;
+// only the best-effort "position N" number is left pointing at rewritten coordinates.
+const maxRemapSQL = 256 * 1024
+
 func Invert(message, originalSQL, rewrittenSQL string, tableRewrites, databaseRewrites map[string]string) string {
 	if message == "" {
 		return message
 	}
 	err := message
 	if rewrittenSQL != "" && rewrittenSQL != originalSQL {
-		posMap := buildOffsetMap(rewrittenSQL, originalSQL)
-		err = remapErrorPositions(err, posMap)
+		if len(rewrittenSQL) <= maxRemapSQL && len(originalSQL) <= maxRemapSQL {
+			posMap := buildOffsetMap(rewrittenSQL, originalSQL)
+			err = remapErrorPositions(err, posMap)
+		}
 		err = flexibleSQLReplace(err, rewrittenSQL, originalSQL)
 	}
 	for _, origin := range sortedKeys(tableRewrites) {
