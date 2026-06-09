@@ -88,6 +88,33 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		return resultFromPB(dresp), nil
 	}
 
+	// Phase 4: EXISTS / SHOW CREATE (single-target), then GRANT / REVOKE
+	// (privilege deltas) — after db-level, before SELECT. Both match only
+	// `command` nodes and recognize disjoint verbs, so their relative order is
+	// irrelevant; this mirrors the C++ server order (exists → show_create → grant).
+	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(r.engine, ast, sql, opts); xerr != nil {
+		return RewriteResult{}, xerr
+	} else if handled {
+		if xresp.GetCode() != pb.RewriteCode_Success && xresp.GetSqlAfterRewrite() == "" {
+			xresp.SqlAfterRewrite = sql // §8: always-runnable
+		}
+		r.mu.Lock()
+		r.last = &callContext{sql: sql, account: account}
+		r.mu.Unlock()
+		return resultFromPB(xresp), nil
+	}
+	if gresp, handled, gerr := handlers.RewriteGrant(r.engine, ast, sql, opts); gerr != nil {
+		return RewriteResult{}, gerr
+	} else if handled {
+		if gresp.GetCode() != pb.RewriteCode_Success && gresp.GetSqlAfterRewrite() == "" {
+			gresp.SqlAfterRewrite = sql // §8: always-runnable
+		}
+		r.mu.Lock()
+		r.last = &callContext{sql: sql, account: account}
+		r.mu.Unlock()
+		return resultFromPB(gresp), nil
+	}
+
 	// Phase 1: route SELECT to the real handler; everything else stays pass-through.
 	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect {
 		hresp, herr := handlers.RewriteSelect(r.engine, ast, opts)
