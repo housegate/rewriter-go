@@ -59,3 +59,16 @@ func TestCompare_privilegeDeltas(t *testing.T) {
 		t.Error("differing privileges should not match")
 	}
 }
+
+func TestCompare_nilVsEmptyMap(t *testing.T) {
+	// native often inits an empty non-nil map; the C++ oracle returns nil.
+	got := &pb.RewriteSQLResponse{TableRewrites: map[string]string{}, DatabaseRewrites: map[string]string{}}
+	want := &pb.RewriteSQLResponse{} // nil maps
+	if d := Compare(got, want, nil); !d.Equal() {
+		t.Errorf("nil vs empty maps should be equal: %v", d.Mismatches)
+	}
+	nonEmpty := &pb.RewriteSQLResponse{TableRewrites: map[string]string{"a": "b"}}
+	if d := Compare(nonEmpty, want, nil); d.Equal() {
+		t.Error("non-empty vs nil should differ")
+	}
+}
