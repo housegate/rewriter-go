@@ -32,6 +32,9 @@ func NewPolyglot(libPath string) (Engine, error) {
 }
 
 func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
+	if exceedsNestingDepth(sql, maxParseDepth) {
+		return nil, fmt.Errorf("engine: parse: input bracket nesting exceeds limit %d", maxParseDepth)
+	}
 	ast, err := e.c.ParseOne(sql, dialect)
 	if err != nil {
 		return nil, fmt.Errorf("engine: parse: %w", err)
@@ -40,6 +43,9 @@ func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
 }
 
 func (e *polyglotEngine) ParseGeneric(sql string) (AST, error) {
+	if exceedsNestingDepth(sql, maxParseDepth) {
+		return nil, fmt.Errorf("engine: parse(generic): input bracket nesting exceeds limit %d", maxParseDepth)
+	}
 	ast, err := e.c.ParseOne(sql, "generic")
 	if err != nil {
 		return nil, fmt.Errorf("engine: parse(generic): %w", err)

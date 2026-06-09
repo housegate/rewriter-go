@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -608,4 +609,21 @@ func TestRewriteErrorMessage(t *testing.T) {
 			t.Errorf("inv=%q", inv)
 		}
 	})
+}
+
+func TestNativeRewrite_deepNestingFailsOpen(t *testing.T) {
+	e := newEngine(t)
+	r := New(e)
+	defer r.Close()
+	sql := "SELECT ~" + strings.Repeat("(", 600) + "1" + strings.Repeat(")", 600)
+	res, err := r.Rewrite(context.Background(), sql, "acct")
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err) // must be a code, not a crash/Go error
+	}
+	if res.Code != pb.RewriteCode_SyntaxError {
+		t.Errorf("code=%v, want SyntaxError (fail-open)", res.Code)
+	}
+	if res.SQL != sql {
+		t.Errorf("SQL must echo input on SyntaxError")
+	}
 }
