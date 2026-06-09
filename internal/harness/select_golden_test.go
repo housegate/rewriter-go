@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -181,29 +182,32 @@ func TestSelectGolden(t *testing.T) {
 	}
 }
 
-// semanticSQLEq compares two SQL strings by normalizing both through polyglot
-// (parse+generate), so cosmetic differences (backticks vs double-quotes, spacing)
-// collapse while genuine structural differences remain.
+// semanticSQLEq reports SQL equality by AST diff: two strings are equal when
+// polyglot parses them to the same AST (an empty diff). This is robust to the
+// formatting differences between polyglot's generator and ClickHouse's formatAst
+// — backtick vs double-quote identifiers, `AS` vs implicit aliases, spacing,
+// WhenNecessary column quoting — which are syntactically different but
+// semantically identical (design §6e: compare semantically, not byte-wise). A
+// normalize-then-string-compare missed these because polyglot regenerates its own
+// double-quote/implicit-alias form, which never equals the C++ backtick/AS form.
 func semanticSQLEq(e engine.Engine) SemanticEq {
 	return func(a, b string) (bool, error) {
-		na, err := normalizeSQLGolden(e, a)
+		if a == b {
+			return true, nil
+		}
+		raw, err := e.DiffSQL(a, b)
 		if err != nil {
 			return false, err
 		}
-		nb, err := normalizeSQLGolden(e, b)
-		if err != nil {
-			return false, err
-		}
-		return na == nb, nil
+		return diffIsEmpty(raw), nil
 	}
 }
 
-func normalizeSQLGolden(e engine.Engine, sql string) (string, error) {
-	ast, err := e.ParseOne(sql)
-	if err != nil {
-		return "", err
-	}
-	return e.Generate(ast)
+// diffIsEmpty reports whether a polyglot Diff result encodes no changes — an empty
+// JSON array (modulo surrounding whitespace).
+func diffIsEmpty(raw engine.AST) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "[]"
 }
 
 func eqStrMap(a, b map[string]string) bool {
