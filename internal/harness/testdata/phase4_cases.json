@@ -165,6 +165,12 @@
     "want_privileges_deltas": [{"action": "GRANT", "scope": "TABLE", "original_database": "logical1", "logical_database": "logical1", "physical_database": "phys1", "original_table": "t", "physical_table": "logical1.t", "privileges": ["SELECT"], "grantees": [{"name": "ALL"}], "grant_option": false}]
   },
   {
+    "name": "revoke_from_all_rejected",
+    "sql": "REVOKE SELECT ON logical1.t FROM ALL",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true
+  },
+  {
     "name": "grant_unqualified_no_upstream_invalid",
     "sql": "GRANT SELECT ON t TO u",
     "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
