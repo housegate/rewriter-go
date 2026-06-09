@@ -36,7 +36,7 @@
     "name": "create_table_as_table_function_reject",
     "sql": "CREATE TABLE db.t AS remote('h', d, x)",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "CREATE_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "CREATE TABLE db.t AS remote('h', d, x)"
@@ -65,7 +65,7 @@
     "name": "drop_table_multi_reject",
     "sql": "DROP TABLE db.a, db.b",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "DROP_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "DROP TABLE db.a, db.b"
@@ -104,7 +104,7 @@
     "name": "alter_cross_table_reject",
     "sql": "ALTER TABLE db.t ATTACH PARTITION 1 FROM db.src",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "ALTER_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "ALTER TABLE db.t ATTACH PARTITION 1 FROM db.src"
@@ -144,7 +144,7 @@
     "name": "insert_into_function_reject",
     "sql": "INSERT INTO FUNCTION remote('h', d, t) VALUES (1)",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "INSERT",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "INSERT INTO FUNCTION remote('h', d, t) VALUES (1)"
@@ -251,7 +251,7 @@
     "name": "optimize_bare_reject",
     "sql": "OPTIMIZE TABLE db.t",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "UNSPECIFIED",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "OPTIMIZE TABLE db.t"
@@ -260,7 +260,7 @@
     "name": "create_database_out_of_phase",
     "sql": "CREATE DATABASE db",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "CREATE_DATABASE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "CREATE DATABASE db"
@@ -269,7 +269,7 @@
     "name": "drop_database_out_of_phase",
     "sql": "DROP DATABASE db",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "DROP_DATABASE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "DROP DATABASE db"
@@ -289,7 +289,7 @@
     "sql": "DROP TABLE t",
     "dynamic": {"database_map": {"tenant1": "testnet"}},
     "want_code": "InvalidRewriteRequest",
-    "want_stmt": "DROP_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "want_accessed": [{"original_database": "", "original_table": "t", "logical_database": "", "physical_database": "", "is_remote": false}],
     "reject": true,
@@ -300,7 +300,7 @@
     "sql": "DROP TABLE db.t",
     "static": {"remote_table_map": {"db.t": {"Addr": "h", "Database": "d", "Table": "x"}}},
     "want_code": "UnsupportedStatement",
-    "want_stmt": "DROP_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "d", "is_remote": true}],
     "reject": true,
@@ -310,7 +310,7 @@
     "name": "truncate_view_reject",
     "sql": "TRUNCATE VIEW db.v",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "TRUNCATE_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "TRUNCATE VIEW db.v"
@@ -319,7 +319,7 @@
     "name": "truncate_database_reject",
     "sql": "TRUNCATE DATABASE db",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "TRUNCATE_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "TRUNCATE DATABASE db"
@@ -328,7 +328,7 @@
     "name": "create_dictionary_reject",
     "sql": "CREATE DICTIONARY db.d (id UInt64) PRIMARY KEY id SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "CREATE_TABLE",
+    "want_stmt": "",
     "want_table_rewrites": {},
     "reject": true,
     "want_sql": "CREATE DICTIONARY db.d (id UInt64) PRIMARY KEY id SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)"

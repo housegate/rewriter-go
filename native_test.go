@@ -322,8 +322,10 @@ func TestNativeRewrite_createDatabaseNoDynamicArgsRejected(t *testing.T) {
 	if res.Code != pb.RewriteCode_UnsupportedStatement {
 		t.Fatalf("code = %v (%s), want UnsupportedStatement", res.Code, res.Message)
 	}
-	if res.StatementType != pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE {
-		t.Fatalf("stmt = %v, want CREATE_DATABASE", res.StatementType)
+	// statement_type is UNSPECIFIED on a reject (oracle parity: C++ sets it only
+	// in setSuccessResponse, so a rejected statement carries no type).
+	if res.StatementType != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED {
+		t.Fatalf("stmt = %v, want UNSPECIFIED (reject)", res.StatementType)
 	}
 	if res.SQL != "CREATE DATABASE db" {
 		t.Errorf("SQL = %q, want input echoed (§8)", res.SQL)

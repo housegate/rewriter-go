@@ -21,7 +21,7 @@
     "sql": "USE nope",
     "dynamic": {"database_map": {"tenant1": "testnet"}},
     "want_code": "InvalidRewriteRequest",
-    "want_stmt": "USE",
+    "want_stmt": "",
     "want_database_rewrites": {},
     "reject": true,
     "want_sql": "USE nope"
@@ -34,7 +34,7 @@
       "logical_database_to_remote_upstream_index": {"tenant1": "up0"}
     },
     "want_code": "UnsupportedStatement",
-    "want_stmt": "USE",
+    "want_stmt": "",
     "want_database_rewrites": {},
     "reject": true,
     "want_sql": "USE tenant1"
@@ -65,7 +65,7 @@
     "sql": "SHOW TABLES",
     "dynamic": {"database_map": {"tenant1": "testnet"}},
     "want_code": "InvalidRewriteRequest",
-    "want_stmt": "SHOW_TABLES",
+    "want_stmt": "",
     "want_database_rewrites": {},
     "reject": true,
     "want_sql": "SHOW TABLES"
@@ -143,7 +143,7 @@
     "name": "create_database_no_dynamic_unsupported",
     "sql": "CREATE DATABASE newdb",
     "want_code": "UnsupportedStatement",
-    "want_stmt": "CREATE_DATABASE",
+    "want_stmt": "",
     "want_database_rewrites": {},
     "want_accessed": [],
     "reject": true,
@@ -154,7 +154,7 @@
     "sql": "CREATE DATABASE tenant1",
     "dynamic": {"database_map": {"tenant1": "testnet"}},
     "want_code": "InvalidRewriteRequest",
-    "want_stmt": "CREATE_DATABASE",
+    "want_stmt": "",
     "want_database_rewrites": {},
     "want_accessed": [{"original_database": "tenant1", "original_table": "", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false}],
     "reject": true,
@@ -175,7 +175,7 @@
     "sql": "DROP DATABASE nope",
     "dynamic": {"database_map": {"tenant1": "testnet"}},
     "want_code": "InvalidRewriteRequest",
-    "want_stmt": "DROP_DATABASE",
+    "want_stmt": "",
     "want_database_rewrites": {},
     "want_accessed": [{"original_database": "nope", "original_table": "", "logical_database": "nope", "physical_database": "", "is_remote": false}],
     "reject": true,
