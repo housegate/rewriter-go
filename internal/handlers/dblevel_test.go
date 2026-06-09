@@ -162,6 +162,25 @@ func TestRewriteDBLevel_showClustersPassthrough(t *testing.T) {
 	}
 }
 
+// TestRewriteDBLevel_showCreateDefers: SHOW CREATE TABLE is NOT an
+// ASTShowTablesQuery in ClickHouse (C++ routes it to a dedicated show_create
+// handler — Phase 4), so RewriteDBLevel must NOT claim it as SHOW_TABLES. It
+// returns handled=false → native pass-through classifies it SHOW_CREATE_TABLE.
+func TestRewriteDBLevel_showCreateDefers(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"tenant1": "testnet"}})
+	for _, sql := range []string{"SHOW CREATE TABLE db.t", "SHOW CREATE DATABASE db"} {
+		ast := mustParse(t, e, sql)
+		_, handled, err := RewriteDBLevel(e, ast, sql, opts)
+		if err != nil {
+			t.Fatalf("%q: %v", sql, err)
+		}
+		if handled {
+			t.Errorf("%q: handled=true, want false (SHOW CREATE must defer, not be stamped SHOW_TABLES)", sql)
+		}
+	}
+}
+
 // SHOW DATABASES with a 3-entry database_map enumerates the LOGICAL names as a
 // UNION ALL of synthetic SELECTs, sorted by logical name. The "ghost" entry's
 // physical ("orphan") is NOT in known_physical_databases, so it is skipped — no

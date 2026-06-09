@@ -65,7 +65,13 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 	case "SHOW":
 		info := DBLevelInfo{Kind: DBShow}
 		i := 1
-		if i < len(toks) && isNameToken(toks[i].TokenType) {
+		if i < len(toks) {
+			// The word right after SHOW is the kind discriminator. Depending on the
+			// word it lexes as a dedicated keyword (CREATE/CLUSTER/SETTINGS/TABLE) or
+			// as VAR (TABLES/DATABASES/GRANTS/DICTIONARIES/...), so capture it
+			// regardless of token type. This lets the handler distinguish SHOW CREATE
+			// (a separate ClickHouse AST → not SHOW_TABLES) from the
+			// ASTShowTablesQuery family (TABLES/CLUSTER/SETTINGS/...).
 			info.ShowWhat = strings.ToUpper(toks[i].Text)
 			i++
 		}

@@ -28,6 +28,12 @@ func TestParseDBLevel(t *testing.T) {
 		{"SHOW DATABASES ILIKE 'z%'", DBShow, "DATABASES", "", true, "z%", false, true},
 		{"SHOW CLUSTERS", DBShow, "CLUSTERS", "", false, "", false, false},
 		{"SHOW DICTIONARIES", DBShow, "DICTIONARIES", "", false, "", false, false},
+		// The kind word after SHOW lexes as a keyword (not VAR) for these; ShowWhat
+		// must still capture it so the handler can distinguish SHOW CREATE (a separate
+		// ClickHouse AST) from the ASTShowTablesQuery family (CLUSTER/SETTINGS/...).
+		{"SHOW CREATE TABLE db.t", DBShow, "CREATE", "", false, "", false, false},
+		{"SHOW CLUSTER 'x'", DBShow, "CLUSTER", "", false, "", false, false},
+		{"SHOW SETTINGS LIKE 'a%'", DBShow, "SETTINGS", "", true, "a%", false, false},
 		// LIKE pattern with an embedded single quote written as a doubled quote.
 		// The extractor must hold the LOGICAL (unescaped) value O'Brien% so the
 		// handler can re-escape it when emitting synthetic SQL.
