@@ -1,0 +1,184 @@
+[
+  {
+    "name": "use_rewrite_dynamic",
+    "sql": "USE tenant1",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "Success",
+    "want_stmt": "USE",
+    "want_database_rewrites": {"tenant1": "testnet"},
+    "want_sql": "USE testnet"
+  },
+  {
+    "name": "use_passthrough_no_dynamic",
+    "sql": "USE tenant1",
+    "want_code": "Success",
+    "want_stmt": "USE",
+    "want_database_rewrites": {},
+    "want_sql": "USE tenant1"
+  },
+  {
+    "name": "use_unresolvable_invalid",
+    "sql": "USE nope",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "InvalidRewriteRequest",
+    "want_stmt": "USE",
+    "want_database_rewrites": {},
+    "reject": true,
+    "want_sql": "USE nope"
+  },
+  {
+    "name": "use_remote_mapped_unsupported",
+    "sql": "USE tenant1",
+    "dynamic": {
+      "database_map": {"tenant1": "testnet"},
+      "logical_database_to_remote_upstream_index": {"tenant1": "up0"}
+    },
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "USE",
+    "want_database_rewrites": {},
+    "reject": true,
+    "want_sql": "USE tenant1"
+  },
+  {
+    "name": "show_tables_synthetic_from",
+    "sql": "SHOW TABLES FROM tenant1",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "Success",
+    "want_stmt": "SHOW_TABLES",
+    "want_database_rewrites": {"tenant1": "testnet"},
+    "want_sql": "SELECT multiIf(startsWith(name, 'tenant1.'), substring(name, length('tenant1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'testnet' AND startsWith(name, 'tenant1.'))"
+  },
+  {
+    "name": "show_tables_upstream_context",
+    "sql": "SHOW TABLES",
+    "dynamic": {
+      "database_map": {"tenant1": "testnet"},
+      "upstream_logical_database_in_context": "tenant1"
+    },
+    "want_code": "Success",
+    "want_stmt": "SHOW_TABLES",
+    "want_database_rewrites": {"tenant1": "testnet"},
+    "want_sql": "SELECT multiIf(startsWith(name, 'tenant1.'), substring(name, length('tenant1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'testnet' AND startsWith(name, 'tenant1.'))"
+  },
+  {
+    "name": "show_tables_no_context_invalid",
+    "sql": "SHOW TABLES",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "InvalidRewriteRequest",
+    "want_stmt": "SHOW_TABLES",
+    "want_database_rewrites": {},
+    "reject": true,
+    "want_sql": "SHOW TABLES"
+  },
+  {
+    "name": "show_tables_remote_source",
+    "sql": "SHOW TABLES FROM tenant1",
+    "dynamic": {
+      "database_map": {"tenant1": "testnet"},
+      "logical_database_to_remote_upstream_index": {"tenant1": "up0"},
+      "remote_upstreams": {"up0": {"Addr": "h:9000", "User": "u", "Password": "p"}}
+    },
+    "want_code": "Success",
+    "want_stmt": "SHOW_TABLES",
+    "want_database_rewrites": {"tenant1": "testnet"},
+    "sql_contains": [
+      "remote('h:9000', system, tables, 'u', 'p')",
+      "database = 'testnet'",
+      "startsWith(name, 'tenant1.')"
+    ]
+  },
+  {
+    "name": "show_clusters_passthrough",
+    "sql": "SHOW CLUSTERS",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "Success",
+    "want_stmt": "SHOW_TABLES",
+    "want_database_rewrites": {},
+    "want_sql": "SHOW CLUSTERS"
+  },
+  {
+    "name": "show_databases_synthetic_known_filter",
+    "sql": "SHOW DATABASES",
+    "dynamic": {
+      "database_map": {"tenant2": "phys2", "tenant1": "phys1", "ghost": "orphan"},
+      "known_physical_databases": ["phys1", "phys2"]
+    },
+    "want_code": "Success",
+    "want_stmt": "SHOW_DATABASES",
+    "want_database_rewrites": {"tenant1": "phys1", "tenant2": "phys2"},
+    "want_sql": "SELECT name FROM (SELECT 'tenant1' AS name UNION ALL SELECT 'tenant2' AS name) ORDER BY name"
+  },
+  {
+    "name": "show_databases_like",
+    "sql": "SHOW DATABASES NOT ILIKE 'p%'",
+    "dynamic": {
+      "database_map": {"tenant1": "phys1"},
+      "known_physical_databases": ["phys1"]
+    },
+    "want_code": "Success",
+    "want_stmt": "SHOW_DATABASES",
+    "want_database_rewrites": {"tenant1": "phys1"},
+    "want_sql": "SELECT name FROM (SELECT 'tenant1' AS name) WHERE name NOT ILIKE 'p%' ORDER BY name"
+  },
+  {
+    "name": "show_databases_empty",
+    "sql": "SHOW DATABASES",
+    "dynamic": {"known_physical_databases": ["phys1"]},
+    "want_code": "Success",
+    "want_stmt": "SHOW_DATABASES",
+    "want_database_rewrites": {},
+    "want_sql": "SELECT name FROM (SELECT '' AS name WHERE 0) ORDER BY name"
+  },
+  {
+    "name": "create_database_debug_dynamic",
+    "sql": "CREATE DATABASE newdb",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "Success",
+    "want_stmt": "CREATE_DATABASE",
+    "want_database_rewrites": {},
+    "want_accessed": [{"original_database": "newdb", "original_table": "", "logical_database": "newdb", "physical_database": "", "is_remote": false}],
+    "want_sql": "SELECT 'CREATE DATABASE newdb' AS cdstmt"
+  },
+  {
+    "name": "create_database_no_dynamic_unsupported",
+    "sql": "CREATE DATABASE newdb",
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "CREATE_DATABASE",
+    "want_database_rewrites": {},
+    "want_accessed": [],
+    "reject": true,
+    "want_sql": "CREATE DATABASE newdb"
+  },
+  {
+    "name": "create_database_already_exists_invalid",
+    "sql": "CREATE DATABASE tenant1",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "InvalidRewriteRequest",
+    "want_stmt": "CREATE_DATABASE",
+    "want_database_rewrites": {},
+    "want_accessed": [{"original_database": "tenant1", "original_table": "", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false}],
+    "reject": true,
+    "want_sql": "CREATE DATABASE tenant1"
+  },
+  {
+    "name": "drop_database_debug_db_rewrite",
+    "sql": "DROP DATABASE tenant1",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "Success",
+    "want_stmt": "DROP_DATABASE",
+    "want_database_rewrites": {"tenant1": "testnet"},
+    "want_accessed": [{"original_database": "tenant1", "original_table": "", "logical_database": "tenant1", "physical_database": "testnet", "is_remote": false}],
+    "want_sql": "SELECT 'DROP DATABASE tenant1' AS ddstmt"
+  },
+  {
+    "name": "drop_database_not_managed_invalid",
+    "sql": "DROP DATABASE nope",
+    "dynamic": {"database_map": {"tenant1": "testnet"}},
+    "want_code": "InvalidRewriteRequest",
+    "want_stmt": "DROP_DATABASE",
+    "want_database_rewrites": {},
+    "want_accessed": [{"original_database": "nope", "original_table": "", "logical_database": "nope", "physical_database": "", "is_remote": false}],
+    "reject": true,
+    "want_sql": "DROP DATABASE nope"
+  }
+]
