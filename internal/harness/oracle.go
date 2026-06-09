@@ -42,6 +42,16 @@ func (o *Oracle) Rewrite(sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLRe
 	return o.client.Rewrite(ctx, &pb.RewriteSQLRequest{Sql: sql, Options: opts})
 }
 
+// RewriteErrorMessage calls the C++ oracle's RewriteErrorMessage RPC. The C++
+// re-runs the rewrite from (sql, opts), so the request carries them directly.
+func (o *Oracle) RewriteErrorMessage(sql, errorMessage string, opts []*pb.RewriteOption) (*pb.RewriteErrorMessageResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return o.client.RewriteErrorMessage(ctx, &pb.RewriteErrorMessageRequest{
+		Sql: sql, ErrorMessage: errorMessage, Options: opts,
+	})
+}
+
 // Close releases the gRPC connection.
 func (o *Oracle) Close() error {
 	if o == nil || o.conn == nil {

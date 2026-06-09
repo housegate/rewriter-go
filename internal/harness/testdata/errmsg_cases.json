@@ -1,0 +1,29 @@
+[
+  {
+    "name": "exists_table_not_exist",
+    "sql": "EXISTS logical1.t",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "error_message": "Table phys1.`logical1.t` does not exist",
+    "want_inverted": "Table logical1.t does not exist"
+  },
+  {
+    "name": "use_database_not_exist",
+    "sql": "USE logical1",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "error_message": "Code: 81. DB::Exception: Database phys1 does not exist.",
+    "want_inverted": "Code: 81. DB::Exception: Database logical1 does not exist."
+  },
+  {
+    "name": "select_whole_sql_block",
+    "sql": "SELECT 1 FROM logical1.t",
+    "dynamic": {"database_map": {"logical1": "phys1"}, "known_physical_databases": ["phys1"], "delim": "_"},
+    "error_message": "Missing columns: while processing query: 'SELECT 1 FROM phys1.`logical1.t`'",
+    "want_inverted": "Missing columns: while processing query: 'SELECT 1 FROM logical1.t'"
+  },
+  {
+    "name": "no_rewrite_passthrough",
+    "sql": "SELECT 1",
+    "error_message": "Some unrelated error about xyz",
+    "want_inverted": "Some unrelated error about xyz"
+  }
+]
