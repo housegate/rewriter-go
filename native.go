@@ -8,6 +8,7 @@ import (
 	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/handlers"
+	"github.com/housegate/rewriter-go/internal/reverse"
 )
 
 // NativeRewriter is the in-process Rewriter. Phase 0 = pass-through.
@@ -18,9 +19,30 @@ type NativeRewriter struct {
 	last    *callContext
 }
 
+// callContext is the per-connection record of the most recent Rewrite, used by
+// RewriteErrorMessage to invert physical names in error text back to logical ones.
+// It stashes the forward rewrite maps + sql_after_rewrite + code so the inversion
+// needs no re-parse (the Go interface passes only the error message).
 type callContext struct {
-	sql     string
-	account string
+	sql              string
+	account          string
+	code             pb.RewriteCode
+	sqlAfterRewrite  string
+	tableRewrites    map[string]string
+	databaseRewrites map[string]string
+}
+
+// stash records the just-finished Rewrite as the per-connection last-call context.
+func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse) {
+	r.mu.Lock()
+	r.last = &callContext{
+		sql: sql, account: account,
+		code:             resp.GetCode(),
+		sqlAfterRewrite:  resp.GetSqlAfterRewrite(),
+		tableRewrites:    resp.GetTableRewrites(),
+		databaseRewrites: resp.GetDatabaseRewrites(),
+	}
+	r.mu.Unlock()
 }
 
 // Option configures a NativeRewriter.
@@ -47,6 +69,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if err != nil {
 		resp.Code = pb.RewriteCode_SyntaxError
 		resp.Message = err.Error()
+		r.stash(sql, account, resp)
 		return resultFromPB(resp), nil // SyntaxError is a code, not a Go error
 	}
 	resp.StatementType = r.classify(ast)
@@ -68,9 +91,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		if wresp.GetCode() != pb.RewriteCode_Success && wresp.GetSqlAfterRewrite() == "" {
 			wresp.SqlAfterRewrite = sql
 		}
-		r.mu.Lock()
-		r.last = &callContext{sql: sql, account: account}
-		r.mu.Unlock()
+		r.stash(sql, account, wresp)
 		return resultFromPB(wresp), nil
 	}
 
@@ -82,9 +103,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		if dresp.GetCode() != pb.RewriteCode_Success && dresp.GetSqlAfterRewrite() == "" {
 			dresp.SqlAfterRewrite = sql // §8: always-runnable
 		}
-		r.mu.Lock()
-		r.last = &callContext{sql: sql, account: account}
-		r.mu.Unlock()
+		r.stash(sql, account, dresp)
 		return resultFromPB(dresp), nil
 	}
 
@@ -98,9 +117,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		if xresp.GetCode() != pb.RewriteCode_Success && xresp.GetSqlAfterRewrite() == "" {
 			xresp.SqlAfterRewrite = sql // §8: always-runnable
 		}
-		r.mu.Lock()
-		r.last = &callContext{sql: sql, account: account}
-		r.mu.Unlock()
+		r.stash(sql, account, xresp)
 		return resultFromPB(xresp), nil
 	}
 	if gresp, handled, gerr := handlers.RewriteGrant(r.engine, ast, sql, opts); gerr != nil {
@@ -109,9 +126,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		if gresp.GetCode() != pb.RewriteCode_Success && gresp.GetSqlAfterRewrite() == "" {
 			gresp.SqlAfterRewrite = sql // §8: always-runnable
 		}
-		r.mu.Lock()
-		r.last = &callContext{sql: sql, account: account}
-		r.mu.Unlock()
+		r.stash(sql, account, gresp)
 		return resultFromPB(gresp), nil
 	}
 
@@ -121,9 +136,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		if herr != nil {
 			return RewriteResult{}, herr // unexpected/internal → fail-open Go error
 		}
-		r.mu.Lock()
-		r.last = &callContext{sql: sql, account: account}
-		r.mu.Unlock()
+		r.stash(sql, account, hresp)
 		return resultFromPB(hresp), nil
 	}
 
@@ -133,15 +146,23 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
-	r.mu.Lock()
-	r.last = &callContext{sql: sql, account: account}
-	r.mu.Unlock()
+	r.stash(sql, account, resp)
 	return resultFromPB(resp), nil
 }
 
+// RewriteErrorMessage inverts physical table/database names in a ClickHouse error
+// message back to the logical names the client used, using the maps stashed from
+// the most recent successful Rewrite on this connection. Returns the message
+// unchanged when there's no prior successful rewrite (nil context or a non-Success
+// last call) — mirroring doRewriteErrorMessage's non-Success passthrough.
 func (r *NativeRewriter) RewriteErrorMessage(_ context.Context, message string) (string, error) {
-	// Phase 0: no reverse-mapping yet (arrives in Phase 5). Echo the message.
-	return message, nil
+	r.mu.Lock()
+	last := r.last
+	r.mu.Unlock()
+	if message == "" || last == nil || last.code != pb.RewriteCode_Success {
+		return message, nil
+	}
+	return reverse.Invert(message, last.sql, last.sqlAfterRewrite, last.tableRewrites, last.databaseRewrites), nil
 }
 
 func (r *NativeRewriter) Close() error {
