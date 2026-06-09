@@ -50,10 +50,11 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectUnsupported(resp, "COPY is not supported")
 		return resp, true, nil
-	case engine.NodeCreateDB, engine.NodeDropDB:
-		return dispatchDatabaseOutOfPhase(info)
 	default:
-		return nil, false, nil // not handled this task → caller falls through to SELECT
+		// CREATE DATABASE / DROP DATABASE (NodeCreateDB/NodeDropDB) and anything
+		// else this phase doesn't structure fall through here (handled=false) so
+		// the caller routes them to RewriteDBLevel / SELECT.
+		return nil, false, nil
 	}
 }
 
@@ -480,17 +481,4 @@ func rawAlterIsNonTableDDL(u string) bool {
 	default:
 		return false
 	}
-}
-
-// dispatchDatabaseOutOfPhase rejects CREATE/DROP DATABASE as not-yet-supported.
-// Phase 3 replaces this with the synthetic-SELECT debug rewrite + db_map validation
-// (C++ writes.cc:277-345 / 403-463).
-func dispatchDatabaseOutOfPhase(info engine.WriteInfo) (*pb.RewriteSQLResponse, bool, error) {
-	stmt := pb.StatementType_STATEMENT_TYPE_CREATE_DATABASE
-	if info.Kind == engine.NodeDropDB {
-		stmt = pb.StatementType_STATEMENT_TYPE_DROP_DATABASE
-	}
-	resp := newWriteResp(stmt)
-	rejectUnsupported(resp, "database-level DDL (CREATE/DROP DATABASE) is handled in Phase 3")
-	return resp, true, nil
 }
