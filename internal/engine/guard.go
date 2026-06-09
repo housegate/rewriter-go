@@ -6,8 +6,9 @@ package engine
 // on darwin/arm64. We cap well below that: legitimate SQL essentially never nests
 // expression brackets past ~40, and an over-cap statement fails open (the parser
 // guard returns an error → SyntaxError → the caller forwards the original SQL to
-// ClickHouse, whose own parser handles up to max_parser_depth=1000). Lower this if
-// a platform with a smaller stack is found to crash below it.
+// ClickHouse, whose own recursive-descent parser is far more robust — the C++
+// rewriter invokes it with parser depth limit 0, i.e. unlimited). Lower this if a
+// platform with a smaller stack is found to crash below it.
 const maxParseDepth = 100
 
 // exceedsNestingDepth reports whether sql nests () or [] brackets deeper than max,
