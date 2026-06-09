@@ -537,3 +537,75 @@ func TestNativeRewrite_phase4(t *testing.T) {
 		}
 	})
 }
+
+func TestRewriteErrorMessage(t *testing.T) {
+	e := newEngine(t)
+	optFn := func(string) []*pb.RewriteOption {
+		return []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+			Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+				DynamicArgs: &pb.RewriteTableDynamicArgs{
+					DatabaseMap:            map[string]string{"logical1": "phys1"},
+					KnownPhysicalDatabases: []string{"phys1"},
+					Delim:                  "_",
+				}}}}}
+	}
+	r := New(e, WithOptions(optFn))
+	defer r.Close()
+	ctx := context.Background()
+
+	t.Run("inverts table name after EXISTS rewrite", func(t *testing.T) {
+		res, err := r.Rewrite(ctx, "EXISTS logical1.t", "acct")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// sanity: the rewrite produced the physical name in table_rewrites.
+		if res.TableRewrites["logical1.t"] != "phys1.logical1.t" {
+			t.Fatalf("table_rewrites=%v", res.TableRewrites)
+		}
+		inv, err := r.RewriteErrorMessage(ctx, "Table phys1.`logical1.t` does not exist")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inv != "Table logical1.t does not exist" {
+			t.Errorf("inv=%q", inv)
+		}
+	})
+
+	t.Run("inverts database name after USE rewrite", func(t *testing.T) {
+		if _, err := r.Rewrite(ctx, "USE logical1", "acct"); err != nil {
+			t.Fatal(err)
+		}
+		inv, _ := r.RewriteErrorMessage(ctx, "Database phys1 does not exist")
+		if inv != "Database logical1 does not exist" {
+			t.Errorf("inv=%q", inv)
+		}
+	})
+
+	t.Run("no prior rewrite → unchanged", func(t *testing.T) {
+		fresh := New(e, WithOptions(optFn))
+		defer fresh.Close()
+		inv, _ := fresh.RewriteErrorMessage(ctx, "Table phys1.x does not exist")
+		if inv != "Table phys1.x does not exist" {
+			t.Errorf("inv=%q", inv)
+		}
+	})
+
+	t.Run("after a reject → unchanged (last code != Success)", func(t *testing.T) {
+		if _, err := r.Rewrite(ctx, "GRANT SELECT ON *.* TO u", "acct"); err != nil {
+			t.Fatal(err)
+		}
+		inv, _ := r.RewriteErrorMessage(ctx, "Database phys1 does not exist")
+		if inv != "Database phys1 does not exist" {
+			t.Errorf("reject should not invert: %q", inv)
+		}
+	})
+
+	t.Run("empty message → empty", func(t *testing.T) {
+		if _, err := r.Rewrite(ctx, "USE logical1", "acct"); err != nil {
+			t.Fatal(err)
+		}
+		if inv, _ := r.RewriteErrorMessage(ctx, ""); inv != "" {
+			t.Errorf("inv=%q", inv)
+		}
+	})
+}
