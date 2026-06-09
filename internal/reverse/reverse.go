@@ -12,6 +12,7 @@ package reverse
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -262,4 +263,69 @@ func remapErrorPositions(err string, posMap []int) string {
 		}
 		return sub[1] + strconv.Itoa(posMap[pos1-1]+1)
 	})
+}
+
+// Invert maps physical names in a ClickHouse error message back to the logical
+// names the client used, using the forward maps from the most recent successful
+// Rewrite. Stages mirror doRewriteErrorMessage (rewriter-server.cc:461-513):
+//  1. when the rewritten SQL differs from the original: remap "position N" byte
+//     refs, then swap the whole rewritten-SQL block back to the original;
+//  2. per-table substitution (rewritten qualified name -> origin);
+//  3. per-database substitution (physical -> logical).
+//
+// Empty error returns unchanged. Map entries whose origin==rewritten or whose
+// rewritten value is empty are skipped. Caller (native.go) invokes this only when
+// the stashed rewrite was Success.
+// maxRemapSQL bounds the position-remap stage. buildOffsetMap is a Myers diff —
+// O((N+M)*D) time and memory — so for very large SQL (well past any real query)
+// the byte-position remap is skipped. The native rewriter runs in-process with no
+// gRPC message-size limit shielding it (unlike the C++ service), so this cap is
+// the "caller is responsible for bounding input size" guard the C++ buildOffsetMap
+// documents. The cheap parts — the whole-SQL block swap and the boundary-delimited
+// per-table/per-database substitutions — still run, so name inversion is unaffected;
+// only the best-effort "position N" number is left pointing at rewritten coordinates.
+const maxRemapSQL = 256 * 1024
+
+func Invert(message, originalSQL, rewrittenSQL string, tableRewrites, databaseRewrites map[string]string) string {
+	if message == "" {
+		return message
+	}
+	err := message
+	if rewrittenSQL != "" && rewrittenSQL != originalSQL {
+		if len(rewrittenSQL) <= maxRemapSQL && len(originalSQL) <= maxRemapSQL {
+			posMap := buildOffsetMap(rewrittenSQL, originalSQL)
+			err = remapErrorPositions(err, posMap)
+		}
+		err = flexibleSQLReplace(err, rewrittenSQL, originalSQL)
+	}
+	for _, origin := range sortedKeys(tableRewrites) {
+		rewritten := tableRewrites[origin]
+		if origin == rewritten || rewritten == "" {
+			continue
+		}
+		err = substituteQualified(err, rewritten, origin)
+	}
+	for _, origin := range sortedKeys(databaseRewrites) {
+		physical := databaseRewrites[origin]
+		if origin == physical || physical == "" {
+			continue
+		}
+		err = substituteIdent(err, physical, origin)
+	}
+	return err
+}
+
+// sortedKeys returns m's keys in sorted order. The C++ iterates the protobuf maps
+// in unspecified order; substitutions are boundary-delimited and non-overlapping,
+// so order doesn't change the result — sorting only makes Go output deterministic.
+func sortedKeys(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
