@@ -12,6 +12,7 @@ package reverse
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -121,4 +122,144 @@ func flexibleSQLRegex(sql string) *regexp.Regexp {
 		}
 	}
 	return regexp.MustCompile(b.String())
+}
+
+// buildOffsetMap returns a byte-position map from rewritten to original via a
+// forward Myers O(ND) diff: result[i] (i in [0,len(rewritten)]) is the byte offset
+// in original corresponding to offset i in rewritten; result[N]=len(original).
+// Positions inside a deleted span collapse to the surrounding equal-range boundary
+// — best-effort but stable enough that "position N" inside a rewritten identifier
+// remaps to the start of the user's original identifier. Faithful port of the C++
+// buildOffsetMap (rewriter-server.cc:144-229). Runtime O((N+M)*D); D is tiny for
+// SQL identifier swaps.
+func buildOffsetMap(rewritten, original string) []int {
+	N, M := len(rewritten), len(original)
+	posMap := make([]int, N+1)
+	posMap[N] = M
+	if N == 0 {
+		return posMap
+	}
+	if M == 0 {
+		for i := 0; i < N; i++ {
+			posMap[i] = 0
+		}
+		return posMap
+	}
+
+	MAX := N + M
+	kIdx := func(k int) int { return k + MAX }
+	V := make([]int, 2*MAX+1)
+	var trace [][]int
+
+	foundD := -1
+	for d := 0; d <= MAX; d++ {
+		snap := make([]int, len(V))
+		copy(snap, V)
+		trace = append(trace, snap)
+		done := false
+		for k := -d; k <= d && !done; k += 2 {
+			var x int
+			down := (k == -d) || (k != d && V[kIdx(k-1)] < V[kIdx(k+1)])
+			if down {
+				x = V[kIdx(k+1)]
+			} else {
+				x = V[kIdx(k-1)] + 1
+			}
+			y := x - k
+			for x < N && y < M && rewritten[x] == original[y] {
+				x++
+				y++
+			}
+			V[kIdx(k)] = x
+			if x >= N && y >= M {
+				foundD = d
+				done = true
+			}
+		}
+		if done {
+			break
+		}
+	}
+
+	if foundD < 0 {
+		for i := 0; i < N; i++ {
+			posMap[i] = M
+		}
+		return posMap
+	}
+
+	x, y := N, M
+	for d := foundD; d > 0; d-- {
+		Vp := trace[d]
+		k := x - y
+		var down bool
+		switch {
+		case k == -d:
+			down = true
+		case k == d:
+			down = false
+		default:
+			down = Vp[kIdx(k-1)] < Vp[kIdx(k+1)]
+		}
+		prevK := k - 1
+		if down {
+			prevK = k + 1
+		}
+		prevX := Vp[kIdx(prevK)]
+		prevY := prevX - prevK
+		slideStartX := prevX + 1
+		slideStartY := prevY
+		if down {
+			slideStartX = prevX
+			slideStartY = prevY + 1
+		}
+		for x > slideStartX && y > slideStartY {
+			x--
+			y--
+			if x < N {
+				posMap[x] = y
+			}
+		}
+		if down {
+			y = prevY
+		} else {
+			if prevX < N {
+				posMap[prevX] = prevY
+			}
+			x = prevX
+		}
+	}
+	for x > 0 && y > 0 {
+		x--
+		y--
+		if x < N {
+			posMap[x] = y
+		}
+	}
+	for x > 0 {
+		x--
+		posMap[x] = 0
+	}
+	return posMap
+}
+
+var positionRe = regexp.MustCompile(`([Pp]osition\s+)(\d+)`)
+
+// remapErrorPositions rewrites "position N" byte references (1-based) in err from
+// rewritten coordinates to original coordinates via posMap. An N==0 or N past the
+// rewritten length is left untouched (probably not a SQL position). Mirrors the
+// C++ remapErrorPositions (rewriter-server.cc:244-273).
+func remapErrorPositions(err string, posMap []int) string {
+	if len(posMap) <= 1 {
+		return err
+	}
+	n := len(posMap) - 1 // rewritten SQL byte length
+	return positionRe.ReplaceAllStringFunc(err, func(m string) string {
+		sub := positionRe.FindStringSubmatch(m)
+		pos1, e := strconv.Atoi(sub[2])
+		if e != nil || pos1 == 0 || pos1 > n {
+			return m
+		}
+		return sub[1] + strconv.Itoa(posMap[pos1-1]+1)
+	})
 }
