@@ -11,6 +11,10 @@ type AST = json.RawMessage
 // Engine wraps the polyglot SQL engine, pinned to the ClickHouse dialect.
 type Engine interface {
 	ParseOne(sql string) (AST, error)
+	// ParseGeneric parses under polyglot's `generic` dialect, used to recover
+	// GRANT/REVOKE structure that the clickhouse dialect leaves as an opaque
+	// `command` node. Returns the single statement's node JSON.
+	ParseGeneric(sql string) (AST, error)
 	Generate(ast AST) (string, error)
 	RenameTables(ast AST, mapping map[string]string) (AST, error)
 	QualifyTables(ast AST, db string) (AST, error)
