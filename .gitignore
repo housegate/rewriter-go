@@ -1,5 +1,5 @@
-# built FFI lib + polyglot source checkout
-/third_party/
+# built FFI lib (polyglot source itself is a git submodule at third_party/polyglot-src)
+/third_party/lib/
 # spike scratch
 /tmp/
 # go
