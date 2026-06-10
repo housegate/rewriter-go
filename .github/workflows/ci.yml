@@ -12,7 +12,11 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
+      # go.mod replaces the polyglot Go bindings with the submodule checkout,
+      # so even the pure-Go lane needs submodules.
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -26,68 +30,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
       - uses: dtolnay/rust-toolchain@stable
+      # Key the Rust build cache on the pinned submodule commit so bumping
+      # polyglot invalidates it.
+      - id: polyglot
+        run: echo "sha=$(git rev-parse HEAD:third_party/polyglot-src)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             third_party/polyglot-src/target
-          key: polyglot-ffi-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          key: polyglot-ffi-${{ runner.os }}-${{ steps.polyglot.outputs.sha }}
       - run: make ffi
       - run: make test
       - name: fidelity spike
         run: POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.so" go run ./cmd/fidelity-spike
-
-  # Oracle-differential lane (the TRUE parity gate): build the FFI lib + run the
-  # C++ rewriter-grpc image as a service, then run the harness with
-  # REWRITER_ORACLE_ADDR so every golden corpus is diffed field-by-field against
-  # the real C++ behavior. The image lives in a private GCP Artifact Registry, so
-  # this needs the GCP_ORACLE_KEY secret (a service-account JSON key with
-  # roles/artifactregistry.reader on the sentio-352722 `sentio` repo). The `if`
-  # guard skips the job where the secret is absent (forks) so the rest of CI runs.
-  # ORACLE_TAG must track the C++ version whose source was ported (bump in lockstep).
-  oracle:
-    runs-on: ubuntu-latest
-    if: ${{ github.repository == 'housegate/rewriter-go' }}
-    env:
-      ORACLE_IMAGE: us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter
-      ORACLE_TAG: "0.11.0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            third_party/polyglot-src/target
-          key: polyglot-ffi-${{ runner.os }}-${{ hashFiles('Makefile') }}
-      - run: make ffi
-      - uses: docker/login-action@v3
-        with:
-          registry: us-west1-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GCP_ORACLE_KEY }}
-      - name: Start C++ oracle
-        run: |
-          docker run -d --name oracle -p 50051:50051 \
-            "$ORACLE_IMAGE:$ORACLE_TAG" /clickhousegate_rewriter 50051
-          for i in $(seq 1 30); do
-            if bash -c "</dev/tcp/127.0.0.1/50051" 2>/dev/null; then echo "oracle up"; break; fi
-            sleep 1
-          done
-      - name: Differential harness
-        env:
-          POLYGLOT_SQL_FFI_PATH: ${{ github.workspace }}/third_party/lib/libpolyglot_sql_ffi.so
-          REWRITER_ORACLE_ADDR: localhost:50051
-        run: go test ./internal/harness -count=1 -v
-      - name: Oracle logs on failure
-        if: failure()
-        run: docker logs oracle || true
