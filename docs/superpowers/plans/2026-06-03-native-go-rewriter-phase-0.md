@@ -1081,7 +1081,7 @@ type RewriteResult struct {
 	FailedCTEAliases       []string
 }
 
-// Rewriter rewrites Sentio-Network mode SQL into real SQL, bound to one client
+// Rewriter rewrites network mode SQL into real SQL, bound to one client
 // connection. Fail-open: a non-nil error means forward the original SQL.
 type Rewriter interface {
 	Rewrite(ctx context.Context, sql, effectiveAccount string) (RewriteResult, error)
