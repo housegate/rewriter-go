@@ -1,0 +1,100 @@
+name: release
+
+# Manually-dispatched release. Version is X.Y.Z computed by
+# scripts/next-version.sh: X = the `major` input (default 0), Y bumps on the
+# first release of a calendar day (Asia/Shanghai), Z bumps within the same
+# day. First release of a major is X.1.0.
+#
+# Produces an annotated tag v<version> and a GitHub Release carrying the
+# polyglot FFI libraries (linux x86_64 .so + macOS arm64 .dylib), built and
+# test-gated on both platforms. The tag also makes the Go module fetchable
+# at that version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      major:
+        description: 'Major version (X in X.Y.Z)'
+        default: '0'
+        required: false
+
+concurrency:
+  group: release
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # next-version.sh needs all tags and their dates
+      - id: next
+        run: |
+          v=$(scripts/next-version.sh "${{ inputs.major }}")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "next release: v$v"
+
+  ffi:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            lib: libpolyglot_sql_ffi.so
+            asset: libpolyglot_sql_ffi-linux-x86_64.so
+          - os: macos-latest
+            lib: libpolyglot_sql_ffi.dylib
+            asset: libpolyglot_sql_ffi-macos-arm64.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - uses: dtolnay/rust-toolchain@stable
+      # Same cache key scheme as ci.yml, so the linux lane reuses its cache.
+      - id: polyglot
+        run: echo "sha=$(git rev-parse HEAD:third_party/polyglot-src)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/polyglot-src/target
+          key: polyglot-ffi-${{ runner.os }}-${{ steps.polyglot.outputs.sha }}
+      - run: make ffi
+      # Release gate: the full engine-backed suite must pass on each platform.
+      - run: make test
+      - run: cp "third_party/lib/${{ matrix.lib }}" "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: [version, ffi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        # Annotated tag: next-version.sh reads the release day from the tag's
+        # creatordate, so the tag must carry a tagger date (not be lightweight).
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "release v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes dist/*
