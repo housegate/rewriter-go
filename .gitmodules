@@ -1,0 +1,3 @@
+[submodule "third_party/polyglot-src"]
+	path = third_party/polyglot-src
+	url = https://github.com/tobilg/polyglot
