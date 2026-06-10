@@ -13,7 +13,7 @@ export REWRITER_ORACLE_ADDR=localhost:50051   # the running oracle container
 go test ./internal/harness -count=1            # the differential
 ```
 The oracle container must stay running. If absent, restart it:
-`docker run -d --name rwo-oracle --platform linux/amd64 -p 50051:50051 us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:0.11.0 /clickhousegate_rewriter 50051`
+`docker run -d --name rwo-oracle --platform linux/amd64 -p 50051:50051 <private-registry>/housegate-rewriter:0.11.0 /clickhousegate_rewriter 50051`
 
 ## Baseline parity report (live oracle, captured 2026-06-09)
 
@@ -349,7 +349,7 @@ git commit -m "test(harness): allow-list DETACH code divergence (polyglot parses
 
 **Files:** Modify `.github/workflows/ci.yml`; document the GCP auth requirement
 
-- [ ] **Step 1: Add the `oracle` job** to `.github/workflows/ci.yml`. It needs (a) the FFI lib (build via `make ffi`, reuse the cache from the `ffi` job's key) and (b) the C++ oracle running as a service. The image lives in a **private GCP Artifact Registry** (`us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter`), so the job must authenticate to GCP. Use `google-github-actions/auth` with a repo secret. Append:
+- [ ] **Step 1: Add the `oracle` job** to `.github/workflows/ci.yml`. It needs (a) the FFI lib (build via `make ffi`, reuse the cache from the `ffi` job's key) and (b) the C++ oracle running as a service. The image lives in a **private GCP Artifact Registry** (`<private-registry>/housegate-rewriter`), so the job must authenticate to GCP. Use `google-github-actions/auth` with a repo secret. Append:
 
 ```yaml
   # Oracle-differential lane: build the FFI lib + run the C++ rewriter-grpc oracle
@@ -362,7 +362,7 @@ git commit -m "test(harness): allow-list DETACH code divergence (polyglot parses
     runs-on: ubuntu-latest
     if: ${{ github.repository == 'housegate/rewriter-go' }}
     env:
-      ORACLE_IMAGE: us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter
+      ORACLE_IMAGE: <private-registry>/housegate-rewriter
       ORACLE_TAG: "0.11.0"
     steps:
       - uses: actions/checkout@v4
@@ -411,7 +411,7 @@ git commit -m "test(harness): allow-list DETACH code divergence (polyglot parses
   - Pin `ORACLE_TAG` to the version whose C++ source matches the port (`0.11.0` today). Add a comment that it should be bumped in lockstep when porting newer C++ behavior.
   - The `if: github.repository == ...` guard keeps the job from failing on forks/PRs without the secret.
 
-- [ ] **Step 2: Document the secret in `README.md`.** Add a short "CI oracle differential" subsection under the existing CI/build notes: the `oracle` job runs the C++ `rewriter-grpc` image as the parity oracle and requires a repo secret `GCP_ORACLE_KEY` (a GCP service-account JSON key with `roles/artifactregistry.reader` on the `sentio-352722` `sentio` repo); without it the job is skipped. Note that `ORACLE_TAG` must track the ported C++ version.
+- [ ] **Step 2: Document the secret in `README.md`.** Add a short "CI oracle differential" subsection under the existing CI/build notes: the `oracle` job runs the C++ `rewriter-grpc` image as the parity oracle and requires a repo secret `GCP_ORACLE_KEY` (a GCP service-account JSON key with `roles/artifactregistry.reader` on the registry repo); without it the job is skipped. Note that `ORACLE_TAG` must track the ported C++ version.
 
 - [ ] **Step 3: Validate the workflow YAML** locally — `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))"` (or `yamllint` / `actionlint` if available) → no errors. The job itself can't be fully run in-session (no CI runner), but the harness command it runs is exactly what we verified against the live oracle locally.
 

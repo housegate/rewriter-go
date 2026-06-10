@@ -25,7 +25,7 @@ via a **dual-dialect + raw-SQL** architecture — see the
 - Full response population (`table_rewrites`, `original_accessed_tables`, `failed_cte_aliases`, `sql_after_rewrite`).
 - Validated by `internal/harness` golden tests (10 cases covering dynamic rename, static maps, remote, CTE injection, limit, JOIN, passthrough) and, when `REWRITER_ORACLE_ADDR` is set, an env-gated differential against the live C++ oracle.
 
-Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cannot be synthesised through polyglot's generator — such cases are left un-GLOBAL and allow-listed in CI.
+Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cannot be synthesised through polyglot's generator — such cases are left un-GLOBAL and allow-listed in the harness corpora.
 
 ## Layout
 
@@ -40,11 +40,14 @@ Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cann
 
 ## Build & test
 
-The polyglot FFI library is **not** vendored — build it once from source (clones polyglot +
-`cargo build`, a few minutes):
+polyglot is a git submodule at `third_party/polyglot-src` (pinned commit = single source of
+truth for both the Go bindings, via the `replace` in `go.mod`, and the Rust FFI lib). Clone
+with `--recurse-submodules`, or run `git submodule update --init` after a plain clone. The
+FFI library itself is **not** vendored — build it once from the submodule (`cargo build`, a
+few minutes):
 
 ```bash
-make ffi      # builds third_party/lib/libpolyglot_sql_ffi.<ext>
+make ffi      # builds third_party/lib/libpolyglot_sql_ffi.<ext> from the submodule
 make test     # sets POLYGLOT_SQL_FFI_PATH and runs `go test ./...`
 make proto    # regenerate gen/pb from the vendored proto (buf)
 ```
@@ -53,32 +56,22 @@ Tests that need the engine skip themselves when `POLYGLOT_SQL_FFI_PATH` is unset
 `go test ./...` alone still runs the pure-Go units (comparator, corpus, fidelity-metric,
 contract tests).
 
-### CI oracle differential (the true parity gate)
+### Oracle differential (optional, local-only)
 
-The `oracle` CI job (`.github/workflows/ci.yml`) runs the C++ `rewriter-grpc` image as a
-service and runs the harness with `REWRITER_ORACLE_ADDR` set, so every golden corpus is
-diffed field-by-field against the real C++ behavior. To run it locally:
+When `REWRITER_ORACLE_ADDR` points at a live `rewriter-grpc` gRPC server, the
+`internal/harness` tests additionally diff every golden corpus field-by-field against it:
 
 ```bash
-docker run -d -p 50051:50051 \
-  us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:0.11.0 \
-  /clickhousegate_rewriter 50051
 make ffi
 POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.$(uname | grep -qi darwin && echo dylib || echo so)" \
   REWRITER_ORACLE_ADDR=localhost:50051 go test ./internal/harness -count=1
 ```
 
-- The oracle image lives in a **private GCP Artifact Registry**, so the CI job needs a repo
-  secret **`GCP_ORACLE_KEY`** — a GCP service-account JSON key with `roles/artifactregistry.reader`
-  on the `sentio-352722` `sentio` repo. Without it the job is skipped (the `if` guard), so the
-  rest of CI still runs.
-- `ORACLE_TAG` (in the workflow) must track the C++ version whose source was ported — bump it
-  in lockstep when porting newer C++ behavior.
-- A small, documented allow-list of intentional divergences is carved out per-case in the
-  corpora (`allow_*_divergence` flags): the `IN(>50)` OR-batch preprocess we skip (§6f), admin
-  statements polyglot parses but ClickHouse's parser rejects (COPY / ATTACH GRANT →
-  `SyntaxError`), the `GRANT … TO ALL` marker backtick-quoting, and the static-`table_map`
-  db-qualifier (a C++-internal inconsistency, flagged for review).
+A small, documented allow-list of intentional divergences is carved out per-case in the
+corpora (`allow_*_divergence` flags): the `IN(>50)` OR-batch preprocess we skip (§6f), admin
+statements polyglot parses but ClickHouse's parser rejects (COPY / ATTACH GRANT →
+`SyntaxError`), the `GRANT … TO ALL` marker backtick-quoting, and the static-`table_map`
+db-qualifier (a C++-internal inconsistency, flagged for review).
 
 ## Design
 
