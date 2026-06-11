@@ -31,7 +31,7 @@ Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cann
 
 | Path | What |
 |---|---|
-| `rewriter.go` / `native.go` | Public `Rewriter` interface + `RewriteResult`; the `NativeRewriter` (Phase 0 = pass-through: parse + classify + regenerate) |
+| `rewriter.go` / `native.go` / `service.go` | Public `Rewriter` interface + `RewriteResult`; the per-connection `NativeRewriter`; the stateless `Service` (request/response shape mirroring the gRPC contract — the embedding entry point for hosts like housegate) |
 | `internal/engine` | The polyglot seam — the ONLY package that imports the polyglot SDK (`Engine` interface, `NodeKind`/`CommandSQL`, fidelity metric) |
 | `internal/corpus` | SQL corpus loader |
 | `internal/harness` | Differential comparator + env-gated `rewriter-grpc` oracle client |
