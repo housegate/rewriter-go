@@ -4,10 +4,13 @@ import (
 	"context"
 	"maps"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/housegate/rewriter-go/gen/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // dynOpts builds the single dynamic-args RewriteOption shape housegate sends.
@@ -68,6 +71,20 @@ func TestServiceMatchesNativeRewriter(t *testing.T) {
 			if res.ExistenceClause != resp.GetExistenceClause() {
 				t.Errorf("existence_clause: native=%v service=%v", res.ExistenceClause, resp.GetExistenceClause())
 			}
+			if res.Message != resp.GetMessage() {
+				t.Errorf("message: native=%q service=%q", res.Message, resp.GetMessage())
+			}
+			if !slices.Equal(res.FailedCTEAliases, resp.GetFailedCteAliases()) {
+				t.Errorf("failed_cte_aliases: native=%v service=%v", res.FailedCTEAliases, resp.GetFailedCteAliases())
+			}
+			if !slices.EqualFunc(res.OriginalAccessedTables, resp.GetOriginalAccessedTables(),
+				func(a, b *pb.AccessedTable) bool { return proto.Equal(a, b) }) {
+				t.Errorf("original_accessed_tables: native=%v service=%v", res.OriginalAccessedTables, resp.GetOriginalAccessedTables())
+			}
+			if !slices.EqualFunc(res.PrivilegesDeltas, resp.GetPrivilegesDeltas(),
+				func(a, b *pb.PrivilegeDelta) bool { return proto.Equal(a, b) }) {
+				t.Errorf("privileges_deltas: native=%v service=%v", res.PrivilegesDeltas, resp.GetPrivilegesDeltas())
+			}
 		})
 	}
 }
@@ -127,4 +144,36 @@ func TestServiceRewriteErrorMessage(t *testing.T) {
 	if resp2.GetErrorAfterRewrite() != "boom" {
 		t.Errorf("passthrough = %q, want \"boom\"", resp2.GetErrorAfterRewrite())
 	}
+}
+
+// TestServiceConcurrentUse backs the "safe for concurrent use" godoc
+// claim: one process-shared Service hammered from many goroutines must
+// be race-free (run under -race) and deterministic per call.
+func TestServiceConcurrentUse(t *testing.T) {
+	e := newEngine(t)
+	svc := &Service{engine: e}
+	opts := dynOpts(map[string]string{"db1": "phys"}, []string{"phys"})
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 25; i++ {
+				resp, err := svc.Rewrite(context.Background(), &pb.RewriteSQLRequest{Sql: "SELECT a FROM db1.t", Options: opts})
+				if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+					t.Errorf("Rewrite: err=%v code=%v", err, resp.GetCode())
+					return
+				}
+				em, err := svc.RewriteErrorMessage(context.Background(), &pb.RewriteErrorMessageRequest{
+					Sql: "SELECT a FROM db1.t", ErrorMessage: "Table phys.`db1.t` does not exist", Options: opts,
+				})
+				if err != nil || em.GetErrorAfterRewrite() == "" {
+					t.Errorf("RewriteErrorMessage: err=%v out=%q", err, em.GetErrorAfterRewrite())
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
