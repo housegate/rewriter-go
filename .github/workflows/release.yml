@@ -87,6 +87,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum libpolyglot_sql_ffi-* > SHA256SUMS
+          cat SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
