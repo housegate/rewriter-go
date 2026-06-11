@@ -83,16 +83,20 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 	return r
 }
 
-func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {
+// doRewrite is the engine-level rewrite pipeline shared by NativeRewriter
+// (per-connection, options via callback) and Service (stateless, options
+// from the request). A non-nil error means an unexpected/internal failure
+// the caller should treat as fail-open; rewrite rejections travel inside
+// the response Code instead.
+func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
-	ast, err := r.engine.ParseOne(sql)
+	ast, err := e.ParseOne(sql)
 	if err != nil {
 		resp.Code = pb.RewriteCode_SyntaxError
 		resp.Message = err.Error()
-		r.stash(sql, account, resp)
-		return resultFromPB(resp), nil // SyntaxError is a code, not a Go error
+		return resp, nil // SyntaxError is a code, not a Go error
 	}
-	resp.StatementType = r.classify(ast)
+	resp.StatementType = classify(ast)
 
 	// existence_clause is derived from the AST (IF [NOT] EXISTS) and stamped on
 	// EVERY handled response below — it survives rejects (proto contract), unlike
@@ -105,72 +109,72 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 		ec = pb.ExistenceClause_EXISTENCE_CLAUSE_IF_EXISTS
 	}
 
-	// Compute the account-derived rewrite policy ONCE; shared by the write and
-	// SELECT paths below (nil when no options builder is injected → round-trip).
-	var opts []*pb.RewriteOption
-	if r.options != nil {
-		opts = r.options(account)
-	}
-
 	// Phase 2: route writes (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME/EXCHANGE/
 	// views, + bare-rejects, + out-of-phase CREATE/DROP DATABASE) before SELECT.
-	if wresp, handled, werr := handlers.RewriteWrite(r.engine, ast, sql, opts); werr != nil {
-		return RewriteResult{}, werr // unexpected/internal → fail-open Go error
+	if wresp, handled, werr := handlers.RewriteWrite(e, ast, sql, opts); werr != nil {
+		return nil, werr
 	} else if handled {
 		// Design §8 + oracle parity: stamp existence_clause; echo input + clear
 		// statement_type on reject.
 		finalize(wresp, sql, ec)
-		r.stash(sql, account, wresp)
-		return resultFromPB(wresp), nil
+		return wresp, nil
 	}
 
 	// Phase 3: route db-level statements (USE / SHOW TABLES / SHOW DATABASES /
 	// CREATE DATABASE / DROP DATABASE) after writes, before SELECT.
-	if dresp, handled, derr := handlers.RewriteDBLevel(r.engine, ast, sql, opts); derr != nil {
-		return RewriteResult{}, derr
+	if dresp, handled, derr := handlers.RewriteDBLevel(e, ast, sql, opts); derr != nil {
+		return nil, derr
 	} else if handled {
 		finalize(dresp, sql, ec)
-		r.stash(sql, account, dresp)
-		return resultFromPB(dresp), nil
+		return dresp, nil
 	}
 
 	// Phase 4: EXISTS / SHOW CREATE (single-target), then GRANT / REVOKE
 	// (privilege deltas) — after db-level, before SELECT. Both match only
 	// `command` nodes and recognize disjoint verbs, so their relative order is
 	// irrelevant; this mirrors the C++ server order (exists → show_create → grant).
-	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(r.engine, ast, sql, opts); xerr != nil {
-		return RewriteResult{}, xerr
+	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(e, ast, sql, opts); xerr != nil {
+		return nil, xerr
 	} else if handled {
 		finalize(xresp, sql, ec)
-		r.stash(sql, account, xresp)
-		return resultFromPB(xresp), nil
+		return xresp, nil
 	}
-	if gresp, handled, gerr := handlers.RewriteGrant(r.engine, ast, sql, opts); gerr != nil {
-		return RewriteResult{}, gerr
+	if gresp, handled, gerr := handlers.RewriteGrant(e, ast, sql, opts); gerr != nil {
+		return nil, gerr
 	} else if handled {
 		finalize(gresp, sql, ec)
-		r.stash(sql, account, gresp)
-		return resultFromPB(gresp), nil
+		return gresp, nil
 	}
 
 	// Phase 1: route SELECT to the real handler; everything else stays pass-through.
 	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect {
-		hresp, herr := handlers.RewriteSelect(r.engine, ast, opts)
+		hresp, herr := handlers.RewriteSelect(e, ast, opts)
 		if herr != nil {
-			return RewriteResult{}, herr // unexpected/internal → fail-open Go error
+			return nil, herr
 		}
 		finalize(hresp, sql, ec) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
-		r.stash(sql, account, hresp)
-		return resultFromPB(hresp), nil
+		return hresp, nil
 	}
 
 	// Pass-through: regenerate (proves the engine round-trips); fall back to
 	// the input on any generate hiccup so SQL is always runnable.
-	if gen, gerr := r.engine.Generate(ast); gerr == nil && gen != "" {
+	if gen, gerr := e.Generate(ast); gerr == nil && gen != "" {
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
 	finalize(resp, sql, ec)
+	return resp, nil
+}
+
+func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {
+	var opts []*pb.RewriteOption
+	if r.options != nil {
+		opts = r.options(account)
+	}
+	resp, err := doRewrite(r.engine, sql, opts)
+	if err != nil {
+		return RewriteResult{}, err // unexpected/internal → fail-open Go error
+	}
 	r.stash(sql, account, resp)
 	return resultFromPB(resp), nil
 }
@@ -199,7 +203,7 @@ func (r *NativeRewriter) Close() error {
 
 // classify maps an AST root to a pb.StatementType via its node kind (top-level
 // key). `command` nodes carry only raw SQL, so we sub-classify by leading keyword.
-func (r *NativeRewriter) classify(ast engine.AST) pb.StatementType {
+func classify(ast engine.AST) pb.StatementType {
 	kind, err := engine.NodeKind(ast)
 	if err != nil {
 		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
