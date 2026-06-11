@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-go/gen/pb"
@@ -89,5 +90,41 @@ func TestNewServiceLoadsAndCloses(t *testing.T) {
 	}
 	if err := svc.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestServiceRewriteErrorMessage: physical names in an error message are
+// inverted back to logical ones using maps re-derived from sql+options;
+// unparseable SQL (non-Success forward rewrite) passes through unchanged.
+func TestServiceRewriteErrorMessage(t *testing.T) {
+	e := newEngine(t)
+	svc := &Service{engine: e}
+	opts := dynOpts(map[string]string{"db1": "phys"}, []string{"phys"})
+
+	// The rewrite maps db1.t → phys.db1.t (dot delimiter); ClickHouse quotes
+	// dotted table names with backticks in error messages (phys.`db1.t`), which
+	// is the form reverse.Invert actually matches against the table_rewrites map.
+	resp, err := svc.RewriteErrorMessage(context.Background(), &pb.RewriteErrorMessageRequest{
+		Sql:          "SELECT a FROM db1.t",
+		ErrorMessage: "Table phys.`db1.t` does not exist",
+		Options:      opts,
+	})
+	if err != nil {
+		t.Fatalf("RewriteErrorMessage: %v", err)
+	}
+	if got := resp.GetErrorAfterRewrite(); !strings.Contains(got, "db1.t") || strings.Contains(got, "phys.") {
+		t.Errorf("inversion failed: %q", got)
+	}
+
+	resp2, err := svc.RewriteErrorMessage(context.Background(), &pb.RewriteErrorMessageRequest{
+		Sql:          "SELECT FROM WHERE ((",
+		ErrorMessage: "boom",
+		Options:      opts,
+	})
+	if err != nil {
+		t.Fatalf("RewriteErrorMessage(passthrough): %v", err)
+	}
+	if resp2.GetErrorAfterRewrite() != "boom" {
+		t.Errorf("passthrough = %q, want \"boom\"", resp2.GetErrorAfterRewrite())
 	}
 }
