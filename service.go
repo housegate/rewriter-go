@@ -20,6 +20,8 @@ import (
 // ctx is accepted for interface symmetry with the gRPC client but is not
 // consulted mid-call: polyglot FFI calls cannot be interrupted. Calls are
 // local and fast (no network), so timeouts effectively never fire.
+//
+// The zero value is unusable; construct via NewService.
 type Service struct {
 	engine engine.Engine
 }
@@ -47,9 +49,11 @@ func (s *Service) Rewrite(_ context.Context, req *pb.RewriteSQLRequest) (*pb.Rew
 // back to the logical names the client used. Stateless: the forward maps
 // are re-derived by re-running the rewrite on req.Sql + req.Options (error
 // paths are rare; one extra parse per exception is acceptable). When the
-// forward rewrite is non-Success — or sql/message is empty — the message
-// passes through unchanged, mirroring NativeRewriter's non-Success
-// passthrough and the C++ doRewriteErrorMessage semantics.
+// forward rewrite is non-Success, fails internally, or
+// sql/message is empty, the message passes through unchanged (the method
+// never returns a non-nil error — best-effort inversion must not break
+// the exception path), mirroring NativeRewriter's non-Success passthrough
+// and the C++ doRewriteErrorMessage semantics.
 func (s *Service) RewriteErrorMessage(_ context.Context, req *pb.RewriteErrorMessageRequest) (*pb.RewriteErrorMessageResponse, error) {
 	msg := req.GetErrorMessage()
 	out := &pb.RewriteErrorMessageResponse{Code: pb.RewriteCode_Success, ErrorAfterRewrite: msg}
@@ -64,8 +68,11 @@ func (s *Service) RewriteErrorMessage(_ context.Context, req *pb.RewriteErrorMes
 	return out, nil
 }
 
-// Close releases the engine. Safe to call once; the engine's own Close is
-// idempotent.
+// Close releases the engine. Safe to call more than once (the engine's
+// Close is idempotent). Callers must quiesce Rewrite /
+// RewriteErrorMessage calls before Close: a call racing or following
+// Close currently surfaces as Code=SyntaxError (the FFI client's
+// "closed" error maps through the parse-error path), not as a Go error.
 func (s *Service) Close() error {
 	return s.engine.Close()
 }
