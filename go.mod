@@ -3,7 +3,7 @@ module github.com/housegate/rewriter-go
 go 1.25.0
 
 require (
-	github.com/tobilg/polyglot/packages/go v0.5.1
+	github.com/tobilg/polyglot/packages/go v0.5.4
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 )
