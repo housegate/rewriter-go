@@ -337,6 +337,75 @@ message RewriteSQLRequest {
     repeated RewriteOption options = 2;
 }
 
+// Phase-1 signing normalizer. MaterializeSQL runs before the agent/SDK signs a
+// statement; Rewrite remains the runtime physical-name rewrite used after
+// ingress.
+//
+// The rewriter does NOT read wall-clock time or generate randomness here.
+// Callers provide deterministic values in MaterializationInputs. Supported
+// nondeterministic SQL functions become deterministic ClickHouse expressions.
+// Missing inputs and unsupported volatile functions return non-Success codes;
+// sql_after_materialization echoes sql so callers can reject before signing.
+message MaterializeSQLRequest {
+    string sql = 1;
+    MaterializationInputs inputs = 2;
+    MaterializationPolicy policy = 3;
+}
+
+message MaterializationPolicy {
+    // Empty selects the default profile, currently "sentio-p1-nondet-v1".
+    string profile_id = 1;
+    // Reserved for future timezone-aware renderers. The v1 profile accepts
+    // empty or "UTC" only; non-UTC timezone-specific rendering must be added
+    // deliberately so signed SQL stays reproducible across SDKs.
+    string timezone = 2;
+}
+
+message MaterializationInputs {
+    // Unix time in nanoseconds supplied by the trusted agent/SDK clock. Required
+    // when materializing current-time/date functions.
+    optional int64 now_unix_ns = 1;
+    // Deterministic integer values consumed in traversal order by rand(),
+    // rand32(), rand64(), and random(). rand()/rand32() values must fit UInt32.
+    repeated uint64 random_uint64_values = 2;
+    // UUID strings consumed in traversal order by generateUUIDv4().
+    repeated string uuid_values = 3;
+    // Deterministic Float64 values consumed in traversal order by
+    // randCanonical(). Values must be finite and in [0, 1).
+    repeated double random_float64_values = 4;
+}
+
+enum MaterializeCode {
+    MaterializeSuccess = 0;
+    MaterializeSyntaxError = 1;
+    MaterializeUnsupportedStatement = 2;
+    MaterializeInvalidRequest = 3;
+    MaterializeError = 4;
+}
+
+message MaterializedReplacement {
+    // Function name as it appeared in the AST, e.g. "now" or "generateUUIDv4".
+    string function_name = 1;
+    // Zero-based replacement ordinal in deterministic AST traversal order.
+    uint32 ordinal = 2;
+    // SQL expression/literal inserted in place of the function call.
+    string literal_sql = 3;
+    // Logical ClickHouse value type, e.g. DateTime, UInt64, UUID.
+    string value_type = 4;
+}
+
+message MaterializeSQLResponse {
+    MaterializeCode code = 1;
+    // Original request SQL, echoed for audit/fail-closed callers.
+    string sql = 2;
+    // SQL to sign on success. Echoes sql on errors and when no replacement was
+    // needed, avoiding incidental canonicalization of deterministic statements.
+    string sql_after_materialization = 3;
+    string message = 4;
+    repeated MaterializedReplacement replacements = 5;
+    string materializer_profile_id = 6;
+}
+
 enum RewriteCode {
     Success = 0;
     // SQL failed to parse via ClickHouse's ParserQuery. Message carries the
@@ -775,6 +844,7 @@ message PrivilegeDelta {
 }
 
 service RewriterService {
+    rpc MaterializeSQL (MaterializeSQLRequest) returns (MaterializeSQLResponse) {}
     rpc Rewrite (RewriteSQLRequest) returns (RewriteSQLResponse) {}
     rpc RewriteErrorMessage (RewriteErrorMessageRequest) returns (RewriteErrorMessageResponse) {}
     // Apply performance-only optimizations to an already-rewritten (i.e.

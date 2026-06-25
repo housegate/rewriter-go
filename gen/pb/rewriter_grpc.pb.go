@@ -31,6 +31,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	RewriterService_MaterializeSQL_FullMethodName      = "/rewriter.RewriterService/MaterializeSQL"
 	RewriterService_Rewrite_FullMethodName             = "/rewriter.RewriterService/Rewrite"
 	RewriterService_RewriteErrorMessage_FullMethodName = "/rewriter.RewriterService/RewriteErrorMessage"
 	RewriterService_Optimize_FullMethodName            = "/rewriter.RewriterService/Optimize"
@@ -40,6 +41,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RewriterServiceClient interface {
+	MaterializeSQL(ctx context.Context, in *MaterializeSQLRequest, opts ...grpc.CallOption) (*MaterializeSQLResponse, error)
 	Rewrite(ctx context.Context, in *RewriteSQLRequest, opts ...grpc.CallOption) (*RewriteSQLResponse, error)
 	RewriteErrorMessage(ctx context.Context, in *RewriteErrorMessageRequest, opts ...grpc.CallOption) (*RewriteErrorMessageResponse, error)
 	// Apply performance-only optimizations to an already-rewritten (i.e.
@@ -58,6 +60,16 @@ type rewriterServiceClient struct {
 
 func NewRewriterServiceClient(cc grpc.ClientConnInterface) RewriterServiceClient {
 	return &rewriterServiceClient{cc}
+}
+
+func (c *rewriterServiceClient) MaterializeSQL(ctx context.Context, in *MaterializeSQLRequest, opts ...grpc.CallOption) (*MaterializeSQLResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MaterializeSQLResponse)
+	err := c.cc.Invoke(ctx, RewriterService_MaterializeSQL_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *rewriterServiceClient) Rewrite(ctx context.Context, in *RewriteSQLRequest, opts ...grpc.CallOption) (*RewriteSQLResponse, error) {
@@ -94,6 +106,7 @@ func (c *rewriterServiceClient) Optimize(ctx context.Context, in *OptimizeReques
 // All implementations must embed UnimplementedRewriterServiceServer
 // for forward compatibility.
 type RewriterServiceServer interface {
+	MaterializeSQL(context.Context, *MaterializeSQLRequest) (*MaterializeSQLResponse, error)
 	Rewrite(context.Context, *RewriteSQLRequest) (*RewriteSQLResponse, error)
 	RewriteErrorMessage(context.Context, *RewriteErrorMessageRequest) (*RewriteErrorMessageResponse, error)
 	// Apply performance-only optimizations to an already-rewritten (i.e.
@@ -114,6 +127,9 @@ type RewriterServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedRewriterServiceServer struct{}
 
+func (UnimplementedRewriterServiceServer) MaterializeSQL(context.Context, *MaterializeSQLRequest) (*MaterializeSQLResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MaterializeSQL not implemented")
+}
 func (UnimplementedRewriterServiceServer) Rewrite(context.Context, *RewriteSQLRequest) (*RewriteSQLResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Rewrite not implemented")
 }
@@ -142,6 +158,24 @@ func RegisterRewriterServiceServer(s grpc.ServiceRegistrar, srv RewriterServiceS
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&RewriterService_ServiceDesc, srv)
+}
+
+func _RewriterService_MaterializeSQL_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MaterializeSQLRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RewriterServiceServer).MaterializeSQL(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RewriterService_MaterializeSQL_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RewriterServiceServer).MaterializeSQL(ctx, req.(*MaterializeSQLRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _RewriterService_Rewrite_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -205,6 +239,10 @@ var RewriterService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "rewriter.RewriterService",
 	HandlerType: (*RewriterServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "MaterializeSQL",
+			Handler:    _RewriterService_MaterializeSQL_Handler,
+		},
 		{
 			MethodName: "Rewrite",
 			Handler:    _RewriterService_Rewrite_Handler,
