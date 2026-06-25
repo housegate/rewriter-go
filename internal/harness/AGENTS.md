@@ -16,11 +16,13 @@
 | Phase 4 corpus | `phase4_golden_test.go`, `testdata/phase4_cases.json` | EXISTS/SHOW CREATE/GRANT behavior |
 | Error-message corpus | `errmsg_golden_test.go`, `testdata/errmsg_cases.json` | `RewriteErrorMessage` inversion |
 | Fuzzing | `fuzz_test.go`, `testdata/fuzz` | Fail-open and no-panic contract |
+| Root entrypoint parity | `../../native_test.go`, `../../service_test.go` | Public API and stateless service behavior; engine-gated when FFI is required |
 
 ## CONVENTIONS
 
 - Golden JSON is native frozen output plus explicit divergence flags; live oracle comparison is the stronger parity gate when `REWRITER_ORACLE_ADDR` is set.
 - Tests that require the engine skip when `POLYGLOT_SQL_FFI_PATH` is unset.
+- Plain `go test ./...` therefore proves only pure-Go and skipped-engine behavior. Use `make test` or set `POLYGLOT_SQL_FFI_PATH` before claiming FFI-backed parity.
 - `Compare` treats nil and empty maps as equal because proto3 wire output from the C++ oracle may differ from native initialized maps.
 - SQL comparison should use semantic AST diff when formatting differences are expected.
 - Allow-list fields narrowly. Flags such as `allow_*_divergence` should exempt only the field documented by the test.
@@ -33,6 +35,7 @@
 - Do not broaden a divergence allow-list to make a corpus pass.
 - Do not make oracle failures mandatory for normal local runs; `REWRITER_ORACLE_ADDR` is optional.
 - Do not inspect zero `RewriteResult` values after internal fail-open paths in fuzz tests.
+- Do not call a corpus update "oracle parity" unless the same cases were driven with `REWRITER_ORACLE_ADDR` against a live C++ service or the lack of oracle was explicitly recorded.
 - Do not remove fuzz seeds or golden cases to get a green run.
 
 ## LOCAL VERIFICATION
