@@ -41,7 +41,7 @@ rewriter-go/
 | Fidelity corpus loading | `internal/corpus`, `cmd/fidelity-spike` | SQL seed corpus and fidelity probe |
 | Logical-to-physical table policy | `internal/nameresolve` | Keep pure: do not import `internal/engine` or polyglot |
 | Error-message position inversion | `internal/reverse` | Pure helpers with close unit coverage |
-| gRPC/protobuf contract changes | `github.com/housegate/rewriter-proto` | Change and release the contract there, then update this module's dependency |
+| gRPC/protobuf contract changes | `github.com/housegate/rewriter-proto` | Commit the contract there, pin that module version here, and publish the dependency commit first |
 | CI behavior | `.github/workflows/ci.yml` | Pure-Go lane plus FFI lane and fidelity smoke |
 | Polyglot bumps | `.gitmodules`, `scripts/update-polyglot.sh`, `.github/workflows/update-polyglot.yml`, `go.mod` | Submodule commit and module version must move together |
 | Release versioning | `scripts/next-version.sh`, `.github/workflows/release.yml` | Annotated tags; date logic uses Asia/Shanghai unless overridden |

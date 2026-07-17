@@ -268,8 +268,9 @@ The authoritative schema and generated Go types live in
 `github.com/housegate/rewriter-proto`. Both the native rewriter and the harness
 import its `gen/pb` package, so the proxy can swap gRPC↔native behind identical
 types and comparison is type-identical. Contract changes are generated and
-released from that repository; `rewriter-go` only updates its pinned module
-version.
+versioned in that repository; `rewriter-go` only updates its pinned module
+version. The contract commit or release must be published before the dependent
+`rewriter-go` change.
 
 ### Differential oracle harness (the backbone of "full parity")
 
