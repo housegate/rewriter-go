@@ -22,8 +22,6 @@ rewriter-go/
 |-- internal/corpus/             # SQL corpus loader for fidelity tooling
 |-- internal/nameresolve/        # Pure name-resolution policy; no engine imports
 |-- internal/reverse/            # RewriteErrorMessage inversion helpers
-|-- proto/                       # Source protobuf contract
-|-- gen/pb/                      # Checked-in generated protobuf/gRPC Go files
 |-- .github/workflows/           # CI, release, and polyglot bump automation
 |-- scripts/                     # Release versioning and polyglot bump helpers
 |-- third_party/polyglot-src/    # Git submodule; external upstream source
@@ -43,7 +41,7 @@ rewriter-go/
 | Fidelity corpus loading | `internal/corpus`, `cmd/fidelity-spike` | SQL seed corpus and fidelity probe |
 | Logical-to-physical table policy | `internal/nameresolve` | Keep pure: do not import `internal/engine` or polyglot |
 | Error-message position inversion | `internal/reverse` | Pure helpers with close unit coverage |
-| gRPC/protobuf contract changes | `proto/rewriter.proto`, `buf.yaml`, `buf.gen.yaml` | Then run `make proto`; do not hand-edit `gen/pb` |
+| gRPC/protobuf contract changes | `github.com/housegate/rewriter-proto` | Commit the contract there, pin that module version here, and publish the dependency commit first |
 | CI behavior | `.github/workflows/ci.yml` | Pure-Go lane plus FFI lane and fidelity smoke |
 | Polyglot bumps | `.gitmodules`, `scripts/update-polyglot.sh`, `.github/workflows/update-polyglot.yml`, `go.mod` | Submodule commit and module version must move together |
 | Release versioning | `scripts/next-version.sh`, `.github/workflows/release.yml` | Annotated tags; date logic uses Asia/Shanghai unless overridden |
@@ -71,7 +69,7 @@ rewriter-go/
 
 ## CONVENTIONS
 
-- Generated files under `gen/pb` are checked in but regenerated from `proto/rewriter.proto` via `make proto`; `buf.yaml` and `buf.gen.yaml` own the codegen policy and output layout.
+- Protobuf source and generated Go types are owned by `github.com/housegate/rewriter-proto`; this repo imports its `gen/pb` package and does not generate protobuf code locally.
 - `third_party/polyglot-src` is a git submodule, not first-party code. Do not refactor upstream internals from this repo.
 - `go.mod` uses `replace github.com/tobilg/polyglot/packages/go => ./third_party/polyglot-src/packages/go`; submodules are required even for pure-Go builds.
 - `go.mod` currently declares `go 1.25.0`; GitHub workflows currently install Go `1.22`. Verify the intended toolchain before changing either side.
@@ -87,7 +85,7 @@ rewriter-go/
 
 - Do not import polyglot outside `internal/engine`.
 - Do not let `internal/nameresolve` import `internal/engine`, handlers, or the polyglot SDK.
-- Do not hand-edit `gen/pb/*.go`; edit `proto/rewriter.proto` and regenerate.
+- Do not copy or regenerate protobuf definitions here; make contract changes in `github.com/housegate/rewriter-proto` and update the pinned module version.
 - Do not treat `go test ./...` as proof of FFI-backed parity unless `POLYGLOT_SQL_FFI_PATH` is set.
 - Do not make `RewriteErrorMessage` inversion failures break exception handling. `Service.RewriteErrorMessage` is best-effort and returns pass-through output with nil error on failure or empty input.
 - Do not move statement dispatch out of `doRewrite` without checking reject normalization, `existence_clause`, and `statement_type` parity.
@@ -99,7 +97,6 @@ rewriter-go/
 ```bash
 make ffi
 make test
-make proto
 make tidy
 go build ./...
 go vet ./...

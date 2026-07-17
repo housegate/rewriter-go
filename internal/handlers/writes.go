@@ -3,9 +3,9 @@ package handlers
 import (
 	"strings"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // RewriteWrite ports handleWriteQuery. Returns (resp, handled, err):

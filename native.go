@@ -5,10 +5,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/handlers"
 	"github.com/housegate/rewriter-go/internal/reverse"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // NativeRewriter is the in-process Rewriter. Phase 0 = pass-through.

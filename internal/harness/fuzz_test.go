@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // FuzzRewrite hardens the fail-open contract: for any input, Rewrite must not

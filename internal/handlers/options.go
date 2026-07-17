@@ -3,8 +3,8 @@ package handlers
 import (
 	"strconv"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // applyOptions applies LIMIT/OFFSET/SETTINGS options to the AST's outermost select.

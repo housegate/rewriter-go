@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 type granteeJSON struct {

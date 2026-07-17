@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 	"google.golang.org/protobuf/proto"
 )
 

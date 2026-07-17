@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	rewriter "github.com/housegate/rewriter-go"
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // writeCase mirrors selectCase (same dynamic/static/want_* schema) and adds the

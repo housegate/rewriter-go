@@ -3,9 +3,9 @@ package handlers
 import (
 	"strings"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // RewriteGrant ports grant.cc. GRANT/REVOKE are never executed against the

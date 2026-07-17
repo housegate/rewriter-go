@@ -4,9 +4,9 @@ package handlers
 import (
 	"sort"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // RewriteSelect ports handleSelectQuery: resolve every table, rewrite the AST,
