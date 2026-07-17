@@ -18,8 +18,8 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	rewriter "github.com/housegate/rewriter-go"
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 func main() {

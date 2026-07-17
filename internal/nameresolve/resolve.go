@@ -1,12 +1,13 @@
 // Package nameresolve maps logical (database, table) names to the physical names
-// sent to ClickHouse. It is pure policy: it consumes gen/pb option types and
-// returns plain Outcomes. It MUST NOT import internal/engine or the polyglot SDK.
+// sent to ClickHouse. It is pure policy: it consumes rewriter-proto option
+// types and returns plain Outcomes. It MUST NOT import internal/engine or the
+// polyglot SDK.
 package nameresolve
 
 import (
 	"strings"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // Status is the disposition of resolving one table target.

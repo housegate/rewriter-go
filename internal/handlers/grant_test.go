@@ -3,7 +3,7 @@ package handlers
 import (
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 func grantDyn() *pb.RewriteTableDynamicArgs {

@@ -3,7 +3,7 @@ package harness
 import (
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 func TestCompareExactFields(t *testing.T) {

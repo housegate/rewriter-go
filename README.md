@@ -36,7 +36,7 @@ Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cann
 | `internal/corpus` | SQL corpus loader |
 | `internal/harness` | Differential comparator + env-gated `rewriter-grpc` oracle client |
 | `cmd/fidelity-spike` | Round-trip fidelity probe over a corpus |
-| `gen/pb` | Types generated from `rewriter-grpc/protos/rewriter.proto` (shared contract) |
+| [`rewriter-proto`](https://github.com/housegate/rewriter-proto) | Versioned protobuf contract and generated Go types imported by this module |
 
 ## Build & test
 
@@ -49,7 +49,6 @@ few minutes):
 ```bash
 make ffi      # builds third_party/lib/libpolyglot_sql_ffi.<ext> from the submodule
 make test     # sets POLYGLOT_SQL_FFI_PATH and runs `go test ./...`
-make proto    # regenerate gen/pb from the vendored proto (buf)
 ```
 
 Tests that need the engine skip themselves when `POLYGLOT_SQL_FFI_PATH` is unset, so

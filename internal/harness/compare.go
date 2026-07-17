@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // SemanticEq reports whether two SQL strings are semantically equal.

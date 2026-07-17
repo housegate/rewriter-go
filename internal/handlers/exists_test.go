@@ -3,8 +3,8 @@ package handlers
 import (
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // dynOpts builds a single dynamic-args TableNameRewrite option for handler tests.

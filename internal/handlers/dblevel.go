@@ -4,9 +4,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // RewriteDBLevel ports the database-level handlers (USE / SHOW TABLES / SHOW

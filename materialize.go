@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 func (s *Service) MaterializeSQL(_ context.Context, req *pb.MaterializeSQLRequest) (*pb.MaterializeSQLResponse, error) {

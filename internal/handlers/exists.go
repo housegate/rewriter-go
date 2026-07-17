@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // RewriteExistsShowCreate ports exists.cc + show_create.cc — two near-identical

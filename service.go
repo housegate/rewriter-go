@@ -3,9 +3,9 @@ package rewriter
 import (
 	"context"
 
-	"github.com/housegate/rewriter-go/gen/pb"
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/reverse"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // Service is the stateless, process-shared entry point mirroring the

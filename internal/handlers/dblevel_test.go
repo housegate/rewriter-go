@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 func TestRewriteDBLevel_usePhysicalRewrite(t *testing.T) {

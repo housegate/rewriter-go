@@ -7,7 +7,7 @@ package rewriter
 import (
 	"context"
 
-	"github.com/housegate/rewriter-go/gen/pb"
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // RewriteResult mirrors pb.RewriteSQLResponse with interface-friendly names.
