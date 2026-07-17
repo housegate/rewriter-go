@@ -264,9 +264,12 @@ Where full parity is genuinely hard, and the approach for each:
 
 ### Contract types
 
-Generate Go types from `rewriter-grpc/protos/rewriter.proto` (buf/protoc) and vendor them in
-`rewriter-go`. Both the native rewriter and the harness use `pb.*`, so the proxy can swap
-gRPC↔native behind identical types and comparison is type-identical.
+The authoritative schema and generated Go types live in
+`github.com/housegate/rewriter-proto`. Both the native rewriter and the harness
+import its `gen/pb` package, so the proxy can swap gRPC↔native behind identical
+types and comparison is type-identical. Contract changes are generated and
+released from that repository; `rewriter-go` only updates its pinned module
+version.
 
 ### Differential oracle harness (the backbone of "full parity")
 

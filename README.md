@@ -38,6 +38,14 @@ Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cann
 | `cmd/fidelity-spike` | Round-trip fidelity probe over a corpus |
 | [`rewriter-proto`](https://github.com/housegate/rewriter-proto) | Versioned protobuf contract and generated Go types imported by this module |
 
+### Protobuf package migration
+
+Releases through `v0.3.0` exposed generated types at
+`github.com/housegate/rewriter-go/gen/pb`. The shared-contract migration removes
+that package; consumers upgrading to the first release containing this change
+must switch imports to `github.com/housegate/rewriter-proto/gen/pb`. Treat that
+upgrade as a breaking source migration.
+
 ## Build & test
 
 polyglot is a git submodule at `third_party/polyglot-src` (pinned commit = single source of
