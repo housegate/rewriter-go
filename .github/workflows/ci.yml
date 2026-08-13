@@ -4,12 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, closed]
 
 jobs:
   # Fast lane: pure-Go build/vet/test. Engine-backed tests skip themselves when
   # POLYGLOT_SQL_FFI_PATH is unset, so this runs the comparator, corpus,
   # fidelity-metric and contract tests without the (slow) Rust FFI build.
   unit:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       # go.mod replaces the polyglot Go bindings with the submodule checkout,
@@ -27,6 +29,7 @@ jobs:
   # Full lane: build the polyglot FFI lib from source, then run the engine-backed
   # tests + the fidelity spike. Heavier (Rust build) — cached.
   ffi:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,3 +54,25 @@ jobs:
       - run: make test
       - name: fidelity spike
         run: POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.so" go run ./cmd/fidelity-spike
+
+  # update-polyglot.yml owns both of these PR markers. Requiring both keeps a
+  # similarly titled human-authored PR from cutting a release after merge.
+  release-polyglot-bump:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'bot/polyglot-') &&
+      startsWith(github.event.pull_request.title, 'build: bump polyglot submodule to ')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Cut release for merged polyglot bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run release.yml --ref main
