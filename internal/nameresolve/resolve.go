@@ -344,6 +344,31 @@ func IsStorageIntegrityPhysicalDatabase(db string, a *pb.RewriteTableDynamicArgs
 	return false
 }
 
+// StorageIntegrityPhysicalDatabases returns the configured protocol-owned
+// safe/unsafe database namespaces in deterministic order. It is used to attach
+// conservative SI classification metadata when a table-function database
+// expression cannot be resolved statically.
+func StorageIntegrityPhysicalDatabases(a *pb.RewriteTableDynamicArgs) []string {
+	seen := map[string]bool{}
+	for _, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		for _, physical := range []string{tbl.GetSafeTable(), tbl.GetUnsafeTable()} {
+			db, _, ok := exactQualifiedTable(physical)
+			if ok {
+				seen[db] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for db := range seen {
+		out = append(out, db)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // AuthorizeStorageIntegrityLogical requires the logical database selected by a
 // storage_integrity.tables key to be present in the account-filtered
 // database_map. known_physical_databases is deliberately not an authorization
@@ -389,6 +414,14 @@ func StorageIntegrityPhysicalRejectMessage(physical string) string {
 
 func StorageIntegrityPhysicalDatabaseRejectMessage(physical string) string {
 	return "storage-integrity physical database " + physical + " is not directly addressable"
+}
+
+func StorageIntegrityTableFunctionNamespaceRejectMessage(physical string) string {
+	return "storage-integrity table function namespace " + physical + " is not directly addressable"
+}
+
+func StorageIntegrityUnresolvedTableFunctionNamespaceRejectMessage() string {
+	return "storage-integrity table function namespace is not statically resolvable"
 }
 
 // ValidateStorageIntegrity checks the v1 configuration before the service

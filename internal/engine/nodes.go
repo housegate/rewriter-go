@@ -105,25 +105,32 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 	return out, nil
 }
 
-// CollectTableFunctionTargets returns physical database/table arguments carried
-// by ClickHouse table functions whose signatures identify a concrete namespace.
-// The extraction is deliberately syntax-only; policy (including whether the
-// database is protocol-owned) belongs to the handler/nameresolve layer. It is
-// shared by SELECT preflight and write-target preflight so remote/cluster/merge
-// cannot become a read or write escape hatch around ordinary table-node guards.
-func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
+// TableFunctionRef is one recognized ClickHouse table-function namespace.
+// Resolved means both database and table arguments are statically known. When
+// only the database is known, Target.DB is preserved while Resolved stays false;
+// policy can then reserve a protocol-owned database even if the table argument
+// is an expression. A fully dynamic database leaves Target.DB empty and must be
+// treated conservatively by storage-integrity policy.
+type TableFunctionRef struct {
+	Target   TableTarget
+	Resolved bool
+}
+
+// CollectTableFunctionRefs returns every recognized remote/cluster/merge
+// function, including partially or wholly unresolved namespace arguments.
+func CollectTableFunctionRefs(ast AST) ([]TableFunctionRef, error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return nil, fmt.Errorf("engine: decode table functions: %w", err)
 	}
-	var out []TableTarget
+	var out []TableFunctionRef
 	var walk func(any)
 	walk = func(node any) {
 		switch n := node.(type) {
 		case map[string]any:
 			if fn, ok := n["function"].(map[string]any); ok {
-				if target, ok := decodeTableFunctionTarget(fn); ok {
-					out = append(out, target)
+				if ref, ok := decodeTableFunctionRef(fn); ok {
+					out = append(out, ref)
 				}
 			}
 			for _, child := range n {
@@ -139,7 +146,23 @@ func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
 	return out, nil
 }
 
-func decodeTableFunctionTarget(fn map[string]any) (TableTarget, bool) {
+// CollectTableFunctionTargets is the compatibility view used by ordinary
+// callers that only need fully resolved physical database/table pairs.
+func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
+	refs, err := CollectTableFunctionRefs(ast)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableTarget
+	for _, ref := range refs {
+		if ref.Resolved {
+			out = append(out, ref.Target)
+		}
+	}
+	return out, nil
+}
+
+func decodeTableFunctionRef(fn map[string]any) (TableFunctionRef, bool) {
 	name, _ := fn["name"].(string)
 	args, _ := fn["args"].([]any)
 	var first int
@@ -149,26 +172,90 @@ func decodeTableFunctionTarget(fn map[string]any) (TableTarget, bool) {
 	case "merge":
 		first = 0
 	default:
-		return TableTarget{}, false
+		return TableFunctionRef{}, false
 	}
 	if first >= len(args) {
-		return TableTarget{}, false
+		return TableFunctionRef{}, true
 	}
-	firstArg, ok := tableFunctionArgText(args[first])
-	if !ok {
-		return TableTarget{}, false
+	firstArg, firstOK := tableFunctionArgText(args[first])
+	if firstOK {
+		if db, table, ok := exactFunctionQualified(firstArg); ok {
+			return TableFunctionRef{Target: TableTarget{DB: db, Table: table}, Resolved: true}, true
+		}
 	}
-	if db, table, ok := exactFunctionQualified(firstArg); ok {
-		return TableTarget{DB: db, Table: table}, true
+	ref := TableFunctionRef{}
+	if firstOK {
+		ref.Target.DB = firstArg
 	}
 	if first+1 >= len(args) {
-		return TableTarget{}, false
+		return ref, true
 	}
-	secondArg, ok := tableFunctionArgText(args[first+1])
-	if !ok || firstArg == "" || secondArg == "" {
-		return TableTarget{}, false
+	secondArg, secondOK := tableFunctionArgText(args[first+1])
+	if secondOK {
+		ref.Target.Table = secondArg
 	}
-	return TableTarget{DB: firstArg, Table: secondArg}, true
+	ref.Resolved = firstOK && secondOK && firstArg != "" && secondArg != ""
+	return ref, true
+}
+
+// CollectEmbeddedSelectSources returns the table nodes and recognized table
+// functions inside top-level SELECT/set-operation bodies nested under a write
+// AST. Write targets outside those bodies are deliberately excluded.
+func CollectEmbeddedSelectSources(ast AST) ([]TableTarget, []TableFunctionRef, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, nil, fmt.Errorf("engine: decode embedded SELECT: %w", err)
+	}
+	var tables []TableTarget
+	var functions []TableFunctionRef
+	var walk func(any) error
+	walk = func(node any) error {
+		switch n := node.(type) {
+		case map[string]any:
+			if isReadQueryRoot(n) {
+				encoded, err := json.Marshal(n)
+				if err != nil {
+					return fmt.Errorf("engine: encode embedded SELECT: %w", err)
+				}
+				gotTables, err := CollectSelectTables(AST(encoded))
+				if err != nil {
+					return err
+				}
+				gotFunctions, err := CollectTableFunctionRefs(AST(encoded))
+				if err != nil {
+					return err
+				}
+				tables = append(tables, gotTables...)
+				functions = append(functions, gotFunctions...)
+				return nil // the read visitor already recurses into nested subqueries
+			}
+			for _, child := range n {
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, child := range n {
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(root); err != nil {
+		return nil, nil, err
+	}
+	return tables, functions, nil
+}
+
+func isReadQueryRoot(node map[string]any) bool {
+	for _, kind := range []string{NodeSelect, NodeUnion, NodeIntersect, NodeExcept} {
+		if _, ok := node[kind]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func tableFunctionArgText(arg any) (string, bool) {
@@ -495,6 +582,38 @@ func HasWithOffset(e Engine, sql string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// WithOffsetTargets binds each real WITH OFFSET keyword pair to the nearest
+// preceding FROM/JOIN table name in the token stream. This keeps wrapper policy
+// attached to the table that owns the modifier instead of rejecting an entire
+// mixed SI/ordinary SELECT. String literals and comments cannot participate
+// because only keyword token types are considered.
+func WithOffsetTargets(e Engine, sql string) ([]TableTarget, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableTarget
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i].TokenType != "WITH" || toks[i+1].TokenType != "OFFSET" {
+			continue
+		}
+		boundary := -1
+		for j := i - 1; j >= 0; j-- {
+			if toks[j].TokenType == "FROM" || toks[j].TokenType == "JOIN" {
+				boundary = j
+				break
+			}
+		}
+		if boundary < 0 {
+			continue
+		}
+		if target, ok := rawTokenTableTarget(toks, boundary+1); ok {
+			out = append(out, target)
+		}
+	}
+	return out, nil
 }
 
 func refWalk(node any, name string) bool {

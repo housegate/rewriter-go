@@ -386,6 +386,59 @@ func TestCollectTableFunctionTargets(t *testing.T) {
 	}
 }
 
+func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableFunctionRef
+	}{
+		{`SELECT * FROM remote('h', 'hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
+		{`SELECT * FROM cluster('c', 'hg_unsafe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
+		{`SELECT * FROM merge('hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
+		{`SELECT * FROM remote('h', concat('hg_', 'safe'), 'db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}}}},
+		{`SELECT * FROM remote('h', 'hg_safe', 'db1__t')`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}}},
+		{`SELECT * FROM numbers(10)`, nil},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := CollectTableFunctionRefs(ast)
+		if err != nil {
+			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+	}
+}
+
+func TestCollectEmbeddedSelectSources(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql       string
+		wantTable []TableTarget
+		wantFn    []TableFunctionRef
+	}{
+		{`CREATE TABLE other.x AS SELECT * FROM hg_safe.db1__t`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}, nil},
+		{`INSERT INTO other.u SELECT * FROM db1.t`, []TableTarget{{DB: "db1", Table: "t"}}, nil},
+		{`INSERT INTO other.u SELECT * FROM remote('h', 'hg_unsafe', concat('db1', '__t'))`, nil, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
+		{`CREATE TABLE other.x (a UInt64) ENGINE = MergeTree ORDER BY a`, nil, nil},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		gotTables, gotFns, err := CollectEmbeddedSelectSources(ast)
+		if err != nil {
+			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(gotTables, tc.wantTable) || !reflect.DeepEqual(gotFns, tc.wantFn) {
+			t.Errorf("%q: tables=%+v functions=%+v, want tables=%+v functions=%+v ast=%s", tc.sql, gotTables, gotFns, tc.wantTable, tc.wantFn, ast)
+		}
+	}
+}
+
 func TestUnsupportedTableWrapperTargets(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
@@ -432,6 +485,27 @@ func TestHasWithOffset(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("%q: got %v want %v", tc.sql, got, tc.want)
+		}
+	}
+}
+
+func TestWithOffsetTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`SELECT * FROM db1.t WITH OFFSET AS off`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{"SELECT * FROM db1.t WITH\nOFFSET AS off", []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u WITH OFFSET AS off ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT 'WITH OFFSET' FROM db1.t`, nil},
+	} {
+		got, err := WithOffsetTargets(e, tc.sql)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v", tc.sql, got, tc.want)
 		}
 	}
 }

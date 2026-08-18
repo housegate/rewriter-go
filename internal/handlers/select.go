@@ -102,20 +102,25 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if err != nil {
 		return nil, nil, err
 	}
+	var functionRefs []engine.TableFunctionRef
 	if sel.Mode == nameresolve.ModeDynamic {
-		functions, ferr := engine.CollectTableFunctionTargets(ast)
+		var ferr error
+		functionRefs, ferr = engine.CollectTableFunctionRefs(ast)
 		if ferr != nil {
 			return nil, nil, ferr
 		}
-		for _, tt := range functions {
-			if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
-				originals = append(originals, tt)
+		for _, ref := range functionRefs {
+			if ref.Resolved && nameresolve.IsStorageIntegrityPhysicalDatabase(ref.Target.DB, sel.Dynamic) {
+				originals = append(originals, ref.Target)
 			}
 		}
 	}
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
 	if sel.Mode == nameresolve.ModeDynamic {
+		if rejectStorageIntegrityTableFunctions(resp, functionRefs, sel, pb.RewriteCode_RewriteError) {
+			return ast, resp, nil
+		}
 		for _, tt := range originals {
 			if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
 				resp.Code = pb.RewriteCode_RewriteError
@@ -151,11 +156,16 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			}
 		}
 		if !modified && len(sourceSQL) > 0 {
-			withOffset, oerr := engine.HasWithOffset(e, sourceSQL[0])
+			withOffsetTargets, oerr := engine.WithOffsetTargets(e, sourceSQL[0])
 			if oerr != nil {
 				return nil, nil, oerr
 			}
-			modified = withOffset
+			for _, tt := range withOffsetTargets {
+				if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+					modified = true
+					break
+				}
+			}
 		}
 		if modified {
 			resp.Code = pb.RewriteCode_RewriteError

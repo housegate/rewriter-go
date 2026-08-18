@@ -320,9 +320,10 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 // AllWriteTargets returns every table target needed by the fail-closed policy
 // preflight, including targets that the normal rewrite visitor intentionally
 // omits because the statement will be rejected generically (all names in a
-// multi-DROP and cross-table ALTER sources/destinations). CREATE ... AS SELECT
-// bodies are deliberately excluded: CREATE TABLE AS SELECT is the signed-lane
-// exception, while CREATE VIEW bodies are classified by the SELECT handler.
+// multi-DROP and cross-table ALTER sources/destinations). Embedded SELECT bodies
+// are classified separately by CollectEmbeddedSelectSources so INSERT's signed
+// target exception cannot accidentally exempt its read sources; CREATE VIEW
+// bodies continue through the dedicated SELECT-body handler.
 func AllWriteTargets(e Engine, ast AST) ([]TableTarget, error) {
 	kind, body, _, err := bodyOf(ast)
 	if err != nil {

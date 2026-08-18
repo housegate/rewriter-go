@@ -46,10 +46,14 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(t.Table))
 			return resp, true, nil
 		}
-		if t.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.DB, sel.Dynamic) {
+		effectiveDB := t.DB
+		if effectiveDB == "" {
+			effectiveDB = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
+		}
+		if t.ObjType != "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(effectiveDB, sel.Dynamic) {
 			tt := engine.TableTarget{DB: t.DB, Table: t.Table}
 			recordAccessedWrite(resp, tt, sel)
-			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(t.DB, t.Table)))
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(effectiveDB, t.Table)))
 			return resp, true, nil
 		}
 	}

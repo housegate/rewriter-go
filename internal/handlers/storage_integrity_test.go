@@ -633,6 +633,7 @@ func TestRewriteSelect_mixedOrdinaryWrappersDoNotRejectStorageIntegrity(t *testi
 		`SELECT * FROM db1.t AS s JOIN other.u FINAL ON 1`,
 		`SELECT * FROM db1.t AS s JOIN other.u SAMPLE 0.1 ON 1`,
 		`SELECT * FROM db1.t AS s JOIN other.u AS o(id) ON s.id = o.id`,
+		`SELECT * FROM db1.t AS s JOIN other.u WITH OFFSET AS off ON 1`,
 	} {
 		t.Run(sql, func(t *testing.T) {
 			ast, err := e.ParseOne(sql)
@@ -647,6 +648,135 @@ func TestRewriteSelect_mixedOrdinaryWrappersDoNotRejectStorageIntegrity(t *testi
 				t.Fatalf("code=%v msg=%q sql=%q", resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
 			}
 		})
+	}
+}
+
+func TestWrite_storageIntegrityEmbeddedSelectSourcesRejected(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		`CREATE TABLE other.x AS SELECT * FROM db1.t`,
+		`CREATE TABLE other.x AS SELECT * FROM hg_safe.db1__t`,
+		`INSERT INTO other.u SELECT * FROM db1.t`,
+		`INSERT INTO other.u SELECT * FROM hg_unsafe.db1__t`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, opts)
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+}
+
+func TestStorageIntegrityUnresolvedTableFunctionNamespacesRejected(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		`SELECT * FROM remote('h', 'hg_safe', concat('db1', '__t'))`,
+		`SELECT * FROM merge('hg_unsafe', concat('db1', '__t'))`,
+		`SELECT * FROM cluster('c', concat('hg_', 'safe'), 'db1__t')`,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := RewriteSelect(e, ast, opts, sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertStorageIntegrityReject(t, resp, "storage-integrity table function namespace")
+	}
+
+	for _, sql := range []string{
+		`INSERT INTO FUNCTION remote('h', 'hg_safe', concat('db1', '__t')) SELECT 1`,
+		`CREATE TABLE other.x AS merge('hg_unsafe', concat('db1', '__t'))`,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, handled, err := RewriteWrite(e, ast, sql, opts)
+		if err != nil || !handled {
+			t.Fatalf("handled=%v err=%v", handled, err)
+		}
+		assertStorageIntegrityReject(t, resp, "storage-integrity table function namespace")
+	}
+}
+
+func TestUnresolvedTableFunctionNamespaceWithoutStorageIntegrityPassesThrough(t *testing.T) {
+	e := newEngine(t)
+	sql := `SELECT * FROM remote('h', concat('ordinary_', 'db'), 't')`
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dyn := &pb.RewriteTableDynamicArgs{
+		DatabaseMap:            map[string]string{"db1": "phys"},
+		KnownPhysicalDatabases: []string{"phys"},
+		Delim:                  "_",
+	}
+	resp, err := RewriteSelect(e, ast, dynOpt(dyn), sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("non-SI dynamic rewrite changed: code=%v msg=%q", resp.GetCode(), resp.GetMessage())
+	}
+}
+
+func TestGrant_storageIntegrityUnqualifiedDatabaseScopeUsesContext(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		sql, context string
+	}{
+		{`GRANT SELECT ON * TO u1`, "hg_safe"},
+		{`REVOKE SELECT ON * FROM u1`, "hg_unsafe"},
+	} {
+		dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+		dyn.UpstreamLogicalDatabaseInContext = tc.context
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, handled, err := RewriteGrant(e, ast, tc.sql, dynOpt(dyn))
+		if err != nil || !handled {
+			t.Fatalf("%q: handled=%v err=%v", tc.sql, handled, err)
+		}
+		assertStorageIntegrityReject(t, resp, "storage-integrity physical database "+tc.context)
+	}
+}
+
+func TestMetadataNonTableObjectResolvesPhysicalContextBeforeKindReject(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		sql, context string
+	}{
+		{`EXISTS VIEW db1__t`, "hg_safe"},
+		{`DESCRIBE DICTIONARY db1__t`, "hg_unsafe"},
+	} {
+		dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+		dyn.UpstreamLogicalDatabaseInContext = tc.context
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var resp *pb.RewriteSQLResponse
+		var handled bool
+		if strings.HasPrefix(tc.sql, "EXISTS") {
+			resp, handled, err = RewriteExistsShowCreate(e, ast, tc.sql, dynOpt(dyn))
+		} else {
+			resp, handled, err = RewriteDescribe(e, ast, tc.sql, dynOpt(dyn))
+		}
+		if err != nil || !handled {
+			t.Fatalf("%q: handled=%v err=%v", tc.sql, handled, err)
+		}
+		assertStorageIntegrityReject(t, resp, "storage-integrity physical table")
 	}
 }
 

@@ -71,31 +71,22 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 	if sel.Mode != nameresolve.ModeDynamic {
 		return nil, false, nil
 	}
-	targets, err := engine.AllWriteTargets(e, ast)
-	if err != nil {
-		return nil, false, err
-	}
-	seen := map[string]bool{}
-	for _, tt := range targets {
+	inspectTarget := func(tt engine.TableTarget, allowInsertTarget bool) (*pb.RewriteSQLResponse, bool) {
 		if tt.Table == "" {
 			if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
 				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 				recordAccessedDatabase(resp, tt.DB, sel.Dynamic)
 				rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(tt.DB))
-				return resp, true, nil
+				return resp, true
 			}
-			continue
+			return nil, false
 		}
 		key := qualify(tt.DB, tt.Table)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
 		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
 			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 			recordAccessedWrite(resp, tt, sel)
 			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(key))
-			return resp, true, nil
+			return resp, true
 		}
 		if _, logicalKey, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
@@ -103,15 +94,64 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 				recordAccessedWrite(resp, tt, sel)
 				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
-				return resp, true, nil
+				return resp, true
 			}
-			if info.Kind == engine.NodeInsert {
-				continue // authorized signed ingress owns logical SI INSERT acceptance
+			if allowInsertTarget {
+				return nil, false // authorized signed ingress owns logical SI INSERT acceptance
 			}
 			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 			recordAccessedWrite(resp, tt, sel)
 			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(logicalKey))
+			return resp, true
+		}
+		return nil, false
+	}
+
+	targets, err := engine.AllWriteTargets(e, ast)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	for _, tt := range targets {
+		key := qualify(tt.DB, tt.Table)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert); rejected {
 			return resp, true, nil
+		}
+	}
+
+	// CREATE TABLE AS SELECT and INSERT ... SELECT carry a second read-side
+	// namespace that ordinary write slots do not visit. Fail closed on SI
+	// sources before any statement-specific rewrite can forward a raw physical
+	// read. CREATE VIEW has its own body pipeline, which preserves view-target
+	// metadata and applies the same rejection later.
+	if info.Kind == engine.NodeCreateTable || info.Kind == engine.NodeInsert {
+		functionRefs, err := engine.CollectTableFunctionRefs(ast)
+		if err != nil {
+			return nil, false, err
+		}
+		functionResp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		if rejectStorageIntegrityTableFunctions(functionResp, functionRefs, sel, pb.RewriteCode_UnsupportedStatement) {
+			return functionResp, true, nil
+		}
+
+		embeddedTables, _, err := engine.CollectEmbeddedSelectSources(ast)
+		if err != nil {
+			return nil, false, err
+		}
+		seenSources := map[string]bool{}
+		for _, tt := range embeddedTables {
+			key := qualify(tt.DB, tt.Table)
+			if seenSources[key] {
+				continue
+			}
+			seenSources[key] = true
+			if resp, rejected := inspectTarget(tt, false); rejected {
+				return resp, true, nil
+			}
 		}
 	}
 	return nil, false, nil
