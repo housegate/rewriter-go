@@ -67,6 +67,7 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	}
 
 	dyn := nameresolve.FindDynamicArgs(opts)
+	siSel := nameresolve.FindActive(opts)
 	if dyn == nil {
 		rejectUnsupported(resp, kw+" requires a TableNameRewrite/dynamic_args option to validate against")
 		return resp, true, nil
@@ -97,6 +98,12 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		if len(p.Columns) > 0 {
 			rejectUnsupported(resp, kw+" with column-level granularity is not supported")
 			return resp, true, nil
+		}
+		if !scopeDatabase && siSel.Mode == nameresolve.ModeDynamic {
+			if _, key, ok := nameresolve.LookupStorageIntegrity(origDB, origTable, siSel.Dynamic); ok {
+				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+				return resp, true, nil
+			}
 		}
 		if !resolved {
 			logical = origDB

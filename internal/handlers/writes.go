@@ -87,6 +87,15 @@ func rejectInvalid(resp *pb.RewriteSQLResponse, msg string) {
 // reject code and returns ok=false so the caller short-circuits.
 func decideWriteTarget(tt engine.TableTarget, kind string, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (engine.TableDecision, bool) {
 	recordAccessedWrite(resp, tt, sel) // record BEFORE any reject (C++ writes.cc:118)
+	// Spec G §4.4: every non-INSERT slot resolving to a storage-integrity
+	// table is refused (INSERT stays on the ordinary path — the caller's
+	// signed ingress owns that decision, see plan deviation D-1).
+	if sel.Mode == nameresolve.ModeDynamic && kind != engine.NodeInsert {
+		if _, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			return engine.TableDecision{}, false
+		}
+	}
 	o := nameresolve.Resolve(tt.DB, tt.Table, sel)
 	switch o.Status {
 	case nameresolve.StatusRewrite:
@@ -114,6 +123,7 @@ func recordAccessedWrite(resp *pb.RewriteSQLResponse, tt engine.TableTarget, sel
 	resp.OriginalAccessedTables = append(resp.OriginalAccessedTables, &pb.AccessedTable{
 		OriginalDatabase: tt.DB, OriginalTable: tt.Table,
 		LogicalDatabase: a.LogicalDB, PhysicalDatabase: a.PhysicalDB, IsRemote: a.IsRemote,
+		IsStorageIntegrity: a.IsStorageIntegrity,
 	})
 }
 

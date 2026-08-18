@@ -47,6 +47,20 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 
 	sel := nameresolve.FindActive(opts)
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
+	if sel.Mode == nameresolve.ModeDynamic {
+		if tbl, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+			recordAccessedWrite(resp, tt, sel)
+			if t.Verb == engine.VerbShowCreate {
+				// The physical DDL would expose engine/zk path/_hg_row_id (Spec G §4.3).
+				rejectUnsupported(resp, "SHOW CREATE TABLE on storage-integrity table "+key+" is not supported")
+				return resp, true, nil
+			}
+			db, table := splitPhysicalName(tbl.GetSafeTable())
+			recordRewrite(resp.TableRewrites, tt, db, table)
+			resp.SqlAfterRewrite = buildObjectSQL(keyword, t.Temporary, db, table)
+			return resp, true, nil
+		}
+	}
 	d, ok := decideWriteTarget(tt, keyword+" TABLE", sel, resp)
 	if !ok {
 		return resp, true, nil // reject populated (accessed recorded first, like C++)
