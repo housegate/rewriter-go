@@ -178,9 +178,10 @@ type Selection struct {
 
 // Accessed is the best-effort resolution used to populate original_accessed_tables.
 type Accessed struct {
-	LogicalDB  string
-	PhysicalDB string
-	IsRemote   bool
+	LogicalDB          string
+	PhysicalDB         string
+	IsRemote           bool
+	IsStorageIntegrity bool
 }
 
 // FindActive scans options for the active TableNameRewrite policy. Last-wins
@@ -236,10 +237,55 @@ func ResolveAccessed(db, table string, sel Selection) Accessed {
 		}
 		phys, _ := resolvePhysicalDatabase(logical, sel.Dynamic)
 		_, isRemote := sel.Dynamic.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]
-		return Accessed{LogicalDB: logical, PhysicalDB: phys, IsRemote: isRemote}
+		_, _, isSI := LookupStorageIntegrity(db, table, sel.Dynamic)
+		return Accessed{LogicalDB: logical, PhysicalDB: phys, IsRemote: isRemote, IsStorageIntegrity: isSI}
 	default:
 		return Accessed{}
 	}
+}
+
+// DefaultReservedRowIDColumn is the protocol row-identity column hidden from
+// the logical surface (Spec G D3).
+const DefaultReservedRowIDColumn = "_hg_row_id"
+
+// LookupStorageIntegrity reports whether (db, table) — db resolved through
+// upstream_logical_database_in_context when empty — is a key of
+// dynamic_args.storage_integrity.tables. It is consulted BEFORE the ordinary
+// dynamic resolution by every table-targeting handler; the SI mapping wins.
+// It never rejects: an unqualified target with no context simply misses.
+func LookupStorageIntegrity(db, table string, a *pb.RewriteTableDynamicArgs) (*pb.StorageIntegrityArgs_Table, string, bool) {
+	tables := a.GetStorageIntegrity().GetTables()
+	if len(tables) == 0 || table == "" {
+		return nil, "", false
+	}
+	logical := db
+	if logical == "" {
+		logical = a.GetUpstreamLogicalDatabaseInContext()
+	}
+	if logical == "" {
+		return nil, "", false
+	}
+	key := logical + "." + table
+	tbl, ok := tables[key]
+	if !ok || tbl == nil {
+		return nil, "", false
+	}
+	return tbl, key, true
+}
+
+// ReservedRowIDColumn returns storage_integrity.reserved_row_id_column, or the
+// protocol default when unset.
+func ReservedRowIDColumn(a *pb.RewriteTableDynamicArgs) string {
+	if rid := a.GetStorageIntegrity().GetReservedRowIdColumn(); rid != "" {
+		return rid
+	}
+	return DefaultReservedRowIDColumn
+}
+
+// StorageIntegrityWriteRejectMessage is the shared (Go + C++) message for any
+// non-lane write/DDL touching an SI table (Spec G §4.4).
+func StorageIntegrityWriteRejectMessage(logicalKey string) string {
+	return "storage-integrity table " + logicalKey + " accepts writes only through the signed statement lane"
 }
 
 // ApplyDynamic resolves (db, table) under dynamic args. Mirrors applyDynamicRewrite.

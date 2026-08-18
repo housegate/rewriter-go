@@ -12,16 +12,17 @@ import (
 
 // RewriteResult mirrors pb.RewriteSQLResponse with interface-friendly names.
 type RewriteResult struct {
-	SQL                    string
-	Code                   pb.RewriteCode
-	Message                string
-	StatementType          pb.StatementType
-	TableRewrites          map[string]string
-	DatabaseRewrites       map[string]string
-	OriginalAccessedTables []*pb.AccessedTable
-	PrivilegesDeltas       []*pb.PrivilegeDelta
-	ExistenceClause        pb.ExistenceClause
-	FailedCTEAliases       []string
+	SQL                             string
+	Code                            pb.RewriteCode
+	Message                         string
+	StatementType                   pb.StatementType
+	TableRewrites                   map[string]string
+	DatabaseRewrites                map[string]string
+	OriginalAccessedTables          []*pb.AccessedTable
+	PrivilegesDeltas                []*pb.PrivilegeDelta
+	ExistenceClause                 pb.ExistenceClause
+	FailedCTEAliases                []string
+	StorageIntegrityContractVersion pb.StorageIntegrityContractVersion
 }
 
 // Rewriter rewrites network mode SQL into real SQL, bound to one client
@@ -34,15 +35,16 @@ type Rewriter interface {
 
 func resultFromPB(r *pb.RewriteSQLResponse) RewriteResult {
 	return RewriteResult{
-		SQL:                    r.GetSqlAfterRewrite(),
-		Code:                   r.GetCode(),
-		Message:                r.GetMessage(),
-		StatementType:          r.GetStatementType(),
-		TableRewrites:          r.GetTableRewrites(),
-		DatabaseRewrites:       r.GetDatabaseRewrites(),
-		OriginalAccessedTables: r.GetOriginalAccessedTables(),
-		PrivilegesDeltas:       r.GetPrivilegesDeltas(),
-		ExistenceClause:        r.GetExistenceClause(),
-		FailedCTEAliases:       r.GetFailedCteAliases(),
+		SQL:                             r.GetSqlAfterRewrite(),
+		Code:                            r.GetCode(),
+		Message:                         r.GetMessage(),
+		StatementType:                   r.GetStatementType(),
+		TableRewrites:                   r.GetTableRewrites(),
+		DatabaseRewrites:                r.GetDatabaseRewrites(),
+		OriginalAccessedTables:          r.GetOriginalAccessedTables(),
+		PrivilegesDeltas:                r.GetPrivilegesDeltas(),
+		ExistenceClause:                 r.GetExistenceClause(),
+		FailedCTEAliases:                r.GetFailedCteAliases(),
+		StorageIntegrityContractVersion: r.GetStorageIntegrityContractVersion(),
 	}
 }

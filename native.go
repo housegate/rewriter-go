@@ -7,6 +7,7 @@ import (
 
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/handlers"
+	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-go/internal/reverse"
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
@@ -54,8 +55,9 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 // classify() stamps it, so clear it here) and echoes the original SQL so
 // RewriteResult.SQL stays runnable (design §8). NOTE: unlike statement_type,
 // existence_clause is NOT cleared on a reject.
-func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause) {
+func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause, siVersion pb.StorageIntegrityContractVersion) {
 	resp.ExistenceClause = ec
+	resp.StorageIntegrityContractVersion = siVersion
 	if resp.GetCode() == pb.RewriteCode_Success {
 		return
 	}
@@ -90,6 +92,17 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 // the response Code instead.
 func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
+	siVersion := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
+	selection := nameresolve.FindActive(opts)
+	if selection.Mode == nameresolve.ModeDynamic && len(selection.Dynamic.GetStorageIntegrity().GetTables()) > 0 {
+		if selection.Dynamic.GetStorageIntegrity().GetContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+			resp.Code = pb.RewriteCode_InvalidRewriteRequest
+			resp.Message = "storage-integrity contract version V1 is required"
+			return resp, nil
+		}
+		siVersion = pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1
+		resp.StorageIntegrityContractVersion = siVersion
+	}
 	ast, err := e.ParseOne(sql)
 	if err != nil {
 		resp.Code = pb.RewriteCode_SyntaxError
@@ -116,7 +129,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	} else if handled {
 		// Design §8 + oracle parity: stamp existence_clause; echo input + clear
 		// statement_type on reject.
-		finalize(wresp, sql, ec)
+		finalize(wresp, sql, ec, siVersion)
 		return wresp, nil
 	}
 
@@ -125,7 +138,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	if dresp, handled, derr := handlers.RewriteDBLevel(e, ast, sql, opts); derr != nil {
 		return nil, derr
 	} else if handled {
-		finalize(dresp, sql, ec)
+		finalize(dresp, sql, ec, siVersion)
 		return dresp, nil
 	}
 
@@ -136,13 +149,13 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(e, ast, sql, opts); xerr != nil {
 		return nil, xerr
 	} else if handled {
-		finalize(xresp, sql, ec)
+		finalize(xresp, sql, ec, siVersion)
 		return xresp, nil
 	}
 	if gresp, handled, gerr := handlers.RewriteGrant(e, ast, sql, opts); gerr != nil {
 		return nil, gerr
 	} else if handled {
-		finalize(gresp, sql, ec)
+		finalize(gresp, sql, ec, siVersion)
 		return gresp, nil
 	}
 
@@ -152,7 +165,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		if herr != nil {
 			return nil, herr
 		}
-		finalize(hresp, sql, ec) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
+		finalize(hresp, sql, ec, siVersion) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
 		return hresp, nil
 	}
 
@@ -162,7 +175,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
-	finalize(resp, sql, ec)
+	finalize(resp, sql, ec, siVersion)
 	return resp, nil
 }
 

@@ -143,6 +143,10 @@ func TestStorageIntegrityGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("rewrite: %v", err)
 			}
+			if c.Dynamic != nil && c.Dynamic.StorageIntegrity != nil && len(c.Dynamic.StorageIntegrity.Tables) > 0 &&
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+				t.Errorf("storage_integrity_contract_version = %v, want V1", res.StorageIntegrityContractVersion)
+			}
 			if c.WantCode != "" && res.Code != siCodeByName[c.WantCode] {
 				t.Errorf("code = %v, want %s (%s)", res.Code, c.WantCode, res.Message)
 			}
