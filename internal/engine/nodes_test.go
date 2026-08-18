@@ -247,3 +247,107 @@ func sortTargets(s []TableTarget) {
 		return ki < kj
 	})
 }
+
+func TestRewriteSelectTables_subquerySubstitution(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	body, err := e.ParseOne(`SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RewriteSelectTables(load(t, "select"), func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionSubquery, Subquery: body}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	want := `SELECT a FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t) AS "db.t" WHERE x IN (1, 2)`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestRewriteSelectTables_subqueryKeepsUserAliasInJoin(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	ast, err := e.ParseOne(`SELECT count() FROM db.t AS a JOIN db.u AS b ON a.id = b.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := e.ParseOne(`SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t`)
+	out, err := RewriteSelectTables(ast, func(tt TableTarget) TableDecision {
+		if tt.Table == "t" {
+			return TableDecision{Action: ActionSubquery, Subquery: body}
+		}
+		return TableDecision{Action: ActionSkip}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	want := `SELECT count() FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t) AS a JOIN db.u AS b ON a.id = b.id`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// The substituted body's own table must NOT be re-visited/collected.
+	tabs, err := CollectSelectTables(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tabs {
+		if tt.DB == "hg_safe" {
+			t.Fatalf("substituted body table leaked into collection: %+v", tabs)
+		}
+	}
+}
+
+func TestReferencesIdentifier(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	cases := []struct {
+		sql  string
+		want bool
+	}{
+		{`SELECT _hg_row_id FROM t`, true},
+		{`SELECT a FROM t WHERE _hg_row_id = 'x'`, true},
+		{`SELECT a FROM t ORDER BY _hg_row_id`, true},
+		{`SELECT lower(t._hg_row_id) FROM t`, true},
+		{`SELECT * EXCEPT (_hg_row_id) FROM t`, true},
+		{`SELECT a FROM t WHERE b IN (SELECT _hg_row_id FROM u)`, true},
+		{`SELECT a FROM t`, false},
+		{`SELECT '_hg_row_id' FROM t`, false},
+		{`SELECT hg_row_id FROM t`, false},
+	}
+	for _, c := range cases {
+		ast, err := e.ParseOne(c.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.sql, err)
+		}
+		got, err := ReferencesIdentifier(ast, "_hg_row_id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("%q: got %v want %v", c.sql, got, c.want)
+		}
+	}
+}

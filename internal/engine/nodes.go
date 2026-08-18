@@ -18,9 +18,10 @@ type TableTarget struct {
 type TableAction int
 
 const (
-	ActionSkip   TableAction = iota // leave the node untouched
-	ActionRename                    // set table name (+ optionally schema/db)
-	ActionRemote                    // replace the table expr with remote(...)
+	ActionSkip     TableAction = iota // leave the node untouched
+	ActionRename                      // set table name (+ optionally schema/db)
+	ActionRemote                      // replace the table expr with remote(...)
+	ActionSubquery                    // replace the table expr with a derived table (Spec G SI surface)
 )
 
 // RemoteSpec are the five positional args of a remote() table function.
@@ -32,7 +33,18 @@ type TableDecision struct {
 	NewDB    string      // ActionRename: new schema; "" keeps the existing schema untouched
 	NewTable string      // ActionRename: new table name
 	Remote   *RemoteSpec // ActionRemote: the remote() args
+	// Subquery is the derived-table body for ActionSubquery: a parsed single
+	// statement ({"select":…} or {"union":…}) obtained from Engine.ParseOne.
+	// The alias is the user's alias, else the original qualified name —
+	// same rule as ActionRemote — so column qualifiers keep resolving.
+	Subquery AST
 }
+
+// opaqueDerivedTableKey marks a derived table injected by RewriteSelectTables.
+// The marker is internal JSON metadata (polyglot ignores unknown AST fields)
+// that prevents a later collection/rewrite pass from treating the physical
+// tables inside the injected body as additional user-authored references.
+const opaqueDerivedTableKey = "_rewriter_go_opaque_derived_table"
 
 // BareTableNames returns every unqualified (no DB prefix) table name referenced
 // in the AST, without recursing into CTE bodies already in scope. This is used
@@ -120,6 +132,11 @@ func RewriteSelectTables(ast AST, decide func(TableTarget) TableDecision) (AST, 
 func visitTables(node any, scope map[string]bool, visit func(expr, tbl map[string]any, tt TableTarget)) {
 	switch n := node.(type) {
 	case map[string]any:
+		if subquery, ok := n["subquery"].(map[string]any); ok {
+			if opaque, _ := subquery[opaqueDerivedTableKey].(bool); opaque {
+				return
+			}
+		}
 		if sel, ok := n["select"].(map[string]any); ok {
 			scope = forkCTEScope(sel, scope)
 			for _, v := range sel {
@@ -212,9 +229,83 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 			"this":               map[string]any{"function": fn},
 			"trailing_comments":  []any{},
 		}
+	case ActionSubquery:
+		if len(d.Subquery) == 0 {
+			return // misconfigured decision — leave the table untouched
+		}
+		var body any
+		if err := json.Unmarshal(d.Subquery, &body); err != nil {
+			return
+		}
+		aliasName := tt.Alias
+		if aliasName == "" {
+			aliasName = originName(tt)
+		}
+		delete(expr, "table")
+		// Shape mirrors what polyglot emits for `FROM (SELECT …) AS x`
+		// (see testdata/ast-shapes/select_subquery_from.json).
+		expr["subquery"] = map[string]any{
+			"this":                body,
+			"alias":               ident(aliasName),
+			"alias_explicit_as":   true,
+			"alias_keyword":       "AS",
+			"column_aliases":      []any{},
+			"lateral":             false,
+			"limit":               nil,
+			"modifiers_inside":    false,
+			"offset":              nil,
+			"order_by":            nil,
+			"trailing_comments":   []any{},
+			opaqueDerivedTableKey: true,
+		}
 	case ActionSkip:
 		// no-op
 	}
+}
+
+// ReferencesIdentifier reports whether any column reference in the AST has
+// the final name part `name` (bare `_hg_row_id`, qualified `t._hg_row_id`,
+// in select list / WHERE / ORDER BY / function args / subqueries), or any
+// `* EXCEPT|REPLACE|RENAME (...)` entry names it. String literals never
+// match. Used for the Spec G reserved-column guard.
+func ReferencesIdentifier(ast AST, name string) (bool, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return false, fmt.Errorf("engine: decode: %w", err)
+	}
+	return refWalk(root, name), nil
+}
+
+func refWalk(node any, name string) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		if col, ok := n["column"].(map[string]any); ok && identName(col["name"]) == name {
+			return true
+		}
+		if star, ok := n["star"].(map[string]any); ok {
+			for _, k := range []string{"except", "replace", "rename"} {
+				if list, ok := star[k].([]any); ok {
+					for _, e := range list {
+						if identName(e) == name {
+							return true
+						}
+					}
+				}
+			}
+		}
+		for _, v := range n {
+			if refWalk(v, name) {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if refWalk(v, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // needsQuoting reports whether s must be quoted to survive as a single ClickHouse
