@@ -14,6 +14,7 @@
 | Write corpus | `writes_golden_test.go`, `testdata/writes_cases.json` | DDL/write parity and allowed divergences |
 | DB-level corpus | `dblevel_golden_test.go`, `testdata/dblevel_cases.json` | USE/SHOW/CREATE/DROP database |
 | Phase 4 corpus | `phase4_golden_test.go`, `testdata/phase4_cases.json` | EXISTS/SHOW CREATE/GRANT behavior |
+| Storage-integrity corpus | `storage_integrity_golden_test.go`, `testdata/storage_integrity_cases.json` | Shared Go/C++ Spec G contract and response goldens |
 | Error-message corpus | `errmsg_golden_test.go`, `testdata/errmsg_cases.json` | `RewriteErrorMessage` inversion |
 | Fuzzing | `fuzz_test.go`, `testdata/fuzz` | Fail-open and no-panic contract |
 | Root entrypoint parity | `../../native_test.go`, `../../service_test.go` | Public API and stateless service behavior; engine-gated when FFI is required |
