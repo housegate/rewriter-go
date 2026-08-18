@@ -39,7 +39,7 @@ func TestParseGrant(t *testing.T) {
 		{"GRANT CURRENT GRANTS ON db.t TO u", true, false, false, false, true, true,
 			[]string{"CURRENT GRANTS"}, "db.t", []string{"u"}, false, "GRANT CURRENT GRANTS ON db.t TO u"},
 		// Unstructured forms — flags set, generic parse skipped.
-		{"ATTACH GRANT SELECT ON db.t TO u", true, false, true, false, false, false, nil, "", nil, false, ""},
+		{"ATTACH GRANT SELECT ON db.t TO u", true, false, true, false, true, false, nil, "db.t", nil, false, ""},
 		{"GRANT SELECT ON db.t TO u WITH REPLACE OPTION", true, false, false, true, true, false, nil, "db.t", nil, false, ""},
 		{"GRANT role1 TO u", true, false, false, false, false, false, nil, "", nil, false, ""},
 		// Not a grant.

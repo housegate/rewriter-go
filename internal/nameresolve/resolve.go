@@ -236,7 +236,7 @@ func ResolveAccessed(db, table string, sel Selection) Accessed {
 		if _, ok := LookupStorageIntegrityPhysical(db, table, sel.Dynamic); ok {
 			physicalDB := db
 			if physicalDB == "" {
-				physicalDB, _ = splitQualified(table)
+				physicalDB = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
 			}
 			return Accessed{PhysicalDB: physicalDB, IsStorageIntegrity: true}
 		}
@@ -300,16 +300,48 @@ func LookupStorageIntegrityPhysical(db, table string, a *pb.RewriteTableDynamicA
 	if a == nil || table == "" {
 		return "", false
 	}
-	physical := qualify(db, table)
+	effectiveDB := db
+	if effectiveDB == "" {
+		effectiveDB = a.GetUpstreamLogicalDatabaseInContext()
+	}
+	if effectiveDB == "" {
+		return "", false
+	}
 	for logicalKey, tbl := range a.GetStorageIntegrity().GetTables() {
 		if tbl == nil {
 			continue
 		}
-		if physical == tbl.GetSafeTable() || physical == tbl.GetUnsafeTable() {
-			return logicalKey, true
+		for _, physical := range []string{tbl.GetSafeTable(), tbl.GetUnsafeTable()} {
+			physicalDB, _, ok := exactQualifiedTable(physical)
+			if ok && effectiveDB == physicalDB {
+				return logicalKey, true
+			}
 		}
 	}
 	return "", false
+}
+
+// IsStorageIntegrityPhysicalDatabase reports whether db is one of the
+// configured safe/unsafe physical namespaces. The reservation is database-wide:
+// once a database hosts a protocol-owned SI table, no user-authored SQL may
+// address any object in that database directly (including table functions and
+// database-scope DDL/DCL).
+func IsStorageIntegrityPhysicalDatabase(db string, a *pb.RewriteTableDynamicArgs) bool {
+	if a == nil || db == "" {
+		return false
+	}
+	for _, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		for _, physical := range []string{tbl.GetSafeTable(), tbl.GetUnsafeTable()} {
+			physicalDB, _, ok := exactQualifiedTable(physical)
+			if ok && db == physicalDB {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // AuthorizeStorageIntegrityLogical requires the logical database selected by a
@@ -355,6 +387,10 @@ func StorageIntegrityPhysicalRejectMessage(physical string) string {
 	return "storage-integrity physical table " + physical + " is not directly addressable"
 }
 
+func StorageIntegrityPhysicalDatabaseRejectMessage(physical string) string {
+	return "storage-integrity physical database " + physical + " is not directly addressable"
+}
+
 // ValidateStorageIntegrity checks the v1 configuration before the service
 // publishes an acknowledgement. Invalid entries must be a structured request
 // rejection, never a nil/non-SI fallthrough or a later parser error.
@@ -367,12 +403,22 @@ func ValidateStorageIntegrity(a *pb.RewriteTableDynamicArgs) error {
 	if rid != "" && !simpleIdentifier(rid) {
 		return fmt.Errorf("storage-integrity reserved_row_id_column must be a simple identifier")
 	}
+	switch si.GetReadMode() {
+	case pb.StorageIntegrityArgs_READ_MODE_UNSPECIFIED,
+		pb.StorageIntegrityArgs_READ_MODE_SAFE,
+		pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST:
+	default:
+		return fmt.Errorf("storage-integrity read_mode %d is not supported", si.GetReadMode())
+	}
 	keys := make([]string, 0, len(si.GetTables()))
 	for key := range si.GetTables() {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		if _, _, ok := exactQualifiedTable(key); !ok {
+			return fmt.Errorf("storage-integrity logical table key %s must have exact <database>.<table> shape", key)
+		}
 		tbl := si.GetTables()[key]
 		if tbl == nil {
 			return fmt.Errorf("storage-integrity table %s must not be nil", key)
@@ -380,8 +426,22 @@ func ValidateStorageIntegrity(a *pb.RewriteTableDynamicArgs) error {
 		if tbl.GetSafeTable() == "" || tbl.GetUnsafeTable() == "" {
 			return fmt.Errorf("storage-integrity table %s requires non-empty safe_table and unsafe_table", key)
 		}
+		if _, _, ok := exactQualifiedTable(tbl.GetSafeTable()); !ok {
+			return fmt.Errorf("storage-integrity table %s safe_table %s must have exact <database>.<table> shape", key, tbl.GetSafeTable())
+		}
+		if _, _, ok := exactQualifiedTable(tbl.GetUnsafeTable()); !ok {
+			return fmt.Errorf("storage-integrity table %s unsafe_table %s must have exact <database>.<table> shape", key, tbl.GetUnsafeTable())
+		}
 	}
 	return nil
+}
+
+func exactQualifiedTable(s string) (db, table string, ok bool) {
+	if strings.Count(s, ".") != 1 {
+		return "", "", false
+	}
+	db, table = splitQualified(s)
+	return db, table, simpleIdentifier(db) && simpleIdentifier(table)
 }
 
 func simpleIdentifier(s string) bool {

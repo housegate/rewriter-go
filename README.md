@@ -34,8 +34,11 @@ table; DESCRIBE emits a metadata-shaped `system.columns` query. Non-lane writes 
 DDL reject fail-closed (INSERT intentionally keeps the existing signed-ingress path),
 and every accepted SI request positively acknowledges contract v1 in the response.
 An SI logical key is usable only when its database is present in the account-filtered
-`database_map`; `known_physical_databases` does not grant that access. Configured safe
-and unsafe physical table names are protocol-owned and reject direct SQL addressing.
+`database_map` (including INSERT); `known_physical_databases` does not grant that access.
+Every database that hosts a configured safe/unsafe table is a protocol-owned namespace:
+direct table nodes, table functions, USE/SHOW, database DDL, and database-scope DCL all
+reject with SI-classified metadata. V1 validation rejects malformed logical/physical
+table keys and unknown read modes before acknowledging the contract.
 
 ## Layout
 

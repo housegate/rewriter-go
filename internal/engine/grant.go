@@ -59,7 +59,7 @@ func ParseGrant(e Engine, sql string) (GrantParse, error) {
 	case "ATTACH":
 		if len(toks) >= 2 && strings.EqualFold(toks[1].Text, "GRANT") {
 			gp.IsGrantVerb, gp.IsAttach = true, true
-			return gp, nil // handler rejects; generic parse would fail
+			break // recover ON target before handler rejects; generic parse still skipped
 		}
 		return gp, nil
 	default:
@@ -70,6 +70,9 @@ func ParseGrant(e Engine, sql string) (GrantParse, error) {
 	gp.HasReplace = tokensHaveReplaceOption(toks)
 	if gp.HasOn {
 		gp.Securable = tokenSecurable(toks)
+	}
+	if gp.IsAttach {
+		return gp, nil // target recovered; generic parse would fail
 	}
 	if !gp.HasOn || gp.HasReplace {
 		return gp, nil // handler rejects on the flags; generic parse would fail

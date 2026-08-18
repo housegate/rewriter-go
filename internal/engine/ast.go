@@ -10,6 +10,8 @@ import (
 const (
 	NodeSelect      = "select"
 	NodeUnion       = "union"
+	NodeIntersect   = "intersect"
+	NodeExcept      = "except"
 	NodeInsert      = "insert"
 	NodeCreateTable = "create_table"
 	NodeDropTable   = "drop_table"

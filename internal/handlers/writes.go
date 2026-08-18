@@ -77,8 +77,17 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 	}
 	seen := map[string]bool{}
 	for _, tt := range targets {
+		if tt.Table == "" {
+			if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
+				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+				recordAccessedDatabase(resp, tt.DB, sel.Dynamic)
+				rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(tt.DB))
+				return resp, true, nil
+			}
+			continue
+		}
 		key := qualify(tt.DB, tt.Table)
-		if tt.Table == "" || seen[key] {
+		if seen[key] {
 			continue
 		}
 		seen[key] = true
@@ -88,18 +97,20 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(key))
 			return resp, true, nil
 		}
-		if info.Kind == engine.NodeInsert {
-			continue // signed ingress owns logical SI INSERT acceptance
-		}
 		if _, logicalKey, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
-			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-			recordAccessedWrite(resp, tt, sel)
 			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
 			if !authorized {
+				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+				recordAccessedWrite(resp, tt, sel)
 				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
-			} else {
-				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(logicalKey))
+				return resp, true, nil
 			}
+			if info.Kind == engine.NodeInsert {
+				continue // authorized signed ingress owns logical SI INSERT acceptance
+			}
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(logicalKey))
 			return resp, true, nil
 		}
 	}

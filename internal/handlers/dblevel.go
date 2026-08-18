@@ -89,14 +89,19 @@ func recordDatabaseRewrite(resp *pb.RewriteSQLResponse, origin, newDB string) {
 // recordAccessedDatabase (name_rewrite.h:254-276).
 func recordAccessedDatabase(resp *pb.RewriteSQLResponse, target string, dyn *pb.RewriteTableDynamicArgs) {
 	phys := ""
+	logical := target
+	isSI := false
 	if dyn != nil {
-		if p, ok := nameresolve.ResolvePhysicalDatabase(target, dyn); ok {
+		if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
+			phys, logical, isSI = target, "", true
+		} else if p, ok := nameresolve.ResolvePhysicalDatabase(target, dyn); ok {
 			phys = p
 		}
 	}
 	resp.OriginalAccessedTables = append(resp.OriginalAccessedTables, &pb.AccessedTable{
 		OriginalDatabase: target, OriginalTable: "",
-		LogicalDatabase: target, PhysicalDatabase: phys, IsRemote: false,
+		LogicalDatabase: logical, PhysicalDatabase: phys, IsRemote: false,
+		IsStorageIntegrity: isSI,
 	})
 }
 
@@ -118,6 +123,10 @@ func dispatchCreateDatabase(e engine.Engine, ast engine.AST, dyn *pb.RewriteTabl
 		return resp, true, nil
 	}
 	recordAccessedDatabase(resp, target, dyn) // before validation
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
+		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(target))
+		return resp, true, nil
+	}
 	if phys, hit := dyn.GetDatabaseMap()[target]; hit && !ifNotExists {
 		rejectDBInvalid(resp, "CREATE DATABASE target '"+target+"' already exists (mapped to physical '"+phys+"'); use IF NOT EXISTS to suppress this error")
 		return resp, true, nil
@@ -161,6 +170,10 @@ func dispatchDropDatabase(e engine.Engine, ast engine.AST, dyn *pb.RewriteTableD
 		return resp, true, nil
 	}
 	recordAccessedDatabase(resp, target, dyn)
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
+		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(target))
+		return resp, true, nil
+	}
 	if phys, hit := dyn.GetDatabaseMap()[target]; !hit {
 		if !ifExists {
 			rejectDBInvalid(resp, "DROP DATABASE target '"+target+"' is not in database_map; use IF EXISTS to suppress this error")
@@ -198,6 +211,11 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 	if dyn == nil {
 		// No TableNameRewrite / dynamic_args in the request → passthrough.
 		return passthroughDB(e, ast, sql, resp)
+	}
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(origin, dyn) {
+		recordAccessedDatabase(resp, origin, dyn)
+		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(origin))
+		return resp, true, nil
 	}
 	physical, ok := nameresolve.ResolvePhysicalDatabase(origin, dyn)
 	if !ok {
@@ -243,6 +261,11 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	}
 	if logical == "" {
 		rejectDBInvalid(resp, "SHOW TABLES has no FROM clause and no upstream_logical_database_in_context is set; caller must send `USE <db>` or use `SHOW TABLES FROM <db>`")
+		return resp, true, nil
+	}
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(logical, dyn) {
+		recordAccessedDatabase(resp, logical, dyn)
+		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(logical))
 		return resp, true, nil
 	}
 	physical, ok := nameresolve.ResolvePhysicalDatabase(logical, dyn)

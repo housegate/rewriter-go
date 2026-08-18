@@ -335,6 +335,9 @@ func TestReferencesIdentifier(t *testing.T) {
 		{`SELECT * EXCEPT (_hg_row_id) FROM t`, true},
 		{`SELECT * REPLACE (1 AS _hg_row_id) FROM t`, true},
 		{`SELECT * RENAME (a AS _hg_row_id) FROM t`, true},
+		{`SELECT * RENAME (_hg_row_id AS x) FROM t`, true},
+		{`SELECT 1 AS _hg_row_id FROM t`, true},
+		{`WITH 1 AS _hg_row_id SELECT a FROM t`, true},
 		{`SELECT * FROM t AS a JOIN u AS b USING (_hg_row_id)`, true},
 		{`SELECT a FROM t WHERE b IN (SELECT _hg_row_id FROM u)`, true},
 		{`SELECT a FROM t`, false},
@@ -352,6 +355,83 @@ func TestReferencesIdentifier(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("%q: got %v want %v ast=%s", c.sql, got, c.want, ast)
+		}
+	}
+}
+
+func TestCollectTableFunctionTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`SELECT * FROM merge('hg_safe', 'db1__t')`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`SELECT * FROM remote('127.0.0.1', 'hg_safe', 'db1__t')`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`SELECT * FROM remote('127.0.0.1', 'hg_safe.db1__t')`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`SELECT * FROM cluster('c', hg_unsafe, db1__t)`, []TableTarget{{DB: "hg_unsafe", Table: "db1__t"}}},
+		{`SELECT * FROM cluster('c', 'hg_unsafe.db1__t')`, []TableTarget{{DB: "hg_unsafe", Table: "db1__t"}}},
+		{`SELECT * FROM numbers(10)`, nil},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := CollectTableFunctionTargets(ast)
+		if err != nil {
+			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+	}
+}
+
+func TestUnsupportedTableWrapperTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`SELECT * FROM db1.t FINAL`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t SAMPLE 0.1`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t AS x(a)`, []TableTarget{{DB: "db1", Table: "t", Alias: "x"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u FINAL ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u SAMPLE 0.1 ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u AS o(id) ON s.id = o.id`, []TableTarget{{DB: "other", Table: "u", Alias: "o"}}},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := UnsupportedTableWrapperTargets(ast)
+		if err != nil {
+			t.Fatalf("inspect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+	}
+}
+
+func TestHasWithOffset(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want bool
+	}{
+		{"SELECT * FROM t WITH OFFSET AS off", true},
+		{"SELECT * FROM t WITH\nOFFSET AS off", true},
+		{"SELECT * FROM t WITH\tOFFSET AS off", true},
+		{"SELECT 'WITH OFFSET' FROM t", false},
+		{"SELECT 'WITH' FROM t OFFSET 1", false},
+		{"-- WITH OFFSET\nSELECT * FROM t", false},
+	} {
+		got, err := HasWithOffset(e, tc.sql)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.sql, err)
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %v want %v", tc.sql, got, tc.want)
 		}
 	}
 }

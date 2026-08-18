@@ -342,7 +342,10 @@ func AllWriteTargets(e Engine, ast AST) ([]TableTarget, error) {
 		}
 	} else {
 		writeSlots(kind, body, func(_ WriteRole, tbl map[string]any) {
-			out = append(out, decodeTableTarget(tbl))
+			target := decodeTableTarget(tbl)
+			if target.DB != "" || target.Table != "" {
+				out = append(out, target)
+			}
 		})
 	}
 	if kind == NodeAlterTable {
@@ -358,6 +361,74 @@ func AllWriteTargets(e Engine, ast AST) ([]TableTarget, error) {
 			return nil, err
 		}
 		out = append(out, raw...)
+		dbs, err := rawCommandDatabaseTargets(e, ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, dbs...)
+	}
+	if kind == NodeCreateDB || kind == NodeDropDB {
+		db, _, _, err := DatabaseTarget(ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, TableTarget{DB: db})
+	}
+	if kind == NodeCreateTable || kind == NodeInsert {
+		functions, err := CollectTableFunctionTargets(ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, functions...)
+	}
+	return out, nil
+}
+
+// rawCommandDatabaseTargets extracts database-name operands from the database
+// DDL forms Polyglot flattens to command nodes. TableTarget{DB: name, Table: ""}
+// is the existing database-level shape used by AccessedTable metadata.
+func rawCommandDatabaseTargets(e Engine, ast AST) ([]TableTarget, error) {
+	_, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := body["this"].(string)
+	toks, err := tokenizeRaw(e, raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(toks) < 2 {
+		return nil, nil
+	}
+	head := strings.ToUpper(toks[0].Text)
+	if head != "RENAME" && head != "ATTACH" && head != "DETACH" {
+		return nil, nil
+	}
+	// DATABASE is the object keyword immediately after the verb. Do not scan
+	// deeper: ATTACH GRANT may contain a CREATE DATABASE privilege and must stay
+	// in the grant handler rather than being mistaken for database DDL.
+	database := 1
+	if !strings.EqualFold(toks[database].Text, "DATABASE") {
+		return nil, nil
+	}
+	var out []TableTarget
+	for i := database + 1; i < len(toks); i++ {
+		if isNameTok(toks[i].TokenType) {
+			out = append(out, TableTarget{DB: toks[i].Text})
+			break
+		}
+	}
+	if head == "RENAME" {
+		for i := database + 1; i+1 < len(toks); i++ {
+			if toks[i].TokenType == "TO" || strings.EqualFold(toks[i].Text, "TO") {
+				for j := i + 1; j < len(toks); j++ {
+					if isNameTok(toks[j].TokenType) {
+						out = append(out, TableTarget{DB: toks[j].Text})
+						return out, nil
+					}
+				}
+			}
+		}
 	}
 	return out, nil
 }
@@ -410,11 +481,16 @@ func collectNestedTableTargets(node any, out *[]TableTarget) {
 
 func rawActionCrossTableTarget(toks []rawToken) (TableTarget, bool) {
 	for i := 0; i < len(toks); i++ {
-		if strings.EqualFold(toks[i].Text, "FROM") {
-			return rawTokenTableTarget(toks, i+1)
+		if toks[i].TokenType == "FROM" {
+			if target, ok := rawTokenTableTarget(toks, i+1); ok {
+				return target, true
+			}
+			continue
 		}
-		if strings.EqualFold(toks[i].Text, "TO") && i+1 < len(toks) && strings.EqualFold(toks[i+1].Text, "TABLE") {
-			return rawTokenTableTarget(toks, i+2)
+		if toks[i].TokenType == "TO" && i+1 < len(toks) && toks[i+1].TokenType == "TABLE" {
+			if target, ok := rawTokenTableTarget(toks, i+2); ok {
+				return target, true
+			}
 		}
 	}
 	return TableTarget{}, false
@@ -727,9 +803,9 @@ func classifyWriteCommand(sql string) CommandSub {
 		return CmdBareReject
 	case strings.HasPrefix(u, "ALTER TABLE") && containsWord(u, "UPDATE"):
 		return CmdAlterUpdate
-	case strings.HasPrefix(u, "DETACH"): // DETACH TABLE/VIEW → reject (writes.cc:383-385)
+	case attachDetachDDL(u, "DETACH"): // DETACH TABLE/VIEW/DB/DICTIONARY
 		return CmdBareReject
-	case strings.HasPrefix(u, "ATTACH"): // ATTACH TABLE/VIEW → reject (writes.cc:383-385)
+	case attachDetachDDL(u, "ATTACH"): // ATTACH GRANT deliberately falls through
 		return CmdBareReject
 	case strings.HasPrefix(u, "DROP DICTIONARY"): // ONLY DICTIONARY → reject (writes.cc:387-389).
 		// DROP TABLE/VIEW/DATABASE are STRUCTURED nodes (never here); DROP
@@ -746,6 +822,22 @@ func classifyWriteCommand(sql string) CommandSub {
 		// — not a write this phase rejects → pass through (Phase 3/4 / SELECT).
 		return CmdNone
 	}
+}
+
+func attachDetachDDL(upperSQL, verb string) bool {
+	if !strings.HasPrefix(upperSQL, verb+" ") {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(upperSQL, verb))
+	for _, prefix := range []string{
+		"TABLE ", "TEMPORARY TABLE ", "VIEW ", "MATERIALIZED VIEW ",
+		"DATABASE ", "DICTIONARY ",
+	} {
+		if strings.HasPrefix(rest, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // containsWord reports whether upper-cased haystack contains word as a

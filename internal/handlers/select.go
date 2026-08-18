@@ -4,7 +4,6 @@ package handlers
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
@@ -103,6 +102,17 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if err != nil {
 		return nil, nil, err
 	}
+	if sel.Mode == nameresolve.ModeDynamic {
+		functions, ferr := engine.CollectTableFunctionTargets(ast)
+		if ferr != nil {
+			return nil, nil, ferr
+		}
+		for _, tt := range functions {
+			if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+				originals = append(originals, tt)
+			}
+		}
+	}
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
 	if sel.Mode == nameresolve.ModeDynamic {
@@ -129,12 +139,23 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	// and SAMPLE are rejected at the same pre-rewrite boundary because a
 	// derived-table substitution cannot silently discard their semantics.
 	if sel.Mode == nameresolve.ModeDynamic && touchesStorageIntegrity(resp.OriginalAccessedTables) {
-		modified, merr := engine.HasUnsupportedTableWrapper(ast)
+		wrapperTargets, merr := engine.UnsupportedTableWrapperTargets(ast)
 		if merr != nil {
 			return nil, nil, merr
 		}
-		if len(sourceSQL) > 0 && strings.Contains(strings.ToUpper(sourceSQL[0]), "WITH OFFSET") {
-			modified = true
+		modified := false
+		for _, tt := range wrapperTargets {
+			if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+				modified = true
+				break
+			}
+		}
+		if !modified && len(sourceSQL) > 0 {
+			withOffset, oerr := engine.HasWithOffset(e, sourceSQL[0])
+			if oerr != nil {
+				return nil, nil, oerr
+			}
+			modified = withOffset
 		}
 		if modified {
 			resp.Code = pb.RewriteCode_RewriteError

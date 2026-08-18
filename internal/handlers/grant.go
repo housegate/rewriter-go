@@ -41,6 +41,12 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	resp := newGrantResp(stmt)
 	siSel := nameresolve.FindActive(opts)
 	origDB, origTable, scopeDatabase, anyDatabase := splitSecurable(gp.Securable)
+	if gp.HasOn && scopeDatabase && siSel.Mode == nameresolve.ModeDynamic &&
+		nameresolve.IsStorageIntegrityPhysicalDatabase(origDB, siSel.Dynamic) {
+		recordAccessedDatabase(resp, origDB, siSel.Dynamic)
+		rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(origDB))
+		return resp, true, nil
+	}
 	if gp.HasOn && !scopeDatabase && !anyDatabase && origTable != "" && siSel.Mode == nameresolve.ModeDynamic {
 		target := engine.TableTarget{DB: origDB, Table: origTable}
 		if _, ok := nameresolve.LookupStorageIntegrityPhysical(origDB, origTable, siSel.Dynamic); ok {

@@ -39,13 +39,26 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 		stmt, keyword = pb.StatementType_STATEMENT_TYPE_SHOW_CREATE_TABLE, "SHOW CREATE"
 	}
 	resp := newWriteResp(stmt)
+	sel := nameresolve.FindActive(opts)
+	if sel.Mode == nameresolve.ModeDynamic {
+		if t.ObjType == "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.Table, sel.Dynamic) {
+			recordAccessedDatabase(resp, t.Table, sel.Dynamic)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(t.Table))
+			return resp, true, nil
+		}
+		if t.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.DB, sel.Dynamic) {
+			tt := engine.TableTarget{DB: t.DB, Table: t.Table}
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(t.DB, t.Table)))
+			return resp, true, nil
+		}
+	}
 
 	if t.ObjType != "TABLE" {
 		rejectUnsupported(resp, keyword+" "+t.ObjType+" is not supported; only "+keyword+" TABLE is allowed")
 		return resp, true, nil
 	}
 
-	sel := nameresolve.FindActive(opts)
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
 	if sel.Mode == nameresolve.ModeDynamic {
 		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {

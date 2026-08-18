@@ -720,6 +720,17 @@ func TestStorageIntegrityContract_RejectsMalformedEntriesBeforeAcknowledgement(t
 		{"nil table", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"] = nil }, "must not be nil"},
 		{"missing safe", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].SafeTable = "" }, "requires non-empty safe_table and unsafe_table"},
 		{"missing unsafe", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].UnsafeTable = "" }, "requires non-empty safe_table and unsafe_table"},
+		{"malformed logical key", func(d *pb.RewriteTableDynamicArgs) {
+			d.StorageIntegrity.Tables["db1.t.extra"] = d.StorageIntegrity.Tables["db1.t"]
+			delete(d.StorageIntegrity.Tables, "db1.t")
+		}, "logical table key db1.t.extra must have exact <database>.<table> shape"},
+		{"malformed safe table", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].SafeTable = "hg_safe" }, "safe_table hg_safe must have exact <database>.<table> shape"},
+		{"malformed unsafe table", func(d *pb.RewriteTableDynamicArgs) {
+			d.StorageIntegrity.Tables["db1.t"].UnsafeTable = "hg_unsafe.db1__t.extra"
+		}, "unsafe_table hg_unsafe.db1__t.extra must have exact <database>.<table> shape"},
+		{"unknown read mode", func(d *pb.RewriteTableDynamicArgs) {
+			d.StorageIntegrity.ReadMode = pb.StorageIntegrityArgs_ReadMode(99)
+		}, "read_mode 99 is not supported"},
 		{"invalid reserved column", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.ReservedRowIdColumn = "bad-name" }, "reserved_row_id_column must be a simple identifier"},
 	}
 	for _, tc := range cases {

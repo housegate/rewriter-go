@@ -147,6 +147,8 @@ func TestRewriteSelect_storageIntegrityModifiersRejected(t *testing.T) {
 		"SELECT a FROM db1.t FINAL",
 		"SELECT a FROM db1.t SAMPLE 0.1",
 		"SELECT * FROM db1.t WITH OFFSET AS off",
+		"SELECT * FROM db1.t WITH\nOFFSET AS off",
+		"SELECT * FROM db1.t WITH\tOFFSET AS off",
 		"SELECT * FROM db1.t AS x(a)",
 	} {
 		t.Run(sql, func(t *testing.T) {
@@ -167,6 +169,22 @@ func TestRewriteSelect_storageIntegrityModifiersRejected(t *testing.T) {
 				t.Fatalf("accessed=%+v, want one SI-flagged target", resp.GetOriginalAccessedTables())
 			}
 		})
+	}
+}
+
+func TestRewriteSelect_storageIntegrityWithOffsetLiteralAllowed(t *testing.T) {
+	e := newEngine(t)
+	sql := "SELECT 'WITH OFFSET' FROM db1.t"
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success || !strings.Contains(resp.GetSqlAfterRewrite(), "hg_safe.db1__t") {
+		t.Fatalf("code=%v msg=%q sql=%q", resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
 	}
 }
 
@@ -544,6 +562,244 @@ func TestGrant_storageIntegrityEffectiveTableRewriteIsLastWins(t *testing.T) {
 			if got := resp.Code == pb.RewriteCode_UnsupportedStatement; got != tc.wantReject {
 				t.Fatalf("code=%v msg=%q wantReject=%v", resp.Code, resp.Message, tc.wantReject)
 			}
+		})
+	}
+}
+
+func assertStorageIntegrityReject(t *testing.T, resp *pb.RewriteSQLResponse, message string) {
+	t.Helper()
+	if resp.GetCode() == pb.RewriteCode_Success || !strings.Contains(resp.GetMessage(), message) {
+		t.Fatalf("code=%v msg=%q, want reject containing %q", resp.GetCode(), resp.GetMessage(), message)
+	}
+	for _, accessed := range resp.GetOriginalAccessedTables() {
+		if accessed.GetIsStorageIntegrity() {
+			return
+		}
+	}
+	t.Fatalf("accessed=%+v, want storage-integrity classification", resp.GetOriginalAccessedTables())
+}
+
+func TestRewriteSelect_storageIntegrityPhysicalTableFunctionsRejected(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`SELECT * FROM merge('hg_safe', 'db1__t')`,
+		`SELECT _hg_row_id FROM remote('127.0.0.1', 'hg_unsafe', 'db1__t')`,
+		`SELECT * FROM cluster('c', 'hg_safe.db1__t')`,
+		`SELECT * FROM remote('127.0.0.1', hg_safe, other_raw)`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity physical")
+		})
+	}
+}
+
+func TestRewriteSelect_storageIntegrityPhysicalContextAndDatabaseWide(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		context, sql string
+	}{
+		{"hg_safe", "SELECT * FROM db1__t"},
+		{"hg_unsafe", "SELECT _hg_row_id FROM db1__t"},
+		{"", "SELECT * FROM hg_safe.other_raw"},
+		{"", "SELECT * FROM hg_unsafe.other_raw"},
+	} {
+		t.Run(tc.context+tc.sql, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tc.context
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(dyn), tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity physical")
+		})
+	}
+}
+
+func TestRewriteSelect_mixedOrdinaryWrappersDoNotRejectStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`SELECT * FROM db1.t AS s JOIN other.u FINAL ON 1`,
+		`SELECT * FROM db1.t AS s JOIN other.u SAMPLE 0.1 ON 1`,
+		`SELECT * FROM db1.t AS s JOIN other.u AS o(id) ON s.id = o.id`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success || !strings.Contains(resp.GetSqlAfterRewrite(), "hg_safe.db1__t") {
+				t.Fatalf("code=%v msg=%q sql=%q", resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
+			}
+		})
+	}
+}
+
+func TestRewriteSelect_reservedAliasRejected(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`SELECT 1 AS _hg_row_id FROM db1.t`,
+		`WITH 1 AS _hg_row_id SELECT a FROM db1.t`,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertStorageIntegrityReject(t, resp, "reserved column _hg_row_id is not addressable")
+	}
+}
+
+func TestWrite_storageIntegrityTableFunctionsAndCrossAlterRejectedWithMetadata(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		`INSERT INTO FUNCTION remote('h', 'hg_unsafe', 'db1__t') SELECT 1`,
+		`INSERT INTO FUNCTION cluster('c', 'hg_safe.db1__t') SELECT 1`,
+		`CREATE TABLE other.x AS merge('hg_safe', 'db1__t')`,
+		`ALTER TABLE other.u ATTACH PARTITION 'FROM' FROM hg_safe.db1__t`,
+		`ALTER TABLE other.u ATTACH PARTITION 1 /* FROM decoy */ FROM db1.t`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, opts)
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+}
+
+func TestWrite_storageIntegrityInsertRequiresLogicalAuthorization(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`INSERT INTO db1.t VALUES (1)`,
+		`INSERT INTO db1.t (a) SELECT 1`,
+		`INSERT INTO db1.t (a) VALUES (1)`,
+	} {
+		dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+		dyn.DatabaseMap = map[string]string{}
+		dyn.KnownPhysicalDatabases = []string{"db1"}
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(dyn))
+		if err != nil || !handled {
+			t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest {
+			t.Fatalf("%q: code=%v msg=%q", sql, resp.GetCode(), resp.GetMessage())
+		}
+		assertStorageIntegrityReject(t, resp, "not authorized by database_map")
+	}
+
+	authorized := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, sql := range []string{`INSERT INTO db1.t (a) VALUES (1)`, `INSERT INTO db1.t (a) SELECT 1`} {
+		ast, _ := e.ParseOne(sql)
+		resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(authorized))
+		if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
+			t.Fatalf("authorized %q: handled=%v err=%v resp=%+v", sql, handled, err, resp)
+		}
+		if len(resp.GetOriginalAccessedTables()) != 1 || !resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+			t.Fatalf("authorized %q accessed=%+v", sql, resp.GetOriginalAccessedTables())
+		}
+	}
+}
+
+func TestPhysicalDatabaseNamespaceRejectedAcrossDBLevelAndDDL(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		sql   string
+		known bool
+	}{
+		{"USE hg_safe", true},
+		{"USE hg_unsafe", false},
+		{"SHOW TABLES FROM hg_safe", true},
+		{"CREATE DATABASE hg_safe", false},
+		{"DROP DATABASE hg_unsafe", true},
+		{"RENAME DATABASE hg_safe TO other", false},
+		{"RENAME DATABASE other TO hg_unsafe", true},
+		{"ATTACH DATABASE hg_safe FROM '/var/lib/clickhouse/data/'", false},
+		{"DETACH DATABASE hg_unsafe", true},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			if tc.known {
+				dyn.KnownPhysicalDatabases = append(dyn.KnownPhysicalDatabases, "hg_safe", "hg_unsafe")
+			}
+			opts := dynOpt(dyn)
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, tc.sql, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handled {
+				resp, handled, err = RewriteDBLevel(e, ast, tc.sql, opts)
+			}
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity physical database")
+		})
+	}
+
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.UpstreamLogicalDatabaseInContext = "hg_unsafe"
+	ast, _ := e.ParseOne("SHOW TABLES")
+	resp, handled, err := RewriteDBLevel(e, ast, "SHOW TABLES", dynOpt(dyn))
+	if err != nil || !handled {
+		t.Fatalf("SHOW TABLES context handled=%v err=%v", handled, err)
+	}
+	assertStorageIntegrityReject(t, resp, "storage-integrity physical database")
+}
+
+func TestGrant_storageIntegrityPhysicalDatabaseScopeAndAttachGrant(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`GRANT SELECT ON hg_safe.* TO u1`,
+		`REVOKE SELECT ON hg_unsafe.* FROM u1`,
+		`ATTACH GRANT SELECT ON hg_safe.db1__t TO u1`,
+		`ATTACH GRANT SELECT ON db1.t TO u1`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, handled, err := RewriteWrite(e, ast, sql, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))); err != nil || handled {
+				t.Fatalf("write dispatch swallowed GRANT: handled=%v err=%v", handled, err)
+			}
+			resp, handled, err := RewriteGrant(e, ast, sql, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
+			if err != nil || !handled {
+				t.Fatalf("grant handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
 		})
 	}
 }

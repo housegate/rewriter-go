@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // TableTarget is the read view of one real table reference in a SELECT AST.
@@ -102,6 +103,113 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 		out = append(out, tt)
 	})
 	return out, nil
+}
+
+// CollectTableFunctionTargets returns physical database/table arguments carried
+// by ClickHouse table functions whose signatures identify a concrete namespace.
+// The extraction is deliberately syntax-only; policy (including whether the
+// database is protocol-owned) belongs to the handler/nameresolve layer. It is
+// shared by SELECT preflight and write-target preflight so remote/cluster/merge
+// cannot become a read or write escape hatch around ordinary table-node guards.
+func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode table functions: %w", err)
+	}
+	var out []TableTarget
+	var walk func(any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			if fn, ok := n["function"].(map[string]any); ok {
+				if target, ok := decodeTableFunctionTarget(fn); ok {
+					out = append(out, target)
+				}
+			}
+			for _, child := range n {
+				walk(child)
+			}
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	return out, nil
+}
+
+func decodeTableFunctionTarget(fn map[string]any) (TableTarget, bool) {
+	name, _ := fn["name"].(string)
+	args, _ := fn["args"].([]any)
+	var first int
+	switch strings.ToLower(name) {
+	case "remote", "remotesecure", "cluster", "clusterallreplicas":
+		first = 1 // address/cluster name precedes the table specification
+	case "merge":
+		first = 0
+	default:
+		return TableTarget{}, false
+	}
+	if first >= len(args) {
+		return TableTarget{}, false
+	}
+	firstArg, ok := tableFunctionArgText(args[first])
+	if !ok {
+		return TableTarget{}, false
+	}
+	if db, table, ok := exactFunctionQualified(firstArg); ok {
+		return TableTarget{DB: db, Table: table}, true
+	}
+	if first+1 >= len(args) {
+		return TableTarget{}, false
+	}
+	secondArg, ok := tableFunctionArgText(args[first+1])
+	if !ok || firstArg == "" || secondArg == "" {
+		return TableTarget{}, false
+	}
+	return TableTarget{DB: firstArg, Table: secondArg}, true
+}
+
+func tableFunctionArgText(arg any) (string, bool) {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if lit, ok := m["literal"].(map[string]any); ok {
+		value, ok := lit["value"].(string)
+		return value, ok && value != ""
+	}
+	if col, ok := m["column"].(map[string]any); ok {
+		name := identName(col["name"])
+		if name == "" {
+			return "", false
+		}
+		if table := identName(col["table"]); table != "" {
+			return table + "." + name, true
+		}
+		return name, true
+	}
+	if dot, ok := m["dot"].(map[string]any); ok {
+		left, lok := tableFunctionArgText(dot["this"])
+		right := identName(dot["field"])
+		if lok && right != "" {
+			return left + "." + right, true
+		}
+	}
+	if name := identName(m); name != "" {
+		return name, true
+	}
+	return "", false
+}
+
+func exactFunctionQualified(s string) (db, table string, ok bool) {
+	if strings.Count(s, ".") != 1 {
+		return "", "", false
+	}
+	dot := strings.IndexByte(s, '.')
+	db, table = s[:dot], s[dot+1:]
+	return db, table, db != "" && table != ""
 }
 
 // RewriteSelectTables walks every real table reference (same traversal as
@@ -310,53 +418,97 @@ func quoteIdentifierWalk(node any, name string) {
 	}
 }
 
-// HasUnsupportedTableWrapper reports whether a table wrapper carries semantics
-// that ActionSubquery cannot preserve: FINAL, SAMPLE, or an alias column list.
-// WITH OFFSET is lost by Polyglot during parse and is checked from source SQL by
-// the caller.
-func HasUnsupportedTableWrapper(ast AST) (bool, error) {
-	var root any
+// UnsupportedTableWrapperTargets returns only the table expressions whose
+// wrappers carry semantics ActionSubquery cannot preserve: FINAL, SAMPLE, or an
+// alias column list. Keeping the target attached to the finding lets callers
+// reject an SI wrapper without falsely rejecting an ordinary JOIN peer's wrapper.
+// WITH OFFSET is lost by Polyglot during parse and is token-checked separately.
+func UnsupportedTableWrapperTargets(ast AST) ([]TableTarget, error) {
+	var root map[string]any
 	if err := json.Unmarshal(ast, &root); err != nil {
-		return false, fmt.Errorf("engine: decode: %w", err)
+		return nil, fmt.Errorf("engine: decode: %w", err)
 	}
-	return modifierWalk(root), nil
+	var out []TableTarget
+	appendUnique := func(tt TableTarget) {
+		for _, existing := range out {
+			if existing == tt {
+				return
+			}
+		}
+		out = append(out, tt)
+	}
+	visitTables(root, nil, func(_ map[string]any, tbl map[string]any, tt TableTarget) {
+		final, _ := tbl["final_"].(bool)
+		sampled := tbl["table_sample"] != nil
+		aliases, _ := tbl["column_aliases"].([]any)
+		if final || sampled || len(aliases) > 0 {
+			appendUnique(tt)
+		}
+	})
+	collectSelectLevelSampleTargets(root, appendUnique)
+	return out, nil
 }
 
-func modifierWalk(node any) bool {
+// HasUnsupportedTableWrapper is retained as the coarse compatibility helper;
+// new policy code should use UnsupportedTableWrapperTargets.
+func HasUnsupportedTableWrapper(ast AST) (bool, error) {
+	targets, err := UnsupportedTableWrapperTargets(ast)
+	return len(targets) > 0, err
+}
+
+func collectSelectLevelSampleTargets(node any, appendTarget func(TableTarget)) {
 	switch n := node.(type) {
 	case map[string]any:
-		if tbl, ok := n["table"].(map[string]any); ok {
-			if final, _ := tbl["final_"].(bool); final {
-				return true
-			}
-			if tbl["table_sample"] != nil {
-				return true
-			}
-			if aliases, ok := tbl["column_aliases"].([]any); ok && len(aliases) > 0 {
-				return true
-			}
-		}
 		if sel, ok := n["select"].(map[string]any); ok && sel["sample"] != nil {
-			return true
+			if from, ok := sel["from"].(map[string]any); ok {
+				found := false
+				visitTables(from, nil, func(_ map[string]any, _ map[string]any, tt TableTarget) {
+					if !found {
+						appendTarget(tt)
+						found = true
+					}
+				})
+			}
 		}
 		for _, v := range n {
-			if modifierWalk(v) {
-				return true
-			}
+			collectSelectLevelSampleTargets(v, appendTarget)
 		}
 	case []any:
 		for _, v := range n {
-			if modifierWalk(v) {
-				return true
-			}
+			collectSelectLevelSampleTargets(v, appendTarget)
 		}
 	}
-	return false
+}
+
+// HasWithOffset recognizes the actual WITH OFFSET keyword pair from the lexer.
+// Whitespace is irrelevant because tokens are adjacent, while string literals
+// and comments cannot false-positive because their token types are not WITH and
+// OFFSET.
+func HasWithOffset(e Engine, sql string) (bool, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return false, err
+	}
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i].TokenType == "WITH" && toks[i+1].TokenType == "OFFSET" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func refWalk(node any, name string) bool {
 	switch n := node.(type) {
 	case map[string]any:
+		// Every Polyglot Identifier-shaped node (columns, aliases, CTE names,
+		// table aliases, star rename pairs, etc.) carries name+quoted. The SI
+		// contract rejects ANY user identifier equal to the reserved RID, not
+		// just column.name, so inspect that shape before role-specific fallbacks.
+		if got, ok := n["name"].(string); ok && got == name {
+			if _, identifierShape := n["quoted"]; identifierShape {
+				return true
+			}
+		}
 		if col, ok := n["column"].(map[string]any); ok && identName(col["name"]) == name {
 			return true
 		}
@@ -388,8 +540,12 @@ func refWalk(node any, name string) bool {
 			if list, ok := star["rename"].([]any); ok {
 				for _, e := range list {
 					pair, ok := e.([]any)
-					if ok && len(pair) > 1 && identName(pair[len(pair)-1]) == name {
-						return true
+					if ok {
+						for _, side := range pair {
+							if identName(side) == name {
+								return true
+							}
+						}
 					}
 				}
 			}

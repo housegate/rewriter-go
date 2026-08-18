@@ -14,11 +14,13 @@ import (
 
 // siDynamicJSON is dblevelDynamicJSON plus the storage_integrity block.
 type siDynamicJSON struct {
-	DatabaseMap            map[string]string `json:"database_map"`
-	KnownPhysicalDatabases []string          `json:"known_physical_databases"`
-	UpstreamLogical        string            `json:"upstream_logical_database_in_context"`
-	Delim                  string            `json:"delim"`
-	StorageIntegrity       *siArgsJSON       `json:"storage_integrity"`
+	DatabaseMap                          map[string]string             `json:"database_map"`
+	KnownPhysicalDatabases               []string                      `json:"known_physical_databases"`
+	UpstreamLogical                      string                        `json:"upstream_logical_database_in_context"`
+	Delim                                string                        `json:"delim"`
+	LogicalDatabaseToRemoteUpstreamIndex map[string]string             `json:"logical_database_to_remote_upstream_index"`
+	RemoteUpstreams                      map[string]remoteUpstreamJSON `json:"remote_upstreams"`
+	StorageIntegrity                     *siArgsJSON                   `json:"storage_integrity"`
 }
 
 type siArgsJSON struct {
@@ -48,12 +50,14 @@ type siCase struct {
 	WantMessageContains string            `json:"want_message_contains"`
 	Reject              bool              `json:"reject"`
 	AllowSQLDivergence  bool              `json:"allow_sql_divergence"`
+	WantNoContractAck   bool              `json:"want_no_contract_ack"`
 }
 
 var siReadModeByName = map[string]pb.StorageIntegrityArgs_ReadMode{
 	"":              pb.StorageIntegrityArgs_READ_MODE_UNSPECIFIED,
 	"SAFE":          pb.StorageIntegrityArgs_READ_MODE_SAFE,
 	"UNSAFE_LATEST": pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST,
+	"INVALID_99":    pb.StorageIntegrityArgs_ReadMode(99),
 }
 
 // siStmtByName adds the statement types the shared maps do not know yet.
@@ -81,10 +85,17 @@ func (c siCase) options() []*pb.RewriteOption {
 		return nil
 	}
 	da := &pb.RewriteTableDynamicArgs{
-		DatabaseMap:                      c.Dynamic.DatabaseMap,
-		KnownPhysicalDatabases:           c.Dynamic.KnownPhysicalDatabases,
-		UpstreamLogicalDatabaseInContext: c.Dynamic.UpstreamLogical,
-		Delim:                            c.Dynamic.Delim,
+		DatabaseMap:                          c.Dynamic.DatabaseMap,
+		KnownPhysicalDatabases:               c.Dynamic.KnownPhysicalDatabases,
+		UpstreamLogicalDatabaseInContext:     c.Dynamic.UpstreamLogical,
+		Delim:                                c.Dynamic.Delim,
+		LogicalDatabaseToRemoteUpstreamIndex: c.Dynamic.LogicalDatabaseToRemoteUpstreamIndex,
+	}
+	if c.Dynamic.RemoteUpstreams != nil {
+		da.RemoteUpstreams = map[string]*pb.RewriteTableDynamicArgs_RemoteUpstream{}
+		for k, u := range c.Dynamic.RemoteUpstreams {
+			da.RemoteUpstreams[k] = &pb.RewriteTableDynamicArgs_RemoteUpstream{Addr: u.Addr, User: u.User, Password: u.Password}
+		}
 	}
 	if si := c.Dynamic.StorageIntegrity; si != nil {
 		args := &pb.StorageIntegrityArgs{
@@ -143,9 +154,14 @@ func TestStorageIntegrityGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("rewrite: %v", err)
 			}
-			if c.Dynamic != nil && c.Dynamic.StorageIntegrity != nil && len(c.Dynamic.StorageIntegrity.Tables) > 0 &&
-				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
-				t.Errorf("storage_integrity_contract_version = %v, want V1", res.StorageIntegrityContractVersion)
+			if c.Dynamic != nil && c.Dynamic.StorageIntegrity != nil && len(c.Dynamic.StorageIntegrity.Tables) > 0 {
+				want := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1
+				if c.WantNoContractAck {
+					want = pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
+				}
+				if res.StorageIntegrityContractVersion != want {
+					t.Errorf("storage_integrity_contract_version = %v, want %v", res.StorageIntegrityContractVersion, want)
+				}
 			}
 			if c.WantCode != "" && res.Code != siCodeByName[c.WantCode] {
 				t.Errorf("code = %v, want %s (%s)", res.Code, c.WantCode, res.Message)

@@ -344,6 +344,38 @@ func TestResolveAccessed_storageIntegrityWinsOverRemoteFlag(t *testing.T) {
 	}
 }
 
+func TestLookupStorageIntegrityPhysical_reservesConfiguredDatabases(t *testing.T) {
+	dyn := siArgs("")
+	for _, tc := range []struct {
+		db, table, upstream string
+	}{
+		{"hg_safe", "db1__t", ""},
+		{"hg_safe", "any_other_table", ""},
+		{"hg_unsafe", "db1__t", ""},
+		{"", "db1__t", "hg_safe"},
+		{"", "any_other_table", "hg_unsafe"},
+	} {
+		dyn.UpstreamLogicalDatabaseInContext = tc.upstream
+		if _, ok := LookupStorageIntegrityPhysical(tc.db, tc.table, dyn); !ok {
+			t.Errorf("db=%q table=%q context=%q: want reserved physical hit", tc.db, tc.table, tc.upstream)
+		}
+	}
+	if _, ok := LookupStorageIntegrityPhysical("other", "db1__t", dyn); ok {
+		t.Fatal("ordinary database must not be reserved")
+	}
+	if !IsStorageIntegrityPhysicalDatabase("hg_safe", dyn) || !IsStorageIntegrityPhysicalDatabase("hg_unsafe", dyn) {
+		t.Fatal("safe and unsafe databases must both be reserved")
+	}
+}
+
+func TestResolveAccessed_unqualifiedConfiguredPhysicalContext(t *testing.T) {
+	dyn := siArgs("hg_safe")
+	a := ResolveAccessed("", "db1__t", Selection{Mode: ModeDynamic, Dynamic: dyn})
+	if !a.IsStorageIntegrity || a.LogicalDB != "" || a.PhysicalDB != "hg_safe" || a.IsRemote {
+		t.Fatalf("accessed=%+v, want physical-context SI classification", a)
+	}
+}
+
 func TestStorageIntegrityWriteRejectMessage(t *testing.T) {
 	want := "storage-integrity table db1.t accepts writes only through the signed statement lane"
 	if got := StorageIntegrityWriteRejectMessage("db1.t"); got != want {

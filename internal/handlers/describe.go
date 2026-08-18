@@ -39,11 +39,24 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 		return nil, false, nil
 	}
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_DESCRIBE)
+	sel := nameresolve.FindActive(opts)
+	if sel.Mode == nameresolve.ModeDynamic {
+		if t.ObjType == "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.Table, sel.Dynamic) {
+			recordAccessedDatabase(resp, t.Table, sel.Dynamic)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(t.Table))
+			return resp, true, nil
+		}
+		if t.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.DB, sel.Dynamic) {
+			tt := engine.TableTarget{DB: t.DB, Table: t.Table}
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(t.DB, t.Table)))
+			return resp, true, nil
+		}
+	}
 	if t.ObjType != "TABLE" {
 		rejectUnsupported(resp, "DESCRIBE "+t.ObjType+" is not supported; only DESCRIBE TABLE is allowed")
 		return resp, true, nil
 	}
-	sel := nameresolve.FindActive(opts)
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
 	recordAccessedWrite(resp, tt, sel)
 	if sel.Mode == nameresolve.ModeDynamic {
