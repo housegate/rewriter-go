@@ -17,6 +17,7 @@ type siDynamicJSON struct {
 	DatabaseMap                          map[string]string             `json:"database_map"`
 	KnownPhysicalDatabases               []string                      `json:"known_physical_databases"`
 	UpstreamLogical                      string                        `json:"upstream_logical_database_in_context"`
+	UpstreamPhysical                     string                        `json:"upstream_physical_database_in_context"`
 	Delim                                string                        `json:"delim"`
 	LogicalDatabaseToRemoteUpstreamIndex map[string]string             `json:"logical_database_to_remote_upstream_index"`
 	RemoteUpstreams                      map[string]remoteUpstreamJSON `json:"remote_upstreams"`
@@ -90,6 +91,9 @@ func (c siCase) options() []*pb.RewriteOption {
 		UpstreamLogicalDatabaseInContext:     c.Dynamic.UpstreamLogical,
 		Delim:                                c.Dynamic.Delim,
 		LogicalDatabaseToRemoteUpstreamIndex: c.Dynamic.LogicalDatabaseToRemoteUpstreamIndex,
+	}
+	if c.Dynamic.UpstreamPhysical != "" {
+		da.UpstreamPhysicalDatabaseInContext = &c.Dynamic.UpstreamPhysical
 	}
 	if c.Dynamic.RemoteUpstreams != nil {
 		da.RemoteUpstreams = map[string]*pb.RewriteTableDynamicArgs_RemoteUpstream{}

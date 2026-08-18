@@ -1762,5 +1762,38 @@
       {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys", "is_storage_integrity": false}
     ],
     "allow_sql_divergence": true
+  },
+  {
+    "name": "si_merge_physical_execution_context_rejected",
+    "sql": "SELECT * FROM merge('db1__t')",
+    "dynamic": {
+      "database_map": {"db1": "hg_safe"}, "known_physical_databases": ["hg_safe"], "upstream_logical_database_in_context": "db1", "upstream_physical_database_in_context": "hg_safe", "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_ctas_merge_physical_execution_context_rejected",
+    "sql": "CREATE TABLE other.x AS SELECT * FROM merge('db1__t')",
+    "dynamic": {
+      "database_map": {"db1": "hg_safe", "other": "phys"}, "known_physical_databases": ["hg_safe", "phys"], "upstream_logical_database_in_context": "db1", "upstream_physical_database_in_context": "hg_safe", "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_insert_select_merge_physical_execution_context_rejected",
+    "sql": "INSERT INTO other.u SELECT * FROM merge('db1__t')",
+    "dynamic": {
+      "database_map": {"db1": "hg_safe", "other": "phys"}, "known_physical_databases": ["hg_safe", "phys"], "upstream_logical_database_in_context": "db1", "upstream_physical_database_in_context": "hg_safe", "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
   }
 ]

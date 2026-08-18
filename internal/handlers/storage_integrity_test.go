@@ -701,6 +701,43 @@ func TestWrite_storageIntegrityEmbeddedMergeOneArgUsesCurrentDatabase(t *testing
 	}
 }
 
+func TestStorageIntegrityMergeOneArgUsesPhysicalExecutionContext(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{"select", `SELECT * FROM merge('db1__t')`},
+		{"ctas", `CREATE TABLE other.x AS SELECT * FROM merge('db1__t')`},
+		{"insert_select", `INSERT INTO other.u SELECT * FROM merge('db1__t')`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = "db1"
+			dyn.DatabaseMap["db1"] = "hg_safe"
+			physical := "hg_safe"
+			dyn.UpstreamPhysicalDatabaseInContext = &physical
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "select" {
+				resp, err := RewriteSelect(e, ast, dynOpt(dyn), tc.sql)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertStorageIntegrityReject(t, resp, "storage-integrity physical table hg_safe.db1__t")
+				return
+			}
+			resp, handled, err := RewriteWrite(e, ast, tc.sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity physical table hg_safe.db1__t")
+		})
+	}
+}
+
 func TestRewriteSelect_storageIntegrityCommaWithOffsetBindsActualTable(t *testing.T) {
 	e := newEngine(t)
 	for _, tc := range []struct {

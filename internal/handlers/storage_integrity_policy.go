@@ -18,7 +18,7 @@ func rejectStorageIntegrityTableFunctions(resp *pb.RewriteSQLResponse, refs []en
 	}
 	for _, ref := range refs {
 		if ref.UsesCurrentDatabase {
-			ref.Target.DB = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
+			ref.Target.DB = tableFunctionExecutionDatabase(sel.Dynamic)
 			ref.Resolved = ref.Target.DB != "" && ref.Target.Table != ""
 		}
 		if ref.Resolved {
@@ -47,6 +47,27 @@ func rejectStorageIntegrityTableFunctions(resp *pb.RewriteSQLResponse, refs []en
 		return true
 	}
 	return false
+}
+
+// tableFunctionExecutionDatabase resolves ClickHouse's current *physical*
+// database for one-argument merge(<table-regexp>). The logical session context
+// is not necessarily the database where ClickHouse executes the function.
+// Prefer the explicit physical context, then derive it through database_map;
+// a context that is itself a configured SI physical namespace remains valid
+// even when it is intentionally absent from known_physical_databases. Empty
+// means indeterminate and the caller conservatively rejects every SI namespace.
+func tableFunctionExecutionDatabase(dyn *pb.RewriteTableDynamicArgs) string {
+	if physical := dyn.GetUpstreamPhysicalDatabaseInContext(); physical != "" {
+		return physical
+	}
+	logical := dyn.GetUpstreamLogicalDatabaseInContext()
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(logical, dyn) {
+		return logical
+	}
+	if physical, ok := nameresolve.ResolvePhysicalDatabase(logical, dyn); ok {
+		return physical
+	}
+	return ""
 }
 
 func recordAccessedWriteUnique(resp *pb.RewriteSQLResponse, tt engine.TableTarget, sel nameresolve.Selection) {
