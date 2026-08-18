@@ -17,6 +17,10 @@ func rejectStorageIntegrityTableFunctions(resp *pb.RewriteSQLResponse, refs []en
 		return false
 	}
 	for _, ref := range refs {
+		if ref.UsesCurrentDatabase {
+			ref.Target.DB = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
+			ref.Resolved = ref.Target.DB != "" && ref.Target.Table != ""
+		}
 		if ref.Resolved {
 			if nameresolve.IsStorageIntegrityPhysicalDatabase(ref.Target.DB, sel.Dynamic) {
 				recordAccessedWriteUnique(resp, ref.Target, sel)

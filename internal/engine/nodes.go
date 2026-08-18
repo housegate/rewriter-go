@@ -112,8 +112,9 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 // is an expression. A fully dynamic database leaves Target.DB empty and must be
 // treated conservatively by storage-integrity policy.
 type TableFunctionRef struct {
-	Target   TableTarget
-	Resolved bool
+	Target              TableTarget
+	Resolved            bool
+	UsesCurrentDatabase bool // one-argument merge(<table-regexp>) overload
 }
 
 // CollectTableFunctionRefs returns every recognized remote/cluster/merge
@@ -170,6 +171,17 @@ func decodeTableFunctionRef(fn map[string]any) (TableFunctionRef, bool) {
 	case "remote", "remotesecure", "cluster", "clusterallreplicas":
 		first = 1 // address/cluster name precedes the table specification
 	case "merge":
+		// ClickHouse's one-argument merge(<table-regexp>) overload searches
+		// the current database. Treating its sole argument as a database name
+		// loses that namespace and can expose a configured hg_safe/hg_unsafe
+		// database through an unqualified table function.
+		if len(args) == 1 {
+			ref := TableFunctionRef{UsesCurrentDatabase: true}
+			if table, ok := tableFunctionArgText(args[0]); ok {
+				ref.Target.Table = table
+			}
+			return ref, true
+		}
 		first = 0
 	default:
 		return TableFunctionRef{}, false
@@ -600,8 +612,17 @@ func WithOffsetTargets(e Engine, sql string) ([]TableTarget, error) {
 			continue
 		}
 		boundary := -1
+		nesting := 0
 		for j := i - 1; j >= 0; j-- {
-			if toks[j].TokenType == "FROM" || toks[j].TokenType == "JOIN" {
+			if toks[j].Text == ")" {
+				nesting++
+				continue
+			}
+			if toks[j].Text == "(" && nesting > 0 {
+				nesting--
+				continue
+			}
+			if nesting == 0 && (toks[j].TokenType == "FROM" || toks[j].TokenType == "JOIN" || toks[j].TokenType == "COMMA") {
 				boundary = j
 				break
 			}

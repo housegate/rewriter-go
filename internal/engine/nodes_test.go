@@ -395,6 +395,7 @@ func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
 		{`SELECT * FROM remote('h', 'hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
 		{`SELECT * FROM cluster('c', 'hg_unsafe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
 		{`SELECT * FROM merge('hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
+		{`SELECT * FROM merge('db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}}},
 		{`SELECT * FROM remote('h', concat('hg_', 'safe'), 'db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}}}},
 		{`SELECT * FROM remote('h', 'hg_safe', 'db1__t')`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}}},
 		{`SELECT * FROM numbers(10)`, nil},
@@ -423,6 +424,7 @@ func TestCollectEmbeddedSelectSources(t *testing.T) {
 		{`CREATE TABLE other.x AS SELECT * FROM hg_safe.db1__t`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}, nil},
 		{`INSERT INTO other.u SELECT * FROM db1.t`, []TableTarget{{DB: "db1", Table: "t"}}, nil},
 		{`INSERT INTO other.u SELECT * FROM remote('h', 'hg_unsafe', concat('db1', '__t'))`, nil, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
+		{`CREATE TABLE other.x AS SELECT * FROM merge('db1__t')`, nil, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}}},
 		{`CREATE TABLE other.x (a UInt64) ENGINE = MergeTree ORDER BY a`, nil, nil},
 	} {
 		ast, err := e.ParseOne(tc.sql)
@@ -498,6 +500,8 @@ func TestWithOffsetTargets(t *testing.T) {
 		{`SELECT * FROM db1.t WITH OFFSET AS off`, []TableTarget{{DB: "db1", Table: "t"}}},
 		{"SELECT * FROM db1.t WITH\nOFFSET AS off", []TableTarget{{DB: "db1", Table: "t"}}},
 		{`SELECT * FROM db1.t AS s JOIN other.u WITH OFFSET AS off ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT * FROM other.u, db1.t WITH OFFSET AS off`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t, other.u WITH OFFSET AS off`, []TableTarget{{DB: "other", Table: "u"}}},
 		{`SELECT 'WITH OFFSET' FROM db1.t`, nil},
 	} {
 		got, err := WithOffsetTargets(e, tc.sql)

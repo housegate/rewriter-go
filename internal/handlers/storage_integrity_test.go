@@ -651,6 +651,81 @@ func TestRewriteSelect_mixedOrdinaryWrappersDoNotRejectStorageIntegrity(t *testi
 	}
 }
 
+func TestRewriteSelect_storageIntegrityMergeOneArgUsesCurrentDatabase(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		context string
+		sql     string
+	}{
+		{"hg_safe", `SELECT * FROM merge('db1__t')`},
+		{"hg_unsafe", `SELECT _hg_row_id FROM merge('db1__t')`},
+	} {
+		t.Run(tc.context, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tc.context
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(dyn), tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity physical table "+tc.context+".db1__t")
+		})
+	}
+}
+
+func TestWrite_storageIntegrityEmbeddedMergeOneArgUsesCurrentDatabase(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		context string
+		sql     string
+	}{
+		{"hg_safe", `CREATE TABLE other.x AS SELECT * FROM merge('db1__t')`},
+		{"hg_unsafe", `INSERT INTO other.u SELECT * FROM merge('db1__t')`},
+	} {
+		t.Run(tc.context, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tc.context
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, tc.sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity physical table "+tc.context+".db1__t")
+		})
+	}
+}
+
+func TestRewriteSelect_storageIntegrityCommaWithOffsetBindsActualTable(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		sql      string
+		wantCode pb.RewriteCode
+	}{
+		{`SELECT * FROM other.u, db1.t WITH OFFSET AS off`, pb.RewriteCode_RewriteError},
+		{`SELECT * FROM db1.t, other.u WITH OFFSET AS off`, pb.RewriteCode_Success},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != tc.wantCode {
+				t.Fatalf("code=%v want=%v msg=%q sql=%q", resp.GetCode(), tc.wantCode, resp.GetMessage(), resp.GetSqlAfterRewrite())
+			}
+		})
+	}
+}
+
 func TestWrite_storageIntegrityEmbeddedSelectSourcesRejected(t *testing.T) {
 	e := newEngine(t)
 	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
