@@ -292,6 +292,11 @@ func dispatchView(e engine.Engine, ast engine.AST, info engine.WriteInfo, opts [
 			if err != nil {
 				return nil, false, err
 			}
+			if bodyResp.Code != pb.RewriteCode_Success {
+				mergeViewBody(resp, bodyResp)
+				resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
+				return resp, true, nil
+			}
 			mergeViewBody(resp, bodyResp)
 			if rewritten, err = engine.SetViewBody(rewritten, newBody); err != nil {
 				return nil, false, err

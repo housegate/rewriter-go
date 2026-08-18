@@ -2,6 +2,7 @@
 package handlers
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/housegate/rewriter-go/internal/engine"
@@ -19,6 +20,9 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 	rewritten, resp, err := rewriteSelectCore(e, ast, opts)
 	if err != nil {
 		return nil, err
+	}
+	if resp.Code != pb.RewriteCode_Success {
+		return resp, nil // reject: leave SqlAfterRewrite empty; native.finalize echoes the input
 	}
 	sql, err := e.Generate(rewritten)
 	if err != nil {
@@ -100,11 +104,41 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	}
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
+	// Spec G D3: a statement that touches at least one SI table must not
+	// address the reserved row-id column anywhere. Checked on the ORIGINAL
+	// AST (the substituted bodies legitimately mention it in EXCEPT).
+	if sel.Mode == nameresolve.ModeDynamic && touchesStorageIntegrity(resp.OriginalAccessedTables) {
+		rid := nameresolve.ReservedRowIDColumn(sel.Dynamic)
+		hit, herr := engine.ReferencesIdentifier(ast, rid)
+		if herr != nil {
+			return nil, nil, herr
+		}
+		if hit {
+			resp.Code = pb.RewriteCode_RewriteError
+			resp.Message = fmt.Sprintf(reservedColumnRejectFmt, rid)
+			return ast, resp, nil
+		}
+	}
+
+	var siErr error
 	rewritten, err := engine.RewriteSelectTables(ast, func(tt engine.TableTarget) engine.TableDecision {
+		if sel.Mode == nameresolve.ModeDynamic {
+			if tbl, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+				d, derr := storageIntegrityDecision(e, tt, tbl, sel.Dynamic.GetStorageIntegrity(), resp.TableRewrites)
+				if derr != nil {
+					siErr = derr
+					return engine.TableDecision{Action: engine.ActionSkip}
+				}
+				return d
+			}
+		}
 		return decideTable(tt, sel, resp.TableRewrites)
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if siErr != nil {
+		return nil, nil, siErr
 	}
 
 	rewritten, err = applyOptions(rewritten, opts)
@@ -171,6 +205,7 @@ func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*p
 		out = append(out, &pb.AccessedTable{
 			OriginalDatabase: tt.DB, OriginalTable: tt.Table,
 			LogicalDatabase: a.LogicalDB, PhysicalDatabase: a.PhysicalDB, IsRemote: a.IsRemote,
+			IsStorageIntegrity: a.IsStorageIntegrity,
 		})
 	}
 	return out
@@ -182,4 +217,14 @@ func qualify(db, table string) string {
 		return table
 	}
 	return db + "." + table
+}
+
+// touchesStorageIntegrity reports whether any accessed table is SI-flagged.
+func touchesStorageIntegrity(accessed []*pb.AccessedTable) bool {
+	for _, a := range accessed {
+		if a.GetIsStorageIntegrity() {
+			return true
+		}
+	}
+	return false
 }
