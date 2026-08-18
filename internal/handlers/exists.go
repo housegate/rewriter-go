@@ -48,8 +48,18 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	sel := nameresolve.FindActive(opts)
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
 	if sel.Mode == nameresolve.ModeDynamic {
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table)))
+			return resp, true, nil
+		}
 		if tbl, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 			recordAccessedWrite(resp, tt, sel)
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
+			if !authorized {
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+				return resp, true, nil
+			}
 			if t.Verb == engine.VerbShowCreate {
 				// The physical DDL would expose engine/zk path/_hg_row_id (Spec G §4.3).
 				rejectUnsupported(resp, "SHOW CREATE TABLE on storage-integrity table "+key+" is not supported")

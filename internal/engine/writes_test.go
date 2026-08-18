@@ -759,6 +759,7 @@ func TestInspectWrite_commandSubKinds(t *testing.T) {
 		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
 		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
 		{"OPTIMIZE TABLE db.t", CmdBareReject},
+		{"ATTACH TABLE db.t", CmdBareReject},
 		{"USE db", CmdNone},
 		{"EXISTS TABLE db.t", CmdNone},
 	}
@@ -787,6 +788,7 @@ func TestClassifyWriteCommand(t *testing.T) {
 		// covered by the structured alter_table handler + corpus, not here.
 		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdNone},
 		{"OPTIMIZE TABLE db.t", CmdBareReject},
+		{"ATTACH TABLE db.t", CmdBareReject},
 		{"UNDROP TABLE db.t", CmdBareReject},
 		{"MOVE db.t TO SHARD '...'", CmdBareReject},
 		{"BACKUP TABLE db.t TO Disk('d','f')", CmdBareReject},
@@ -825,6 +827,7 @@ func TestClassifyWriteCommand_rejectsDDL(t *testing.T) {
 	}{
 		// command-node DDL rejects — table/dictionary/database only (writes.cc):
 		{"DETACH TABLE db.t", CmdBareReject},
+		{"ATTACH TABLE db.t", CmdBareReject},
 		{"DETACH VIEW db.v", CmdBareReject},
 		{"DROP DICTIONARY db.d", CmdBareReject}, // command-node DROP = DICTIONARY only
 		{"RENAME DATABASE db1 TO db2", CmdBareReject},

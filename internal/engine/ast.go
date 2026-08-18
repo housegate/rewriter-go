@@ -9,6 +9,7 @@ import (
 // Confirmed against internal/engine/testdata/ast-shapes/ (Task 3).
 const (
 	NodeSelect      = "select"
+	NodeUnion       = "union"
 	NodeInsert      = "insert"
 	NodeCreateTable = "create_table"
 	NodeDropTable   = "drop_table"

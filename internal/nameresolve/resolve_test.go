@@ -334,6 +334,16 @@ func TestResolveAccessed_flagsStorageIntegrity(t *testing.T) {
 	}
 }
 
+func TestResolveAccessed_storageIntegrityWinsOverRemoteFlag(t *testing.T) {
+	dyn := siArgs("db1")
+	dyn.LogicalDatabaseToRemoteUpstreamIndex = map[string]string{"db1": "peer"}
+	sel := Selection{Mode: ModeDynamic, Dynamic: dyn}
+	a := ResolveAccessed("db1", "t", sel)
+	if !a.IsStorageIntegrity || a.IsRemote {
+		t.Fatalf("accessed=%+v, want SI=true and remote=false", a)
+	}
+}
+
 func TestStorageIntegrityWriteRejectMessage(t *testing.T) {
 	want := "storage-integrity table db1.t accepts writes only through the signed statement lane"
 	if got := StorageIntegrityWriteRejectMessage("db1.t"); got != want {

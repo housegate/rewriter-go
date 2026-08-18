@@ -33,6 +33,9 @@ UNSAFE_LATEST mode while hiding the reserved row-id column; EXISTS maps to the s
 table; DESCRIBE emits a metadata-shaped `system.columns` query. Non-lane writes and
 DDL reject fail-closed (INSERT intentionally keeps the existing signed-ingress path),
 and every accepted SI request positively acknowledges contract v1 in the response.
+An SI logical key is usable only when its database is present in the account-filtered
+`database_map`; `known_physical_databases` does not grant that access. Configured safe
+and unsafe physical table names are protocol-owned and reject direct SQL addressing.
 
 ## Layout
 

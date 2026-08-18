@@ -100,6 +100,11 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 			resp.Message = "storage-integrity contract version V1 is required"
 			return resp, nil
 		}
+		if err := nameresolve.ValidateStorageIntegrity(selection.Dynamic); err != nil {
+			resp.Code = pb.RewriteCode_InvalidRewriteRequest
+			resp.Message = err.Error()
+			return resp, nil
+		}
 		siVersion = pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1
 		resp.StorageIntegrityContractVersion = siVersion
 	}
@@ -170,8 +175,8 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	}
 
 	// Phase 1: route SELECT to the real handler; everything else stays pass-through.
-	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect {
-		hresp, herr := handlers.RewriteSelect(e, ast, opts)
+	if kind, _ := engine.NodeKind(ast); kind == engine.NodeSelect || kind == engine.NodeUnion {
+		hresp, herr := handlers.RewriteSelect(e, ast, opts, sql)
 		if herr != nil {
 			return nil, herr
 		}
@@ -232,7 +237,7 @@ func classify(ast engine.AST) pb.StatementType {
 		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	}
 	switch kind {
-	case engine.NodeSelect:
+	case engine.NodeSelect, engine.NodeUnion:
 		return pb.StatementType_STATEMENT_TYPE_SELECT
 	case engine.NodeInsert:
 		return pb.StatementType_STATEMENT_TYPE_INSERT

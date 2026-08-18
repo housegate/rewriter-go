@@ -39,6 +39,26 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		kw, stmt = "REVOKE", pb.StatementType_STATEMENT_TYPE_REVOKE
 	}
 	resp := newGrantResp(stmt)
+	siSel := nameresolve.FindActive(opts)
+	origDB, origTable, scopeDatabase, anyDatabase := splitSecurable(gp.Securable)
+	if gp.HasOn && !scopeDatabase && !anyDatabase && origTable != "" && siSel.Mode == nameresolve.ModeDynamic {
+		target := engine.TableTarget{DB: origDB, Table: origTable}
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(origDB, origTable, siSel.Dynamic); ok {
+			recordAccessedWrite(resp, target, siSel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(origDB, origTable)))
+			return resp, true, nil
+		}
+		if _, key, ok := nameresolve.LookupStorageIntegrity(origDB, origTable, siSel.Dynamic); ok {
+			recordAccessedWrite(resp, target, siSel)
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(origDB, siSel.Dynamic)
+			if !authorized {
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+			} else {
+				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			}
+			return resp, true, nil
+		}
+	}
 
 	// Statement-level rejects, in grant.cc order.
 	if gp.IsAttach {
@@ -67,7 +87,6 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	}
 
 	dyn := nameresolve.FindDynamicArgs(opts)
-	siSel := nameresolve.FindActive(opts)
 	if dyn == nil {
 		rejectUnsupported(resp, kw+" requires a TableNameRewrite/dynamic_args option to validate against")
 		return resp, true, nil
@@ -78,7 +97,6 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return resp, true, nil
 	}
 
-	origDB, origTable, scopeDatabase, anyDatabase := splitSecurable(gp.Securable)
 	if anyDatabase {
 		rejectUnsupported(resp, kw+" ON *.* (global scope) is not supported")
 		return resp, true, nil
@@ -98,12 +116,6 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		if len(p.Columns) > 0 {
 			rejectUnsupported(resp, kw+" with column-level granularity is not supported")
 			return resp, true, nil
-		}
-		if !scopeDatabase && siSel.Mode == nameresolve.ModeDynamic {
-			if _, key, ok := nameresolve.LookupStorageIntegrity(origDB, origTable, siSel.Dynamic); ok {
-				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
-				return resp, true, nil
-			}
 		}
 		if !resolved {
 			logical = origDB

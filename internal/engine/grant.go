@@ -68,6 +68,9 @@ func ParseGrant(e Engine, sql string) (GrantParse, error) {
 
 	gp.HasOn = tokensHaveSecurableOn(toks)
 	gp.HasReplace = tokensHaveReplaceOption(toks)
+	if gp.HasOn {
+		gp.Securable = tokenSecurable(toks)
+	}
 	if !gp.HasOn || gp.HasReplace {
 		return gp, nil // handler rejects on the flags; generic parse would fail
 	}
@@ -87,6 +90,35 @@ func ParseGrant(e Engine, sql string) (GrantParse, error) {
 	gp.Marker = marker
 	gp.Structured = true
 	return gp, nil
+}
+
+// tokenSecurable recovers the ON target before generic parsing. This keeps the
+// target available even for forms that the generic dialect cannot structure
+// (notably WITH REPLACE OPTION), allowing policy handlers to classify a
+// protocol-owned target before returning a generic rejection.
+func tokenSecurable(toks []rawToken) string {
+	for i := 0; i < len(toks); i++ {
+		if toks[i].TokenType != "ON" || i+1 >= len(toks) || toks[i+1].TokenType == "CLUSTER" {
+			continue
+		}
+		j := i + 1
+		if toks[j].Text == "*" {
+			if j+2 < len(toks) && toks[j+1].TokenType == "DOT" && toks[j+2].Text == "*" {
+				return "*.*"
+			}
+			return "*"
+		}
+		if !isNameTok(toks[j].TokenType) {
+			return ""
+		}
+		out := toks[j].Text
+		if j+2 < len(toks) && toks[j+1].TokenType == "DOT" &&
+			(isNameTok(toks[j+2].TokenType) || toks[j+2].Text == "*") {
+			out += "." + toks[j+2].Text
+		}
+		return out
+	}
+	return ""
 }
 
 // tokensHaveSecurableOn reports whether an ON token introduces a securable (i.e.

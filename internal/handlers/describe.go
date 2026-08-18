@@ -39,16 +39,28 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 		return nil, false, nil
 	}
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_DESCRIBE)
+	if t.ObjType != "TABLE" {
+		rejectUnsupported(resp, "DESCRIBE "+t.ObjType+" is not supported; only DESCRIBE TABLE is allowed")
+		return resp, true, nil
+	}
 	sel := nameresolve.FindActive(opts)
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
+	recordAccessedWrite(resp, tt, sel)
 	if sel.Mode == nameresolve.ModeDynamic {
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table)))
+			return resp, true, nil
+		}
 		if tbl, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
-			recordAccessedWrite(resp, tt, sel)
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
+			if !authorized {
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+				return resp, true, nil
+			}
 			resp.SqlAfterRewrite = describeMetadataSQL(tbl.GetSafeTable(), nameresolve.ReservedRowIDColumn(sel.Dynamic))
 			return resp, true, nil
 		}
 	}
-	recordAccessedWrite(resp, tt, sel)
 	resp.SqlAfterRewrite = sql // pass through (Spec E D6 will resolve non-SI targets)
 	return resp, true, nil
 }

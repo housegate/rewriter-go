@@ -331,7 +331,11 @@ func TestReferencesIdentifier(t *testing.T) {
 		{`SELECT a FROM t WHERE _hg_row_id = 'x'`, true},
 		{`SELECT a FROM t ORDER BY _hg_row_id`, true},
 		{`SELECT lower(t._hg_row_id) FROM t`, true},
+		{`SELECT db.t._hg_row_id FROM db.t`, true},
 		{`SELECT * EXCEPT (_hg_row_id) FROM t`, true},
+		{`SELECT * REPLACE (1 AS _hg_row_id) FROM t`, true},
+		{`SELECT * RENAME (a AS _hg_row_id) FROM t`, true},
+		{`SELECT * FROM t AS a JOIN u AS b USING (_hg_row_id)`, true},
 		{`SELECT a FROM t WHERE b IN (SELECT _hg_row_id FROM u)`, true},
 		{`SELECT a FROM t`, false},
 		{`SELECT '_hg_row_id' FROM t`, false},
@@ -347,7 +351,7 @@ func TestReferencesIdentifier(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got != c.want {
-			t.Errorf("%q: got %v want %v", c.sql, got, c.want)
+			t.Errorf("%q: got %v want %v ast=%s", c.sql, got, c.want, ast)
 		}
 	}
 }

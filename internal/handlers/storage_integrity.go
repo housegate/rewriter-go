@@ -38,7 +38,11 @@ func storageIntegritySurfaceSQL(tbl *pb.StorageIntegrityArgs_Table, args *pb.Sto
 	if rid == "" {
 		rid = nameresolve.DefaultReservedRowIDColumn
 	}
-	project := "SELECT * EXCEPT (" + engine.QuoteQualified("", rid) + ") FROM "
+	ridSQL := engine.QuoteQualified("", rid)
+	if rid != nameresolve.DefaultReservedRowIDColumn {
+		ridSQL = "`" + strings.ReplaceAll(rid, "`", "``") + "`"
+	}
+	project := "SELECT * EXCEPT (" + ridSQL + ") FROM "
 	sdb, st := splitPhysicalName(tbl.GetSafeTable())
 	out := project + engine.QuoteQualified(sdb, st)
 	if args.GetReadMode() != pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST {
@@ -62,6 +66,12 @@ func storageIntegrityDecision(e engine.Engine, tt engine.TableTarget, tbl *pb.St
 	body, err := e.ParseOne(storageIntegritySurfaceSQL(tbl, args))
 	if err != nil {
 		return engine.TableDecision{}, fmt.Errorf("storage-integrity surface for %s: %w", qualify(tt.DB, tt.Table), err)
+	}
+	if rid := args.GetReservedRowIdColumn(); rid != "" && rid != nameresolve.DefaultReservedRowIDColumn {
+		body, err = engine.QuoteIdentifier(body, rid)
+		if err != nil {
+			return engine.TableDecision{}, fmt.Errorf("storage-integrity surface for %s: %w", qualify(tt.DB, tt.Table), err)
+		}
 	}
 	recordRewrite(rewrites, tt, "", tbl.GetSafeTable())
 	return engine.TableDecision{Action: engine.ActionSubquery, Subquery: body}, nil

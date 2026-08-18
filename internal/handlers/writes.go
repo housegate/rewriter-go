@@ -22,6 +22,11 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return nil, false, err
 	}
 	sel := nameresolve.FindActive(opts)
+	if resp, rejected, err := preflightStorageIntegrityWrite(e, ast, info, sel); err != nil {
+		return nil, false, err
+	} else if rejected {
+		return resp, true, nil
+	}
 
 	switch info.Kind {
 	case engine.NodeCreateTable:
@@ -35,7 +40,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	case engine.NodeDelete:
 		return dispatchSingle(e, ast, info, sel, pb.StatementType_STATEMENT_TYPE_DELETE)
 	case engine.NodeCreateView:
-		return dispatchView(e, ast, info, opts, sel)
+		return dispatchView(e, ast, sql, info, opts, sel)
 	case engine.NodeInsert:
 		return dispatchInsert(e, ast, sql, info, sel)
 	case engine.NodeCommand:
@@ -56,6 +61,49 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		// the caller routes them to RewriteDBLevel / SELECT.
 		return nil, false, nil
 	}
+}
+
+// preflightStorageIntegrityWrite runs before statement-specific generic guards
+// (multi-DROP, cross-table ALTER, AS table-function, bare rejects). Otherwise
+// those guards can return a non-Success response without the SI access marker
+// Housegate needs to keep fail-closed semantics.
+func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+	if sel.Mode != nameresolve.ModeDynamic {
+		return nil, false, nil
+	}
+	targets, err := engine.AllWriteTargets(e, ast)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	for _, tt := range targets {
+		key := qualify(tt.DB, tt.Table)
+		if tt.Table == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(key))
+			return resp, true, nil
+		}
+		if info.Kind == engine.NodeInsert {
+			continue // signed ingress owns logical SI INSERT acceptance
+		}
+		if _, logicalKey, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			recordAccessedWrite(resp, tt, sel)
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
+			if !authorized {
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+			} else {
+				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(logicalKey))
+			}
+			return resp, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 func newWriteResp(stmt pb.StatementType) *pb.RewriteSQLResponse {
@@ -174,11 +222,11 @@ func finishStructured(e engine.Engine, ast engine.AST, info engine.WriteInfo, se
 	if !ok {
 		return resp, true, nil // reject populated by applyStructuredSlots
 	}
-	sql, err := e.Generate(rewritten)
+	out, err := e.Generate(rewritten)
 	if err != nil {
 		return nil, false, err
 	}
-	resp.SqlAfterRewrite = sql
+	resp.SqlAfterRewrite = out
 	return resp, true, nil
 }
 
@@ -274,7 +322,7 @@ func dispatchAlter(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel n
 // matching C++, which returns Rejected the instant the name rewrite fails
 // (writes.cc:205-229). LIVE/WINDOW views are not modeled here (the C++ caller
 // rejects them upstream; Polyglot surfaces no such body for this phase).
-func dispatchView(e engine.Engine, ast engine.AST, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	stmt := pb.StatementType_STATEMENT_TYPE_CREATE_VIEW
 	if info.Materialized {
 		stmt = pb.StatementType_STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW
@@ -298,27 +346,39 @@ func dispatchView(e engine.Engine, ast engine.AST, info engine.WriteInfo, opts [
 			return nil, false, err
 		}
 		if has {
-			newBody, bodyResp, err := rewriteSelectCore(e, body, opts)
+			newBody, bodyResp, err := rewriteSelectCore(e, body, opts, sql)
 			if err != nil {
 				return nil, false, err
 			}
+			mergeViewBody(resp, bodyResp)
+			if sel.Mode == nameresolve.ModeDynamic {
+				for _, accessed := range bodyResp.GetOriginalAccessedTables() {
+					_, key, ok := nameresolve.LookupStorageIntegrity(accessed.GetOriginalDatabase(), accessed.GetOriginalTable(), sel.Dynamic)
+					if !ok {
+						continue
+					}
+					_, authorized := nameresolve.AuthorizeStorageIntegrityLogical(accessed.GetOriginalDatabase(), sel.Dynamic)
+					if authorized {
+						rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+						return resp, true, nil
+					}
+				}
+			}
 			if bodyResp.Code != pb.RewriteCode_Success {
-				mergeViewBody(resp, bodyResp)
 				resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
 				return resp, true, nil
 			}
-			mergeViewBody(resp, bodyResp)
 			if rewritten, err = engine.SetViewBody(rewritten, newBody); err != nil {
 				return nil, false, err
 			}
 		}
 	}
 
-	sql, err := e.Generate(rewritten)
+	out, err := e.Generate(rewritten)
 	if err != nil {
 		return nil, false, err
 	}
-	resp.SqlAfterRewrite = sql
+	resp.SqlAfterRewrite = out
 	return resp, true, nil
 }
 
@@ -380,6 +440,13 @@ func dispatchCommand(e engine.Engine, ast engine.AST, sql string, info engine.Wr
 		return dispatchRawTables(e, ast, sql, info, sel)
 	case engine.CmdBareReject:
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		targets, _, err := engine.RawTableRefs(e, ast)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, tt := range targets {
+			recordAccessedWrite(resp, tt, sel)
+		}
 		rejectUnsupported(resp, "statement is not supported")
 		return resp, true, nil
 	default: // CmdNone: USE/SHOW/GRANT/REVOKE/EXISTS — not a write this phase handles

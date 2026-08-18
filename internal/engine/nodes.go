@@ -276,19 +276,120 @@ func ReferencesIdentifier(ast AST, name string) (bool, error) {
 	return refWalk(root, name), nil
 }
 
+// QuoteIdentifier forces Identifier-shaped nodes named name to render quoted.
+// Polyglot's parser normalizes some quoted ClickHouse keywords (for example
+// `from` inside star EXCEPT) back to quoted=false, so trusted synthesized ASTs
+// must restore the structural quote before generation. Callers should use this
+// only on a generated fragment whose identifier roles they control.
+func QuoteIdentifier(ast AST, name string) (AST, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode: %w", err)
+	}
+	quoteIdentifierWalk(root, name)
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode: %w", err)
+	}
+	return AST(out), nil
+}
+
+func quoteIdentifierWalk(node any, name string) {
+	switch n := node.(type) {
+	case map[string]any:
+		if got, ok := n["name"].(string); ok && got == name {
+			n["quoted"] = true
+		}
+		for _, v := range n {
+			quoteIdentifierWalk(v, name)
+		}
+	case []any:
+		for _, v := range n {
+			quoteIdentifierWalk(v, name)
+		}
+	}
+}
+
+// HasUnsupportedTableWrapper reports whether a table wrapper carries semantics
+// that ActionSubquery cannot preserve: FINAL, SAMPLE, or an alias column list.
+// WITH OFFSET is lost by Polyglot during parse and is checked from source SQL by
+// the caller.
+func HasUnsupportedTableWrapper(ast AST) (bool, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return false, fmt.Errorf("engine: decode: %w", err)
+	}
+	return modifierWalk(root), nil
+}
+
+func modifierWalk(node any) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		if tbl, ok := n["table"].(map[string]any); ok {
+			if final, _ := tbl["final_"].(bool); final {
+				return true
+			}
+			if tbl["table_sample"] != nil {
+				return true
+			}
+			if aliases, ok := tbl["column_aliases"].([]any); ok && len(aliases) > 0 {
+				return true
+			}
+		}
+		if sel, ok := n["select"].(map[string]any); ok && sel["sample"] != nil {
+			return true
+		}
+		for _, v := range n {
+			if modifierWalk(v) {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if modifierWalk(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func refWalk(node any, name string) bool {
 	switch n := node.(type) {
 	case map[string]any:
 		if col, ok := n["column"].(map[string]any); ok && identName(col["name"]) == name {
 			return true
 		}
+		if dot, ok := n["dot"].(map[string]any); ok && identName(dot["field"]) == name {
+			return true
+		}
+		if using, ok := n["using"].([]any); ok {
+			for _, e := range using {
+				if identName(e) == name {
+					return true
+				}
+			}
+		}
 		if star, ok := n["star"].(map[string]any); ok {
-			for _, k := range []string{"except", "replace", "rename"} {
-				if list, ok := star[k].([]any); ok {
-					for _, e := range list {
-						if identName(e) == name {
-							return true
-						}
+			if list, ok := star["except"].([]any); ok {
+				for _, e := range list {
+					if identName(e) == name {
+						return true
+					}
+				}
+			}
+			if list, ok := star["replace"].([]any); ok {
+				for _, e := range list {
+					if m, ok := e.(map[string]any); ok && identName(m["alias"]) == name {
+						return true
+					}
+				}
+			}
+			if list, ok := star["rename"].([]any); ok {
+				for _, e := range list {
+					pair, ok := e.([]any)
+					if ok && len(pair) > 1 && identName(pair[len(pair)-1]) == name {
+						return true
 					}
 				}
 			}

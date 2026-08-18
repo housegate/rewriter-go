@@ -711,6 +711,37 @@ func TestStorageIntegrityContract_RejectsMissingOrUnknownVersionBeforeParse(t *t
 	}
 }
 
+func TestStorageIntegrityContract_RejectsMalformedEntriesBeforeAcknowledgement(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*pb.RewriteTableDynamicArgs)
+		message string
+	}{
+		{"nil table", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"] = nil }, "must not be nil"},
+		{"missing safe", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].SafeTable = "" }, "requires non-empty safe_table and unsafe_table"},
+		{"missing unsafe", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].UnsafeTable = "" }, "requires non-empty safe_table and unsafe_table"},
+		{"invalid reserved column", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.ReservedRowIdColumn = "bad-name" }, "reserved_row_id_column must be a simple identifier"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			tc.mutate(dyn)
+			r := nativeWithExactOptions(t, &fakeEngine{parseErr: errors.New("must not parse")},
+				[]*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+			res, err := r.Rewrite(context.Background(), "SELECT a FROM db1.t", "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_InvalidRewriteRequest ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED ||
+				!strings.Contains(res.Message, tc.message) {
+				t.Fatalf("res=%+v, want InvalidRewriteRequest/no-ack/message %q", res, tc.message)
+			}
+		})
+	}
+}
+
 func TestStorageIntegrityContract_NoOrEmptySISurfaceKeepsLegacyZero(t *testing.T) {
 	e := newEngine(t)
 	for name, opts := range map[string][]*pb.RewriteOption{

@@ -33,13 +33,27 @@ func TestStorageIntegritySurfaceSQL(t *testing.T) {
 	}
 	tbl.ExcludedUnsafeParts = []string{"all_1_1_0", "it's"}
 	unsafe := storageIntegritySurfaceSQL(tbl, &pb.StorageIntegrityArgs{ReadMode: pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST, ReservedRowIdColumn: "_rid"})
-	want := "SELECT * EXCEPT (_rid) FROM hg_safe.db1__t UNION ALL SELECT * EXCEPT (_rid) FROM hg_unsafe.db1__t WHERE _part NOT IN ('all_1_1_0', 'it''s')"
+	want := "SELECT * EXCEPT (`_rid`) FROM hg_safe.db1__t UNION ALL SELECT * EXCEPT (`_rid`) FROM hg_unsafe.db1__t WHERE _part NOT IN ('all_1_1_0', 'it''s')"
 	if unsafe != want {
 		t.Fatalf("unsafe_latest = %q\nwant %q", unsafe, want)
 	}
 	tbl.ExcludedUnsafeParts = nil
 	if got := storageIntegritySurfaceSQL(tbl, &pb.StorageIntegrityArgs{ReadMode: pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST}); strings.Contains(got, "WHERE") {
 		t.Fatalf("empty exclusion list must omit WHERE: %q", got)
+	}
+}
+
+func TestStorageIntegrityReservedKeywordIsQuoted(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.StorageIntegrity.ReservedRowIdColumn = "from"
+	ast, _ := e.ParseOne("SELECT a FROM db1.t")
+	resp, err := RewriteSelect(e, ast, dynOpt(dyn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success || !strings.Contains(resp.GetSqlAfterRewrite(), `EXCEPT ("from")`) {
+		t.Fatalf("code=%v sql=%q msg=%q", resp.GetCode(), resp.GetSqlAfterRewrite(), resp.GetMessage())
 	}
 }
 
@@ -91,6 +105,10 @@ func TestRewriteSelect_reservedColumnRejected(t *testing.T) {
 	e := newEngine(t)
 	for _, sql := range []string{
 		"SELECT _hg_row_id FROM db1.t",
+		"SELECT db1.t._hg_row_id FROM db1.t",
+		"SELECT * REPLACE (1 AS _hg_row_id) FROM db1.t",
+		"SELECT * RENAME (a AS _hg_row_id) FROM db1.t",
+		"SELECT * FROM db1.t AS a JOIN other.u AS b USING (_hg_row_id)",
 		"SELECT a FROM db1.t WHERE _hg_row_id = 'x'",
 		"SELECT a FROM other.u WHERE a IN (SELECT _hg_row_id FROM db1.t)",
 	} {
@@ -120,6 +138,164 @@ func TestRewriteSelect_reservedColumnOnNonSITableAllowed(t *testing.T) {
 	}
 	if resp.Code != pb.RewriteCode_Success {
 		t.Fatalf("statement touching no SI table must not be guarded: %v %s", resp.Code, resp.Message)
+	}
+}
+
+func TestRewriteSelect_storageIntegrityModifiersRejected(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		"SELECT a FROM db1.t FINAL",
+		"SELECT a FROM db1.t SAMPLE 0.1",
+		"SELECT * FROM db1.t WITH OFFSET AS off",
+		"SELECT * FROM db1.t AS x(a)",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.RewriteCode_RewriteError ||
+				resp.GetMessage() != "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported" {
+				t.Fatalf("code=%v msg=%q ast=%s", resp.GetCode(), resp.GetMessage(), ast)
+			}
+			if len(resp.GetOriginalAccessedTables()) != 1 ||
+				!resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+				t.Fatalf("accessed=%+v, want one SI-flagged target", resp.GetOriginalAccessedTables())
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityReadFastPathsRequireAuthorizedLogicalDatabase(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.DatabaseMap = map[string]string{}
+	opts := dynOpt(dyn)
+
+	selectAST, _ := e.ParseOne("SELECT a FROM db1.t")
+	selectResp, err := RewriteSelect(e, selectAST, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUnauthorizedSI := func(name string, resp *pb.RewriteSQLResponse) {
+		t.Helper()
+		if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest ||
+			resp.GetMessage() != "storage-integrity logical database db1 is not authorized by database_map" {
+			t.Fatalf("%s: code=%v msg=%q", name, resp.GetCode(), resp.GetMessage())
+		}
+		if len(resp.GetOriginalAccessedTables()) != 1 ||
+			!resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+			t.Fatalf("%s: accessed=%+v, want one SI-flagged target", name, resp.GetOriginalAccessedTables())
+		}
+	}
+	assertUnauthorizedSI("SELECT", selectResp)
+
+	for _, sql := range []string{"EXISTS TABLE db1.t", "DESCRIBE TABLE db1.t"} {
+		ast, _ := e.ParseOne(sql)
+		var resp *pb.RewriteSQLResponse
+		var handled bool
+		if strings.HasPrefix(sql, "EXISTS") {
+			resp, handled, err = RewriteExistsShowCreate(e, ast, sql, opts)
+		} else {
+			resp, handled, err = RewriteDescribe(e, ast, sql, opts)
+		}
+		if err != nil || !handled {
+			t.Fatalf("%s: handled=%v err=%v", sql, handled, err)
+		}
+		assertUnauthorizedSI(sql, resp)
+	}
+}
+
+func TestDescribeStorageIntegrityOnlyAcceptsTableObject(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		"DESCRIBE DATABASE db1.t",
+		"DESCRIBE VIEW db1.t",
+		"DESCRIBE DICTIONARY db1.t",
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, handled, err := RewriteDescribe(e, ast, sql, opts)
+		if err != nil || !handled {
+			t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+			!strings.Contains(resp.GetMessage(), "only DESCRIBE TABLE is allowed") {
+			t.Fatalf("%q: code=%v msg=%q", sql, resp.GetCode(), resp.GetMessage())
+		}
+		if len(resp.GetOriginalAccessedTables()) != 0 {
+			t.Fatalf("%q: non-table object must not be recorded as SI: %+v", sql, resp.GetOriginalAccessedTables())
+		}
+	}
+}
+
+func TestStorageIntegrityPhysicalNamespaceRejected(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		"SELECT * FROM hg_safe.db1__t",
+		"SELECT * FROM hg_unsafe.db1__t",
+		"SELECT _hg_row_id FROM hg_safe.db1__t",
+	} {
+		ast, _ := e.ParseOne(sql)
+		resp, err := RewriteSelect(e, ast, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetCode() != pb.RewriteCode_RewriteError ||
+			!strings.Contains(resp.GetMessage(), "storage-integrity physical table") {
+			t.Fatalf("%q: code=%v msg=%q", sql, resp.GetCode(), resp.GetMessage())
+		}
+		if len(resp.GetOriginalAccessedTables()) != 1 ||
+			!resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+			t.Fatalf("%q: accessed=%+v, want one SI-flagged target", sql, resp.GetOriginalAccessedTables())
+		}
+	}
+
+	for _, sql := range []string{
+		"DROP TABLE hg_safe.db1__t",
+		"INSERT INTO hg_unsafe.db1__t VALUES (1)",
+	} {
+		ast, _ := e.ParseOne(sql)
+		resp, handled, err := RewriteWrite(e, ast, sql, opts)
+		if err != nil || !handled {
+			t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+			!strings.Contains(resp.GetMessage(), "storage-integrity physical table") {
+			t.Fatalf("%q: code=%v msg=%q", sql, resp.GetCode(), resp.GetMessage())
+		}
+		if len(resp.GetOriginalAccessedTables()) != 1 ||
+			!resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+			t.Fatalf("%q: accessed=%+v, want one SI-flagged target", sql, resp.GetOriginalAccessedTables())
+		}
+	}
+
+	for _, sql := range []string{
+		"EXISTS TABLE hg_safe.db1__t",
+		"SHOW CREATE TABLE hg_unsafe.db1__t",
+		"DESCRIBE TABLE hg_safe.db1__t",
+	} {
+		ast, _ := e.ParseOne(sql)
+		var resp *pb.RewriteSQLResponse
+		var handled bool
+		var err error
+		if strings.HasPrefix(sql, "DESCRIBE") {
+			resp, handled, err = RewriteDescribe(e, ast, sql, opts)
+		} else {
+			resp, handled, err = RewriteExistsShowCreate(e, ast, sql, opts)
+		}
+		if err != nil || !handled || resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+			len(resp.GetOriginalAccessedTables()) != 1 || !resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+			t.Fatalf("%q: handled=%v err=%v code=%v msg=%q accessed=%+v", sql, handled, err, resp.GetCode(), resp.GetMessage(), resp.GetOriginalAccessedTables())
+		}
 	}
 }
 
@@ -211,6 +387,8 @@ func TestGrant_storageIntegrityRejected(t *testing.T) {
 	for _, sql := range []string{
 		"GRANT SELECT ON db1.t TO u1",
 		"REVOKE SELECT ON db1.t FROM u1",
+		"GRANT SELECT(a) ON db1.t TO u1",
+		"GRANT SELECT ON db1.t TO u1 WITH REPLACE OPTION",
 	} {
 		ast, _ := e.ParseOne(sql)
 		resp, handled, err := RewriteGrant(e, ast, sql, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
@@ -220,6 +398,10 @@ func TestGrant_storageIntegrityRejected(t *testing.T) {
 		if resp.Code != pb.RewriteCode_UnsupportedStatement || !strings.Contains(resp.Message, "storage-integrity table db1.t accepts writes only") {
 			t.Fatalf("%q: code=%v msg=%q", sql, resp.Code, resp.Message)
 		}
+		if len(resp.OriginalAccessedTables) != 1 ||
+			!resp.OriginalAccessedTables[0].GetIsStorageIntegrity() {
+			t.Fatalf("%q: accessed=%+v, want one SI-flagged target", sql, resp.OriginalAccessedTables)
+		}
 	}
 	// Database-scoped grants are not table-targeting and stay allowed.
 	sql := "GRANT SELECT ON db1.* TO u1"
@@ -227,6 +409,115 @@ func TestGrant_storageIntegrityRejected(t *testing.T) {
 	resp, _, _ := RewriteGrant(e, ast, sql, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
 	if resp.Code != pb.RewriteCode_Success {
 		t.Fatalf("db-scoped grant: code=%v msg=%q", resp.Code, resp.Message)
+	}
+
+	sql = "GRANT SELECT ON hg_safe.db1__t TO u1"
+	ast, _ = e.ParseOne(sql)
+	resp, _, _ = RewriteGrant(e, ast, sql, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+		!strings.Contains(resp.GetMessage(), "physical table hg_safe.db1__t is not directly addressable") ||
+		len(resp.GetOriginalAccessedTables()) != 1 || !resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+		t.Fatalf("direct physical grant: code=%v msg=%q accessed=%+v", resp.GetCode(), resp.GetMessage(), resp.GetOriginalAccessedTables())
+	}
+}
+
+func TestWrite_storageIntegrityBareRejectsRecordTarget(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		"OPTIMIZE TABLE db1.t FINAL",
+		"DETACH TABLE db1.t",
+		"ATTACH TABLE db1.t",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, opts)
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+				t.Fatalf("code=%v msg=%q", resp.GetCode(), resp.GetMessage())
+			}
+			if len(resp.GetOriginalAccessedTables()) != 1 {
+				t.Fatalf("accessed=%+v, want one target", resp.GetOriginalAccessedTables())
+			}
+			got := resp.GetOriginalAccessedTables()[0]
+			if got.GetOriginalDatabase() != "db1" || got.GetOriginalTable() != "t" ||
+				got.GetLogicalDatabase() != "db1" || got.GetPhysicalDatabase() != "phys" ||
+				!got.GetIsStorageIntegrity() {
+				t.Fatalf("accessed=%+v, want db1.t resolved and SI-flagged", got)
+			}
+		})
+	}
+}
+
+func TestWrite_storageIntegrityEarlyRejectsRecordTarget(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		"ALTER TABLE db1.t ATTACH PARTITION 1 FROM other.src",
+		"ALTER TABLE other.u ATTACH PARTITION 1 FROM db1.t",
+		"DROP TABLE db1.t, other.u",
+		"DROP TABLE other.u, db1.t",
+		"CREATE TABLE db1.t AS remote('h', d, x)",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, opts)
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+				!strings.Contains(resp.GetMessage(), "storage-integrity table db1.t accepts writes only") {
+				t.Fatalf("code=%v msg=%q", resp.GetCode(), resp.GetMessage())
+			}
+			if len(resp.GetOriginalAccessedTables()) != 1 ||
+				!resp.GetOriginalAccessedTables()[0].GetIsStorageIntegrity() {
+				t.Fatalf("accessed=%+v, want one SI-flagged target", resp.GetOriginalAccessedTables())
+			}
+		})
+	}
+}
+
+func TestWrite_storageIntegrityViewBodiesRejected(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		mode pb.StorageIntegrityArgs_ReadMode
+	}{
+		{"CREATE VIEW other.v AS SELECT * FROM db1.t", pb.StorageIntegrityArgs_READ_MODE_SAFE},
+		{"CREATE MATERIALIZED VIEW other.mv TO other.dst AS SELECT * FROM db1.t", pb.StorageIntegrityArgs_READ_MODE_SAFE},
+		{"CREATE VIEW other.v2 AS SELECT * FROM db1.t", pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST},
+		{"CREATE VIEW other.v3 AS SELECT _hg_row_id FROM db1.t", pb.StorageIntegrityArgs_READ_MODE_SAFE},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dyn := siDyn(tc.mode, "all_1_1_0")
+			resp, handled, err := RewriteWrite(e, ast, tc.sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+				!strings.Contains(resp.GetMessage(), "storage-integrity table db1.t accepts writes only") {
+				t.Fatalf("code=%v msg=%q", resp.GetCode(), resp.GetMessage())
+			}
+			sawSI := false
+			for _, a := range resp.GetOriginalAccessedTables() {
+				sawSI = sawSI || a.GetIsStorageIntegrity()
+			}
+			if !sawSI {
+				t.Fatalf("accessed=%+v, want an SI-flagged body target", resp.GetOriginalAccessedTables())
+			}
+		})
 	}
 }
 
