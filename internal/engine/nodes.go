@@ -105,7 +105,32 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 	return out, nil
 }
 
-// TableFunctionRef is one recognized ClickHouse table-function namespace.
+// NamespaceRefSource identifies an AST surface that carries a ClickHouse
+// database/table identity outside an ordinary FROM/JOIN table node.
+type NamespaceRefSource string
+
+const (
+	NamespaceRefTableFunction    NamespaceRefSource = "table_function"
+	NamespaceRefInTable          NamespaceRefSource = "in_table"
+	NamespaceRefTableEngine      NamespaceRefSource = "table_engine"
+	NamespaceRefDictionarySource NamespaceRefSource = "dictionary_source"
+)
+
+// NamespaceRef is one namespace-bearing surface that can reach a local table
+// without passing through the ordinary table-name rewriter. This deliberately
+// models table functions, IN/GLOBAL IN <table>, CREATE TABLE engine source
+// arguments, and local CLICKHOUSE dictionary sources through one shape so
+// storage-integrity policy cannot grow another per-command allow-list gap.
+type NamespaceRef struct {
+	Source              NamespaceRefSource
+	Name                string
+	Target              TableTarget
+	Resolved            bool
+	UsesCurrentDatabase bool
+}
+
+// TableFunctionRef is the compatibility view of one recognized ClickHouse
+// table-function namespace.
 // Resolved means both database and table arguments are statically known. When
 // only the database is known, Target.DB is preserved while Resolved stays false;
 // policy can then reserve a protocol-owned database even if the table argument
@@ -117,20 +142,40 @@ type TableFunctionRef struct {
 	UsesCurrentDatabase bool // one-argument merge(<table-regexp>) overload
 }
 
-// CollectTableFunctionRefs returns every recognized remote/cluster/merge
-// function, including partially or wholly unresolved namespace arguments.
-func CollectTableFunctionRefs(ast AST) ([]TableFunctionRef, error) {
+// CollectNamespaceRefs returns all AST surfaces that carry a database/table
+// identity outside normal table nodes. The function families are derived from
+// ClickHouse's local-catalog table functions: remote/cluster, merge/loop,
+// mergeTree* inspection functions, TimeSeries/Prometheus functions, and
+// dictionary. Prefix handling for mergeTree* intentionally covers newly added
+// inspection functions such as mergeTreeCodecBlockCounts without a brittle
+// one-name patch.
+func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, fmt.Errorf("engine: decode table functions: %w", err)
+		return nil, fmt.Errorf("engine: decode namespace references: %w", err)
 	}
-	var out []TableFunctionRef
+	var out []NamespaceRef
 	var walk func(any)
 	walk = func(node any) {
 		switch n := node.(type) {
 		case map[string]any:
 			if fn, ok := n["function"].(map[string]any); ok {
-				if ref, ok := decodeTableFunctionRef(fn); ok {
+				if ref, ok := decodeNamespaceFunctionRef(fn); ok {
+					out = append(out, ref)
+				}
+			}
+			if in, ok := n["in"].(map[string]any); ok {
+				if ref, ok := decodeInNamespaceRef(in); ok {
+					out = append(out, ref)
+				}
+			}
+			if property, ok := n["engine_property"].(map[string]any); ok {
+				if ref, ok := decodeTableEngineNamespaceRef(property); ok {
+					out = append(out, ref)
+				}
+			}
+			if property, ok := n["dict_property"].(map[string]any); ok {
+				if ref, ok := decodeDictionarySourceNamespaceRef(property); ok {
 					out = append(out, ref)
 				}
 			}
@@ -144,6 +189,26 @@ func CollectTableFunctionRefs(ast AST) ([]TableFunctionRef, error) {
 		}
 	}
 	walk(root)
+	return out, nil
+}
+
+// CollectTableFunctionRefs returns every recognized remote/cluster/merge
+// function, including partially or wholly unresolved namespace arguments.
+func CollectTableFunctionRefs(ast AST) ([]TableFunctionRef, error) {
+	refs, err := CollectNamespaceRefs(ast)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableFunctionRef
+	for _, ref := range refs {
+		if ref.Source != NamespaceRefTableFunction {
+			continue
+		}
+		out = append(out, TableFunctionRef{
+			Target: ref.Target, Resolved: ref.Resolved,
+			UsesCurrentDatabase: ref.UsesCurrentDatabase,
+		})
+	}
 	return out, nil
 }
 
@@ -163,51 +228,204 @@ func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
 	return out, nil
 }
 
-func decodeTableFunctionRef(fn map[string]any) (TableFunctionRef, bool) {
+func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 	name, _ := fn["name"].(string)
 	args, _ := fn["args"].([]any)
+	lower := strings.ToLower(name)
+	switch lower {
+	case "remote", "remotesecure", "cluster", "clusterallreplicas":
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 1), true
+	case "merge":
+		if len(args) == 1 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "loop", "dictionary":
+		if len(args) == 1 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "timeseriesdata", "timeseriestags", "timeseriesmetrics":
+		if len(args) == 1 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "timeseriesselector":
+		if len(args) == 4 && len(args) > 0 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "prometheusquery":
+		if len(args) == 3 && len(args) > 0 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "prometheusqueryrange":
+		if len(args) == 5 && len(args) > 0 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	}
+	if strings.HasPrefix(lower, "mergetree") {
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	}
+	return NamespaceRef{}, false
+}
+
+func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
+	isField, _ := in["is_field"].(bool)
+	exprs, _ := in["expressions"].([]any)
+	if !isField || len(exprs) != 1 {
+		return NamespaceRef{}, false
+	}
+	name := "IN"
+	if not, _ := in["not"].(bool); not {
+		name = "NOT IN"
+	}
+	if global, _ := in["global"].(bool); global {
+		name = "GLOBAL " + name
+	}
+	ref := decodeNamespaceSingle(NamespaceRefInTable, name, exprs[0])
+	if ref.Target.Table == "" && !ref.Resolved {
+		return NamespaceRef{}, false
+	}
+	return ref, true
+}
+
+func decodeTableEngineNamespaceRef(property map[string]any) (NamespaceRef, bool) {
+	outer, _ := property["this"].(map[string]any)
+	anon, _ := outer["anonymous"].(map[string]any)
+	nameHolder, _ := anon["this"].(map[string]any)
+	name := identName(nameHolder["identifier"])
+	args, _ := anon["expressions"].([]any)
 	var first int
 	switch strings.ToLower(name) {
-	case "remote", "remotesecure", "cluster", "clusterallreplicas":
-		first = 1 // address/cluster name precedes the table specification
-	case "merge":
-		// ClickHouse's one-argument merge(<table-regexp>) overload searches
-		// the current database. Treating its sole argument as a database name
-		// loses that namespace and can expose a configured hg_safe/hg_unsafe
-		// database through an unqualified table function.
-		if len(args) == 1 {
-			ref := TableFunctionRef{UsesCurrentDatabase: true}
-			if table, ok := tableFunctionArgText(args[0]); ok {
-				ref.Target.Table = table
-			}
-			return ref, true
-		}
+	case "remote", "distributed":
+		first = 1
+	case "merge", "buffer":
 		first = 0
 	default:
-		return TableFunctionRef{}, false
+		return NamespaceRef{}, false
 	}
+	return decodeNamespacePair(NamespaceRefTableEngine, name, args, first), true
+}
+
+func decodeDictionarySourceNamespaceRef(property map[string]any) (NamespaceRef, bool) {
+	propertyName, _ := property["this"].(map[string]any)
+	if !strings.EqualFold(identName(propertyName["identifier"]), "SOURCE") {
+		return NamespaceRef{}, false
+	}
+	kind, _ := property["kind"].(string)
+	if !strings.EqualFold(kind, "CLICKHOUSE") {
+		return NamespaceRef{}, false
+	}
+	ref := NamespaceRef{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}
+	settings, _ := property["settings"].(map[string]any)
+	tuple, _ := settings["tuple"].(map[string]any)
+	pairs, _ := tuple["expressions"].([]any)
+	var databaseArg, tableArg any
+	hasQuery := false
+	for _, rawPair := range pairs {
+		pair, _ := rawPair.(map[string]any)
+		body, _ := pair["tuple"].(map[string]any)
+		expressions, _ := body["expressions"].([]any)
+		if len(expressions) != 2 {
+			continue
+		}
+		keyHolder, _ := expressions[0].(map[string]any)
+		key := strings.ToUpper(identName(keyHolder["identifier"]))
+		switch key {
+		case "DB", "DATABASE":
+			databaseArg = expressions[1]
+		case "TABLE":
+			tableArg = expressions[1]
+		case "QUERY":
+			// A query string can address arbitrary tables and is intentionally
+			// left unresolved for conservative SI policy.
+			hasQuery = true
+		}
+	}
+	if hasQuery && tableArg == nil {
+		if databaseArg == nil {
+			return ref, true
+		}
+		return decodeNamespacePair(NamespaceRefDictionarySource, "CLICKHOUSE", []any{databaseArg}, 0), true
+	}
+	if databaseArg == nil && tableArg == nil {
+		return ref, true
+	}
+	if databaseArg == nil {
+		ref = decodeNamespaceSingle(NamespaceRefDictionarySource, "CLICKHOUSE", tableArg)
+		// A dynamic TABLE expression still executes in the current DB.
+		ref.UsesCurrentDatabase = true
+		return ref, true
+	}
+	return decodeNamespacePair(NamespaceRefDictionarySource, "CLICKHOUSE", []any{databaseArg, tableArg}, 0), true
+}
+
+func decodeNamespaceSingle(source NamespaceRefSource, name string, arg any) NamespaceRef {
+	ref := NamespaceRef{Source: source, Name: name, UsesCurrentDatabase: true}
+	if isCurrentDatabaseArg(arg) {
+		ref.UsesCurrentDatabase = true
+		return ref
+	}
+	value, ok := tableFunctionArgText(arg)
+	if !ok {
+		return ref
+	}
+	if db, table, qualified := exactFunctionQualified(value); qualified {
+		ref.Target = TableTarget{DB: db, Table: table}
+		ref.Resolved = true
+		ref.UsesCurrentDatabase = false
+		return ref
+	}
+	ref.Target.Table = value
+	return ref
+}
+
+func decodeNamespacePair(source NamespaceRefSource, name string, args []any, first int) NamespaceRef {
+	ref := NamespaceRef{Source: source, Name: name}
 	if first >= len(args) {
-		return TableFunctionRef{}, true
+		return ref
+	}
+	if isCurrentDatabaseArg(args[first]) {
+		ref.UsesCurrentDatabase = true
+		if first+1 < len(args) {
+			ref.Target.Table, _ = tableFunctionArgText(args[first+1])
+		}
+		return ref
 	}
 	firstArg, firstOK := tableFunctionArgText(args[first])
 	if firstOK {
-		if db, table, ok := exactFunctionQualified(firstArg); ok {
-			return TableFunctionRef{Target: TableTarget{DB: db, Table: table}, Resolved: true}, true
+		if db, table, qualified := exactFunctionQualified(firstArg); qualified {
+			ref.Target = TableTarget{DB: db, Table: table}
+			ref.Resolved = true
+			return ref
 		}
-	}
-	ref := TableFunctionRef{}
-	if firstOK {
 		ref.Target.DB = firstArg
 	}
 	if first+1 >= len(args) {
-		return ref, true
+		return ref
 	}
 	secondArg, secondOK := tableFunctionArgText(args[first+1])
 	if secondOK {
 		ref.Target.Table = secondArg
 	}
 	ref.Resolved = firstOK && secondOK && firstArg != "" && secondArg != ""
-	return ref, true
+	return ref
+}
+
+func isCurrentDatabaseArg(arg any) bool {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return false
+	}
+	fn, ok := m["function"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, _ := fn["name"].(string)
+	return strings.EqualFold(name, "currentDatabase")
 }
 
 // CollectEmbeddedSelectSources returns the table nodes and recognized table

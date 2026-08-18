@@ -414,6 +414,97 @@ func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
 	}
 }
 
+func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []NamespaceRef
+	}{
+		{
+			`SELECT * FROM other.u WHERE id GLOBAL IN hg_safe.db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM other.u WHERE id IN db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`SELECT * FROM other.u WHERE id NOT IN hg_safe.db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM other.u WHERE id GLOBAL NOT IN hg_unsafe.db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeIndex", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`SELECT * FROM mergeTreeProjection('hg_safe', 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeProjection", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM mergeTreeCodecBlockCounts('hg_safe', 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeCodecBlockCounts", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM loop(hg_safe.db1__t)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "loop", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM timeSeriesSelector(hg_safe.db1__t, 'x', 0, 1)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "timeSeriesSelector", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM prometheusQuery(hg_safe.db1__t, 'x', 1)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "prometheusQuery", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM dictionary('hg_safe.db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "dictionary", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'hg_safe', 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableEngine, Name: "Remote", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`CREATE TABLE other.x (a UInt64) ENGINE = Merge(currentDatabase(), 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableEngine, Name: "Merge", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'hg_safe' TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB concat('hg_', 'safe') TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{Table: "db1__t"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}},
+		},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("refs = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCollectEmbeddedSelectSources(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {

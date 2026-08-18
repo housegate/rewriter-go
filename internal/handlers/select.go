@@ -102,23 +102,18 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if err != nil {
 		return nil, nil, err
 	}
-	var functionRefs []engine.TableFunctionRef
+	var namespaceRefs []engine.NamespaceRef
 	if sel.Mode == nameresolve.ModeDynamic {
 		var ferr error
-		functionRefs, ferr = engine.CollectTableFunctionRefs(ast)
+		namespaceRefs, ferr = engine.CollectNamespaceRefs(ast)
 		if ferr != nil {
 			return nil, nil, ferr
-		}
-		for _, ref := range functionRefs {
-			if ref.Resolved && nameresolve.IsStorageIntegrityPhysicalDatabase(ref.Target.DB, sel.Dynamic) {
-				originals = append(originals, ref.Target)
-			}
 		}
 	}
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
 	if sel.Mode == nameresolve.ModeDynamic {
-		if rejectStorageIntegrityTableFunctions(resp, functionRefs, sel, pb.RewriteCode_RewriteError) {
+		if rejectStorageIntegrityNamespaces(resp, namespaceRefs, sel, pb.RewriteCode_RewriteError) {
 			return ast, resp, nil
 		}
 		for _, tt := range originals {

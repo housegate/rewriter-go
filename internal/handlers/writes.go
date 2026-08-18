@@ -71,6 +71,13 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 	if sel.Mode != nameresolve.ModeDynamic {
 		return nil, false, nil
 	}
+	// RewriteWrite is probed before the SELECT dispatcher. Never let write-side
+	// namespace policy claim a read root; SELECT applies the same extractor with
+	// RewriteError semantics and preserves ordinary accessed-table bookkeeping.
+	switch info.Kind {
+	case engine.NodeSelect, engine.NodeUnion, engine.NodeIntersect, engine.NodeExcept:
+		return nil, false, nil
+	}
 	inspectTarget := func(tt engine.TableTarget, allowInsertTarget bool) (*pb.RewriteSQLResponse, bool) {
 		if tt.Table == "" {
 			if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
@@ -123,21 +130,25 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 		}
 	}
 
+	// Namespace-bearing reads/writes that are not ordinary table nodes share
+	// one extractor and one fail-closed policy. This covers IN <table>, local
+	// catalog table functions, INSERT INTO FUNCTION, and CREATE TABLE engine
+	// sources before any command-specific generic reject can erase SI metadata.
+	namespaceRefs, err := engine.CollectNamespaceRefs(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	namespaceResp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+	if rejectStorageIntegrityNamespaces(namespaceResp, namespaceRefs, sel, pb.RewriteCode_UnsupportedStatement) {
+		return namespaceResp, true, nil
+	}
+
 	// CREATE TABLE AS SELECT and INSERT ... SELECT carry a second read-side
 	// namespace that ordinary write slots do not visit. Fail closed on SI
 	// sources before any statement-specific rewrite can forward a raw physical
 	// read. CREATE VIEW has its own body pipeline, which preserves view-target
 	// metadata and applies the same rejection later.
 	if info.Kind == engine.NodeCreateTable || info.Kind == engine.NodeInsert {
-		functionRefs, err := engine.CollectTableFunctionRefs(ast)
-		if err != nil {
-			return nil, false, err
-		}
-		functionResp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-		if rejectStorageIntegrityTableFunctions(functionResp, functionRefs, sel, pb.RewriteCode_UnsupportedStatement) {
-			return functionResp, true, nil
-		}
-
 		embeddedTables, _, err := engine.CollectEmbeddedSelectSources(ast)
 		if err != nil {
 			return nil, false, err

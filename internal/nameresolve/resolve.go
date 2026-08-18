@@ -344,6 +344,26 @@ func IsStorageIntegrityPhysicalDatabase(db string, a *pb.RewriteTableDynamicArgs
 	return false
 }
 
+// IsStorageIntegrityLogicalDatabase reports whether db owns at least one
+// storage_integrity.tables key. Namespace-bearing functions and table engines
+// are not passed through the ordinary table rewriter, so a database-level match
+// must be reserved even when their table argument is a regexp or expression.
+func IsStorageIntegrityLogicalDatabase(db string, a *pb.RewriteTableDynamicArgs) bool {
+	if a == nil || db == "" {
+		return false
+	}
+	for key, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		logicalDB, _, ok := exactQualifiedTable(key)
+		if ok && logicalDB == db {
+			return true
+		}
+	}
+	return false
+}
+
 // StorageIntegrityPhysicalDatabases returns the configured protocol-owned
 // safe/unsafe database namespaces in deterministic order. It is used to attach
 // conservative SI classification metadata when a table-function database

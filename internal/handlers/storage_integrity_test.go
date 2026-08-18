@@ -1045,3 +1045,196 @@ func TestGrant_storageIntegrityPhysicalDatabaseScopeAndAttachGrant(t *testing.T)
 		})
 	}
 }
+
+func TestStorageIntegrityINTableNamespacesFailClosed(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		context string
+		write   bool
+	}{
+		{"logical", `SELECT * FROM other.u WHERE id IN db1.t`, "", false},
+		{"global_physical", `SELECT * FROM other.u WHERE id GLOBAL IN hg_safe.db1__t`, "", false},
+		{"not_in_physical", `SELECT * FROM other.u WHERE id NOT IN hg_safe.db1__t`, "", false},
+		{"global_not_in_physical", `SELECT * FROM other.u WHERE id GLOBAL NOT IN hg_unsafe.db1__t`, "", false},
+		{"unqualified_physical", `SELECT * FROM other.u WHERE id IN db1__t`, "hg_unsafe", false},
+		{"view_body", `CREATE VIEW other.v AS SELECT * FROM other.u WHERE id IN db1.t`, "", true},
+		{"insert_select", `INSERT INTO other.u SELECT * FROM other.v WHERE id IN hg_safe.db1__t`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tc.context
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.write {
+				resp, handled, err := RewriteWrite(e, ast, tc.sql, dynOpt(dyn))
+				if err != nil || !handled {
+					t.Fatalf("handled=%v err=%v", handled, err)
+				}
+				assertStorageIntegrityReject(t, resp, "storage-integrity")
+				return
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(dyn), tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+}
+
+func TestStorageIntegrityLocalCatalogTableFunctionsFailClosed(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`SELECT * FROM mergeTreeIndex('hg_safe', 'db1__t')`,
+		`SELECT * FROM mergeTreeProjection('hg_unsafe', 'db1__t', 'p')`,
+		`SELECT * FROM mergeTreeCodecBlockCounts('hg_safe', 'db1__t')`,
+		`SELECT * FROM loop(hg_unsafe.db1__t)`,
+		`SELECT * FROM timeSeriesData(hg_safe.db1__t)`,
+		`SELECT * FROM timeSeriesSelector(hg_unsafe.db1__t, 'x', 0, 1)`,
+		`SELECT * FROM prometheusQuery(hg_safe.db1__t, 'x', 1)`,
+		`SELECT * FROM dictionary('hg_unsafe.db1__t')`,
+		`SELECT * FROM mergeTreeIndex(concat('hg_', 'safe'), 'db1__t')`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.UpstreamLogicalDatabaseInContext = "db1"
+	physical := "hg_safe"
+	dyn.UpstreamPhysicalDatabaseInContext = &physical
+	sql := `SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := RewriteSelect(e, ast, dynOpt(dyn), sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStorageIntegrityReject(t, resp, "storage-integrity")
+}
+
+func TestStorageIntegrityTableEngineNamespacesFailClosed(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		`CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'hg_safe', 'db1__t')`,
+		`CREATE TABLE other.x (a UInt64) ENGINE = Distributed('c', 'hg_unsafe', 'db1__t')`,
+		`CREATE TABLE other.x (a UInt64) ENGINE = Merge('hg_safe', 'db1__t')`,
+		`CREATE TABLE other.x (a UInt64) ENGINE = Buffer('hg_unsafe', 'db1__t', 16, 10, 100, 1000, 10000, 100000, 1000000)`,
+		`CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', concat('hg_', 'safe'), 'db1__t')`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.UpstreamLogicalDatabaseInContext = "db1"
+	physical := "hg_safe"
+	dyn.UpstreamPhysicalDatabaseInContext = &physical
+	sql := `CREATE TABLE other.x (a UInt64) ENGINE = Merge(currentDatabase(), 'db1__t')`
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(dyn))
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	assertStorageIntegrityReject(t, resp, "storage-integrity")
+}
+
+func TestStorageIntegrityNamespaceExtractorLeavesResolvedOrdinaryTargetsAlone(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, sql := range []string{
+		`SELECT * FROM other.u WHERE id IN other.v`,
+		`SELECT * FROM mergeTreeIndex('other', 'u')`,
+		`SELECT * FROM loop(other.u)`,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := RewriteSelect(e, ast, dynOpt(dyn), sql)
+		if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+			t.Fatalf("%q: err=%v code=%v msg=%q", sql, err, resp.GetCode(), resp.GetMessage())
+		}
+	}
+
+	sql := `CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'other', 'u')`
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(dyn))
+	if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("ordinary engine: handled=%v err=%v code=%v msg=%q", handled, err, resp.GetCode(), resp.GetMessage())
+	}
+}
+
+func TestStorageIntegrityClickHouseDictionarySourceFailsClosed(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		context string
+	}{
+		{
+			"explicit_physical",
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'hg_safe' TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			"",
+		},
+		{
+			"current_physical",
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			"hg_unsafe",
+		},
+		{
+			"unresolved_database",
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB concat('hg_', 'safe') TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			"",
+		},
+		{
+			"query_source",
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tc.context
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, tc.sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+}
