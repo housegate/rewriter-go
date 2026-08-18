@@ -142,7 +142,17 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		return dresp, nil
 	}
 
-	// Phase 4: EXISTS / SHOW CREATE (single-target), then GRANT / REVOKE
+	// Phase 4a: DESCRIBE (Spec G §4.3 / Spec E D6). Must run before
+	// RewriteExistsShowCreate because both read the same tokenized command
+	// node; exists.go now ignores VerbDescribe explicitly.
+	if dresp, handled, derr := handlers.RewriteDescribe(e, ast, sql, opts); derr != nil {
+		return nil, derr
+	} else if handled {
+		finalize(dresp, sql, ec, siVersion)
+		return dresp, nil
+	}
+
+	// Phase 4b: EXISTS / SHOW CREATE (single-target), then GRANT / REVOKE
 	// (privilege deltas) — after db-level, before SELECT. Both match only
 	// `command` nodes and recognize disjoint verbs, so their relative order is
 	// irrelevant; this mirrors the C++ server order (exists → show_create → grant).
@@ -264,6 +274,8 @@ func classifyCommand(sql string) pb.StatementType {
 		return pb.StatementType_STATEMENT_TYPE_EXISTS_TABLE
 	case strings.HasPrefix(u, "SHOW CREATE"):
 		return pb.StatementType_STATEMENT_TYPE_SHOW_CREATE_TABLE
+	case strings.HasPrefix(u, "DESC"):
+		return pb.StatementType_STATEMENT_TYPE_DESCRIBE
 	case strings.HasPrefix(u, "SHOW DATABASES"), strings.HasPrefix(u, "SHOW SCHEMAS"):
 		return pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES
 	case strings.HasPrefix(u, "SHOW TABLES"), strings.HasPrefix(u, "SHOW"):

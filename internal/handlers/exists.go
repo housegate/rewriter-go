@@ -29,8 +29,8 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	if err != nil {
 		return nil, false, err
 	}
-	if t.Verb == engine.VerbNone {
-		return nil, false, nil // not EXISTS / SHOW CREATE → caller falls through
+	if t.Verb != engine.VerbExists && t.Verb != engine.VerbShowCreate {
+		return nil, false, nil // not EXISTS / SHOW CREATE (DESCRIBE has its own handler) → caller falls through
 	}
 
 	stmt := pb.StatementType_STATEMENT_TYPE_EXISTS_TABLE

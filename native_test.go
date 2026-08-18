@@ -790,3 +790,19 @@ func TestStorageIntegrityContract_DBLevelUsesDynamicMapWithoutAcknowledgingShado
 		})
 	}
 }
+
+func TestStorageIntegrityContract_DescribeRetainsAcknowledgement(t *testing.T) {
+	e := newEngine(t)
+	r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(siContractDynamic(
+		pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1))})
+	defer r.Close()
+
+	res, err := r.Rewrite(context.Background(), "DESCRIBE db1.t", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_DESCRIBE ||
+		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		t.Fatalf("res = %+v, want Success/DESCRIBE/V1", res)
+	}
+}

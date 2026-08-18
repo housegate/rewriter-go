@@ -2,19 +2,20 @@ package engine
 
 import "strings"
 
-// ObjectVerb classifies an EXISTS / SHOW CREATE statement. Both are
+// ObjectVerb classifies an EXISTS / SHOW CREATE / DESCRIBE statement. They are
 // "<verb> [TEMPORARY] [<object-type>] [db.]name" in the ClickHouse grammar and
-// both reach us as an opaque `command` node, so a shared tokenize-based
+// all reach us as an opaque `command` node, so a shared tokenize-based
 // extractor recovers their structure.
 type ObjectVerb int
 
 const (
-	VerbNone       ObjectVerb = iota // not an EXISTS / SHOW CREATE statement
+	VerbNone       ObjectVerb = iota // not an EXISTS / SHOW CREATE / DESCRIBE statement
 	VerbExists                       // EXISTS …
 	VerbShowCreate                   // SHOW CREATE …
+	VerbDescribe                     // DESCRIBE | DESC [TABLE] …
 )
 
-// ObjectTarget is the extracted structure of an EXISTS / SHOW CREATE statement.
+// ObjectTarget is the extracted structure of an EXISTS / SHOW CREATE / DESCRIBE statement.
 type ObjectTarget struct {
 	Verb      ObjectVerb
 	Temporary bool
@@ -23,7 +24,7 @@ type ObjectTarget struct {
 	Table     string
 }
 
-// ParseObjectTarget extracts EXISTS / SHOW CREATE structure from the clickhouse
+// ParseObjectTarget extracts EXISTS / SHOW CREATE / DESCRIBE structure from the clickhouse
 // Tokenize stream. Returns Verb==VerbNone for anything else. EXISTS does not parse
 // structurally under ANY polyglot dialect, and bare `SHOW CREATE t` (no TABLE
 // keyword) mis-parses under the generic dialect, so the tokenizer is the only
@@ -52,6 +53,8 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 			return ObjectTarget{}, nil // SHOW <other> is a db-level statement, not ours
 		}
 		out.Verb, i = VerbShowCreate, 2
+	case "DESCRIBE", "DESC":
+		out.Verb, i = VerbDescribe, 1
 	default:
 		return ObjectTarget{}, nil
 	}
