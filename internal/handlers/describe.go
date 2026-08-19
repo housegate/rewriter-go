@@ -12,7 +12,10 @@ import (
 // a string (not via the generator) so both engines emit byte-identical SQL.
 func describeMetadataSQL(safeTable, rid string) string {
 	db, table := splitPhysicalName(safeTable)
-	return "SELECT name, type, default_type, default_expression, comment, codec_expression, ttl_expression FROM system.columns WHERE database = '" +
+	// system.columns exposes default_kind; alias it to the native DESCRIBE
+	// result's default_type column so clients keep the expected seven-field
+	// metadata shape on ClickHouse 25.8.
+	return "SELECT name, type, default_kind AS default_type, default_expression, comment, codec_expression, ttl_expression FROM system.columns WHERE database = '" +
 		escapeSQLLiteral(db) + "' AND table = '" + escapeSQLLiteral(table) + "' AND name != '" + escapeSQLLiteral(rid) + "' ORDER BY position"
 }
 
