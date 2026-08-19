@@ -453,6 +453,22 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
 		},
 		{
+			`SELECT nullIn(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotNullIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
 			`SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`,
 			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeIndex", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
 		},

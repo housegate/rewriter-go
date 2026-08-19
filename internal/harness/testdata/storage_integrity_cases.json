@@ -2202,6 +2202,95 @@
     "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
   },
   {
+    "name": "si_callable_null_in_physical_table_rejected",
+    "sql": "SELECT nullIn(id, hg_safe.db1__t) FROM other.u",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [
+      {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys"},
+      {"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_callable_not_null_in_physical_table_rejected",
+    "sql": "SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.u",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+    "want_accessed": [
+      {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys"},
+      {"original_database": "hg_unsafe", "original_table": "db1__t", "physical_database": "hg_unsafe", "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_callable_global_null_in_physical_table_rejected",
+    "sql": "SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [
+      {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys"},
+      {"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_callable_global_not_null_in_physical_table_rejected",
+    "sql": "SELECT globalNotNullIn(id, hg_unsafe.db1__t) FROM other.u",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+    "want_accessed": [
+      {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys"},
+      {"original_database": "hg_unsafe", "original_table": "db1__t", "physical_database": "hg_unsafe", "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_ctas_callable_null_in_physical_table_rejected",
+    "sql": "CREATE TABLE other.x AS SELECT nullIn(id, hg_safe.db1__t) FROM other.u",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_insert_select_callable_not_null_in_physical_table_rejected",
+    "sql": "INSERT INTO other.u SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.v",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_unsafe", "original_table": "db1__t", "physical_database": "hg_unsafe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_create_view_callable_global_null_in_physical_table_rejected",
+    "sql": "CREATE VIEW other.v AS SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u",
+    "dynamic": {
+      "database_map": {"other": "phys"}, "known_physical_databases": ["phys"], "delim": "_",
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id"}
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
     "name": "si_create_dictionary_clickhouse_where_unresolved_rejected",
     "sql": "CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' WHERE 'id > 0')) LAYOUT(HASHED()) LIFETIME(0)",
     "dynamic": {

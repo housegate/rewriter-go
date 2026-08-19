@@ -1247,9 +1247,16 @@ func TestStorageIntegrityCallableInFunctionsFailClosed(t *testing.T) {
 		`SELECT notIn(id, hg_unsafe.db1__t) FROM other.u`,
 		`SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
 		`SELECT globalNotIn(id, hg_unsafe.db1__t) FROM other.u`,
+		`SELECT nullIn(id, hg_safe.db1__t) FROM other.u`,
+		`SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.u`,
+		`SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u`,
+		`SELECT globalNotNullIn(id, hg_unsafe.db1__t) FROM other.u`,
 		`CREATE TABLE other.x AS SELECT in(id, hg_safe.db1__t) FROM other.u`,
 		`INSERT INTO other.u SELECT notIn(id, hg_unsafe.db1__t) FROM other.v`,
 		`CREATE VIEW other.v AS SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
+		`CREATE TABLE other.x AS SELECT nullIn(id, hg_safe.db1__t) FROM other.u`,
+		`INSERT INTO other.u SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.v`,
+		`CREATE VIEW other.v AS SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u`,
 	} {
 		t.Run(sql, func(t *testing.T) {
 			ast, err := e.ParseOne(sql)
