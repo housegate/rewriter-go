@@ -7,7 +7,7 @@ import (
 )
 
 func TestDescribeMetadataSQL(t *testing.T) {
-	want := "SELECT name, type, default_type, default_expression, comment, codec_expression, ttl_expression FROM system.columns WHERE database = 'hg_safe' AND table = 'db1__t' AND name != '_hg_row_id' ORDER BY position"
+	want := "SELECT name, type, default_kind AS default_type, default_expression, comment, '' AS codec_expression, '' AS ttl_expression FROM system.columns WHERE database = 'hg_safe' AND table = 'db1__t' AND name != '_hg_row_id' ORDER BY position"
 	if got := describeMetadataSQL("hg_safe.db1__t", "_hg_row_id"); got != want {
 		t.Fatalf("got %q", got)
 	}
