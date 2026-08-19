@@ -13,9 +13,11 @@ import (
 func describeMetadataSQL(safeTable, rid string) string {
 	db, table := splitPhysicalName(safeTable)
 	// system.columns exposes default_kind; alias it to the native DESCRIBE
-	// result's default_type column so clients keep the expected seven-field
-	// metadata shape on ClickHouse 25.8.
-	return "SELECT name, type, default_kind AS default_type, default_expression, comment, codec_expression, ttl_expression FROM system.columns WHERE database = '" +
+	// result's default_type column. Protocol-owned SI DDL never declares a
+	// column CODEC or TTL, so the two remaining native DESCRIBE fields are
+	// static empty strings (and ttl_expression is not a system.columns field
+	// on ClickHouse 25.8). This preserves the executable seven-field shape.
+	return "SELECT name, type, default_kind AS default_type, default_expression, comment, '' AS codec_expression, '' AS ttl_expression FROM system.columns WHERE database = '" +
 		escapeSQLLiteral(db) + "' AND table = '" + escapeSQLLiteral(table) + "' AND name != '" + escapeSQLLiteral(rid) + "' ORDER BY position"
 }
 
