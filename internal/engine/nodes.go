@@ -233,6 +233,8 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 	args, _ := fn["args"].([]any)
 	lower := strings.ToLower(name)
 	switch lower {
+	case "in", "notin", "globalin", "globalnotin":
+		return decodeCallableInNamespaceRef(lower, args)
 	case "remote", "remotesecure", "cluster", "clusterallreplicas":
 		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 1), true
 	case "merge":
@@ -270,6 +272,31 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
 	}
 	return NamespaceRef{}, false
+}
+
+func decodeCallableInNamespaceRef(name string, args []any) (NamespaceRef, bool) {
+	if len(args) != 2 || !isNamespaceIdentifierArg(args[1]) {
+		return NamespaceRef{}, false
+	}
+	display := map[string]string{
+		"in": "IN", "notin": "NOT IN",
+		"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN",
+	}[name]
+	ref := decodeNamespaceSingle(NamespaceRefInTable, display, args[1])
+	if ref.Target.Table == "" && !ref.Resolved {
+		return NamespaceRef{}, false
+	}
+	return ref, true
+}
+
+func isNamespaceIdentifierArg(arg any) bool {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, column := m["column"]
+	_, dot := m["dot"]
+	return column || dot
 }
 
 func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
@@ -324,7 +351,7 @@ func decodeDictionarySourceNamespaceRef(property map[string]any) (NamespaceRef, 
 	tuple, _ := settings["tuple"].(map[string]any)
 	pairs, _ := tuple["expressions"].([]any)
 	var databaseArg, tableArg any
-	hasQuery := false
+	hasOpaqueSetting := false
 	for _, rawPair := range pairs {
 		pair, _ := rawPair.(map[string]any)
 		body, _ := pair["tuple"].(map[string]any)
@@ -339,17 +366,25 @@ func decodeDictionarySourceNamespaceRef(property map[string]any) (NamespaceRef, 
 			databaseArg = expressions[1]
 		case "TABLE":
 			tableArg = expressions[1]
-		case "QUERY":
-			// A query string can address arbitrary tables and is intentionally
-			// left unresolved for conservative SI policy.
-			hasQuery = true
+		case "QUERY", "WHERE", "INVALIDATE_QUERY", "NAME":
+			// SQL-bearing filters/probes and named collections can override or
+			// extend DB/TABLE. Even when those two fields are constant, the final
+			// execution namespace is not proven and SI policy must fail closed.
+			hasOpaqueSetting = true
 		}
 	}
-	if hasQuery && tableArg == nil {
-		if databaseArg == nil {
+	if hasOpaqueSetting {
+		if databaseArg != nil {
+			ref = decodeNamespacePair(
+				NamespaceRefDictionarySource, "CLICKHOUSE", []any{databaseArg, tableArg}, 0)
+			ref.Resolved = false
+			ref.UsesCurrentDatabase = false
 			return ref, true
 		}
-		return decodeNamespacePair(NamespaceRefDictionarySource, "CLICKHOUSE", []any{databaseArg}, 0), true
+		if tableArg != nil {
+			ref.Target.Table, _ = tableFunctionArgText(tableArg)
+		}
+		return ref, true
 	}
 	if databaseArg == nil && tableArg == nil {
 		return ref, true
