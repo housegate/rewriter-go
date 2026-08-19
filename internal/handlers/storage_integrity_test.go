@@ -1238,3 +1238,61 @@ func TestStorageIntegrityClickHouseDictionarySourceFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestStorageIntegrityCallableInFunctionsFailClosed(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, sql := range []string{
+		`SELECT in(id, hg_safe.db1__t) FROM other.u`,
+		`SELECT notIn(id, hg_unsafe.db1__t) FROM other.u`,
+		`SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
+		`SELECT globalNotIn(id, hg_unsafe.db1__t) FROM other.u`,
+		`CREATE TABLE other.x AS SELECT in(id, hg_safe.db1__t) FROM other.u`,
+		`INSERT INTO other.u SELECT notIn(id, hg_unsafe.db1__t) FROM other.v`,
+		`CREATE VIEW other.v AS SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(sql, "SELECT") {
+				resp, err := RewriteSelect(e, ast, dynOpt(dyn), sql)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertStorageIntegrityReject(t, resp, "storage-integrity")
+				return
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+}
+
+func TestStorageIntegrityClickHouseDictionaryOpaqueSettingsFailClosed(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, sql := range []string{
+		`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' WHERE 'id > 0')) LAYOUT(HASHED()) LIFETIME(0)`,
+		`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' INVALIDATE_QUERY 'SELECT max(updated_at) FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+		`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(NAME 'shared_clickhouse')) LAYOUT(HASHED()) LIFETIME(0)`,
+		`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(NAME 'shared_clickhouse' DB 'other' TABLE 'u')) LAYOUT(HASHED()) LIFETIME(0)`,
+		`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			assertStorageIntegrityReject(t, resp, "storage-integrity CLICKHOUSE dictionary source namespace is not statically resolvable")
+		})
+	}
+}

@@ -437,6 +437,22 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
 		},
 		{
+			`SELECT in(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
 			`SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`,
 			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeIndex", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
 		},
@@ -487,6 +503,26 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 		{
 			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
 			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' WHERE 'id > 0')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' INVALIDATE_QUERY 'SELECT max(updated_at) FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(NAME 'shared_clickhouse')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(NAME 'shared_clickhouse' DB 'other' TABLE 'u')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
 		},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
