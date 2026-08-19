@@ -232,9 +232,10 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 	name, _ := fn["name"].(string)
 	args, _ := fn["args"].([]any)
 	lower := strings.ToLower(name)
+	if canonical, ok := canonicalCallableInName(lower); ok {
+		return decodeCallableInNamespaceRef(canonical, args)
+	}
 	switch lower {
-	case "in", "notin", "nullin", "notnullin", "globalin", "globalnotin", "globalnullin", "globalnotnullin":
-		return decodeCallableInNamespaceRef(lower, args)
 	case "remote", "remotesecure", "cluster", "clusterallreplicas":
 		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 1), true
 	case "merge":
@@ -272,6 +273,19 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
 	}
 	return NamespaceRef{}, false
+}
+
+func canonicalCallableInName(name string) (string, bool) {
+	// ClickHouse registers the IgnoreSet implementations as callable aliases of
+	// the same IN family. Normalize that implementation suffix before applying
+	// the namespace-target policy so every alias follows one recognition path.
+	canonical := strings.TrimSuffix(name, "ignoreset")
+	switch canonical {
+	case "in", "notin", "nullin", "notnullin", "globalin", "globalnotin", "globalnullin", "globalnotnullin":
+		return canonical, true
+	default:
+		return "", false
+	}
 }
 
 func decodeCallableInNamespaceRef(name string, args []any) (NamespaceRef, bool) {
