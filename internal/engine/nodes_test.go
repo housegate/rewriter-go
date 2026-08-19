@@ -469,6 +469,38 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
 		},
 		{
+			`SELECT inIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT nullInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notNullInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNullInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotNullInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
 			`SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`,
 			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeIndex", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
 		},
