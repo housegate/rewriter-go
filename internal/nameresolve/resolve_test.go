@@ -269,3 +269,116 @@ func TestBuildDynamicTablePrefix(t *testing.T) {
 		t.Fatalf("parity: buildDynamicTableName=%q != prefix(%q)+origin_table", full, prefix)
 	}
 }
+
+func siArgs(upstream string) *pb.RewriteTableDynamicArgs {
+	return &pb.RewriteTableDynamicArgs{
+		DatabaseMap:                      map[string]string{"db1": "phys"},
+		KnownPhysicalDatabases:           []string{"phys"},
+		UpstreamLogicalDatabaseInContext: upstream,
+		StorageIntegrity: &pb.StorageIntegrityArgs{
+			Tables: map[string]*pb.StorageIntegrityArgs_Table{
+				"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"},
+			},
+			ReadMode:        pb.StorageIntegrityArgs_READ_MODE_SAFE,
+			ContractVersion: pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+		},
+	}
+}
+
+func TestLookupStorageIntegrity(t *testing.T) {
+	tbl, key, ok := LookupStorageIntegrity("db1", "t", siArgs(""))
+	if !ok || key != "db1.t" || tbl.GetSafeTable() != "hg_safe.db1__t" {
+		t.Fatalf("qualified hit: ok=%v key=%q tbl=%v", ok, key, tbl)
+	}
+	if _, key, ok := LookupStorageIntegrity("", "t", siArgs("db1")); !ok || key != "db1.t" {
+		t.Fatalf("USE-resolved hit: ok=%v key=%q", ok, key)
+	}
+	if _, _, ok := LookupStorageIntegrity("", "t", siArgs("")); ok {
+		t.Fatal("unqualified with no context must miss")
+	}
+	if _, _, ok := LookupStorageIntegrity("db1", "u", siArgs("")); ok {
+		t.Fatal("non-SI table must miss")
+	}
+	if _, _, ok := LookupStorageIntegrity("db1", "t", &pb.RewriteTableDynamicArgs{}); ok {
+		t.Fatal("no storage_integrity block must miss")
+	}
+	if _, _, ok := LookupStorageIntegrity("db1", "t", nil); ok {
+		t.Fatal("nil args must miss")
+	}
+}
+
+func TestReservedRowIDColumn(t *testing.T) {
+	if got := ReservedRowIDColumn(siArgs("")); got != "_hg_row_id" {
+		t.Fatalf("default = %q", got)
+	}
+	a := siArgs("")
+	a.StorageIntegrity.ReservedRowIdColumn = "_rid"
+	if got := ReservedRowIDColumn(a); got != "_rid" {
+		t.Fatalf("explicit = %q", got)
+	}
+	if got := ReservedRowIDColumn(nil); got != "_hg_row_id" {
+		t.Fatalf("nil = %q", got)
+	}
+}
+
+func TestResolveAccessed_flagsStorageIntegrity(t *testing.T) {
+	sel := Selection{Mode: ModeDynamic, Dynamic: siArgs("db1")}
+	if a := ResolveAccessed("db1", "t", sel); !a.IsStorageIntegrity || a.LogicalDB != "db1" || a.PhysicalDB != "phys" {
+		t.Fatalf("qualified: %+v", a)
+	}
+	if a := ResolveAccessed("", "t", sel); !a.IsStorageIntegrity {
+		t.Fatalf("via upstream: %+v", a)
+	}
+	if a := ResolveAccessed("db1", "u", sel); a.IsStorageIntegrity {
+		t.Fatalf("non-SI must not be flagged: %+v", a)
+	}
+}
+
+func TestResolveAccessed_storageIntegrityWinsOverRemoteFlag(t *testing.T) {
+	dyn := siArgs("db1")
+	dyn.LogicalDatabaseToRemoteUpstreamIndex = map[string]string{"db1": "peer"}
+	sel := Selection{Mode: ModeDynamic, Dynamic: dyn}
+	a := ResolveAccessed("db1", "t", sel)
+	if !a.IsStorageIntegrity || a.IsRemote {
+		t.Fatalf("accessed=%+v, want SI=true and remote=false", a)
+	}
+}
+
+func TestLookupStorageIntegrityPhysical_reservesConfiguredDatabases(t *testing.T) {
+	dyn := siArgs("")
+	for _, tc := range []struct {
+		db, table, upstream string
+	}{
+		{"hg_safe", "db1__t", ""},
+		{"hg_safe", "any_other_table", ""},
+		{"hg_unsafe", "db1__t", ""},
+		{"", "db1__t", "hg_safe"},
+		{"", "any_other_table", "hg_unsafe"},
+	} {
+		dyn.UpstreamLogicalDatabaseInContext = tc.upstream
+		if _, ok := LookupStorageIntegrityPhysical(tc.db, tc.table, dyn); !ok {
+			t.Errorf("db=%q table=%q context=%q: want reserved physical hit", tc.db, tc.table, tc.upstream)
+		}
+	}
+	if _, ok := LookupStorageIntegrityPhysical("other", "db1__t", dyn); ok {
+		t.Fatal("ordinary database must not be reserved")
+	}
+	if !IsStorageIntegrityPhysicalDatabase("hg_safe", dyn) || !IsStorageIntegrityPhysicalDatabase("hg_unsafe", dyn) {
+		t.Fatal("safe and unsafe databases must both be reserved")
+	}
+}
+
+func TestResolveAccessed_unqualifiedConfiguredPhysicalContext(t *testing.T) {
+	dyn := siArgs("hg_safe")
+	a := ResolveAccessed("", "db1__t", Selection{Mode: ModeDynamic, Dynamic: dyn})
+	if !a.IsStorageIntegrity || a.LogicalDB != "" || a.PhysicalDB != "hg_safe" || a.IsRemote {
+		t.Fatalf("accessed=%+v, want physical-context SI classification", a)
+	}
+}
+
+func TestStorageIntegrityWriteRejectMessage(t *testing.T) {
+	want := "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	if got := StorageIntegrityWriteRejectMessage("db1.t"); got != want {
+		t.Fatalf("got %q", got)
+	}
+}

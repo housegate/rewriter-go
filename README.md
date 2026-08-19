@@ -27,6 +27,19 @@ via a **dual-dialect + raw-SQL** architecture — see the
 
 Known limitation: a GLOBAL JOIN whose left operand is a `remote()` function cannot be synthesised through polyglot's generator — such cases are left un-GLOBAL and allow-listed in the harness corpora.
 
+**Storage-integrity read surface (Spec G) complete.** Versioned v1 requests can map
+logical tables to safe/unsafe physical tables. SELECT uses a derived table in SAFE or
+UNSAFE_LATEST mode while hiding the reserved row-id column; EXISTS maps to the safe
+table; DESCRIBE emits a metadata-shaped `system.columns` query. Non-lane writes and
+DDL reject fail-closed (INSERT intentionally keeps the existing signed-ingress path),
+and every accepted SI request positively acknowledges contract v1 in the response.
+An SI logical key is usable only when its database is present in the account-filtered
+`database_map` (including INSERT); `known_physical_databases` does not grant that access.
+Every database that hosts a configured safe/unsafe table is a protocol-owned namespace:
+direct table nodes, table functions, USE/SHOW, database DDL, and database-scope DCL all
+reject with SI-classified metadata. V1 validation rejects malformed logical/physical
+table keys and unknown read modes before acknowledging the contract.
+
 ## Layout
 
 | Path | What |

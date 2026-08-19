@@ -629,3 +629,222 @@ func TestNativeRewrite_deepNestingFailsOpen(t *testing.T) {
 		t.Errorf("SQL must echo input on SyntaxError")
 	}
 }
+
+func siContractDynamic(version pb.StorageIntegrityContractVersion) *pb.RewriteTableDynamicArgs {
+	return &pb.RewriteTableDynamicArgs{
+		DatabaseMap:            map[string]string{"db1": "phys"},
+		KnownPhysicalDatabases: []string{"phys"},
+		StorageIntegrity: &pb.StorageIntegrityArgs{
+			Tables: map[string]*pb.StorageIntegrityArgs_Table{
+				"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"},
+			},
+			ReadMode:        pb.StorageIntegrityArgs_READ_MODE_SAFE,
+			ContractVersion: version,
+		},
+	}
+}
+
+func tableRewriteDynamic(a *pb.RewriteTableDynamicArgs) *pb.RewriteOption {
+	return &pb.RewriteOption{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{DynamicArgs: a}}}
+}
+
+func tableRewriteStatic() *pb.RewriteOption {
+	return &pb.RewriteOption{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{StaticArgs: &pb.RewriteTableStaticArgs{}}}}
+}
+
+func nativeWithExactOptions(t *testing.T, e engine.Engine, opts []*pb.RewriteOption) *NativeRewriter {
+	t.Helper()
+	return New(e, WithOptions(func(string) []*pb.RewriteOption { return opts }))
+}
+
+func TestStorageIntegrityContract_AcceptedV1AcknowledgedOnSuccessAndSyntaxError(t *testing.T) {
+	opts := []*pb.RewriteOption{tableRewriteDynamic(siContractDynamic(
+		pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1))}
+
+	e := newEngine(t)
+	r := nativeWithExactOptions(t, e, opts)
+	defer r.Close()
+	res, err := r.Rewrite(context.Background(), "SELECT a FROM db1.t", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success ||
+		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		t.Fatalf("success = %+v, want Success/V1", res)
+	}
+
+	parseFail := nativeWithExactOptions(t, &fakeEngine{parseErr: errors.New("parse boom")}, opts)
+	defer parseFail.Close()
+	res, err = parseFail.Rewrite(context.Background(), "SELECT (", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_SyntaxError || res.SQL != "SELECT (" ||
+		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		t.Fatalf("syntax = %+v, want SyntaxError/original/V1", res)
+	}
+}
+
+func TestStorageIntegrityContract_RejectsMissingOrUnknownVersionBeforeParse(t *testing.T) {
+	for name, version := range map[string]pb.StorageIntegrityContractVersion{
+		"unspecified": pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED,
+		"unknown":     pb.StorageIntegrityContractVersion(99),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := nativeWithExactOptions(t, &fakeEngine{parseErr: errors.New("must not parse")},
+				[]*pb.RewriteOption{tableRewriteDynamic(siContractDynamic(version))})
+			defer r.Close()
+			res, err := r.Rewrite(context.Background(), "SELECT a FROM db1.t", "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_InvalidRewriteRequest || res.SQL != "SELECT a FROM db1.t" ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+				t.Fatalf("res = %+v, want InvalidRewriteRequest/original/unspecified", res)
+			}
+			if !strings.Contains(res.Message, "storage-integrity contract version V1 is required") {
+				t.Fatalf("message = %q", res.Message)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_RejectsMalformedEntriesBeforeAcknowledgement(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*pb.RewriteTableDynamicArgs)
+		message string
+	}{
+		{"nil table", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"] = nil }, "must not be nil"},
+		{"missing safe", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].SafeTable = "" }, "requires non-empty safe_table and unsafe_table"},
+		{"missing unsafe", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].UnsafeTable = "" }, "requires non-empty safe_table and unsafe_table"},
+		{"malformed logical key", func(d *pb.RewriteTableDynamicArgs) {
+			d.StorageIntegrity.Tables["db1.t.extra"] = d.StorageIntegrity.Tables["db1.t"]
+			delete(d.StorageIntegrity.Tables, "db1.t")
+		}, "logical table key db1.t.extra must have exact <database>.<table> shape"},
+		{"malformed safe table", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.Tables["db1.t"].SafeTable = "hg_safe" }, "safe_table hg_safe must have exact <database>.<table> shape"},
+		{"malformed unsafe table", func(d *pb.RewriteTableDynamicArgs) {
+			d.StorageIntegrity.Tables["db1.t"].UnsafeTable = "hg_unsafe.db1__t.extra"
+		}, "unsafe_table hg_unsafe.db1__t.extra must have exact <database>.<table> shape"},
+		{"unknown read mode", func(d *pb.RewriteTableDynamicArgs) {
+			d.StorageIntegrity.ReadMode = pb.StorageIntegrityArgs_ReadMode(99)
+		}, "read_mode 99 is not supported"},
+		{"invalid reserved column", func(d *pb.RewriteTableDynamicArgs) { d.StorageIntegrity.ReservedRowIdColumn = "bad-name" }, "reserved_row_id_column must be a simple identifier"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			tc.mutate(dyn)
+			r := nativeWithExactOptions(t, &fakeEngine{parseErr: errors.New("must not parse")},
+				[]*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+			res, err := r.Rewrite(context.Background(), "SELECT a FROM db1.t", "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_InvalidRewriteRequest ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED ||
+				!strings.Contains(res.Message, tc.message) {
+				t.Fatalf("res=%+v, want InvalidRewriteRequest/no-ack/message %q", res, tc.message)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_NoOrEmptySISurfaceKeepsLegacyZero(t *testing.T) {
+	e := newEngine(t)
+	for name, opts := range map[string][]*pb.RewriteOption{
+		"no block": {tableRewriteDynamic(&pb.RewriteTableDynamicArgs{
+			DatabaseMap: map[string]string{"db1": "phys"}})},
+		"empty tables": {tableRewriteDynamic(&pb.RewriteTableDynamicArgs{
+			DatabaseMap: map[string]string{"db1": "phys"},
+			StorageIntegrity: &pb.StorageIntegrityArgs{
+				ContractVersion: pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+			}})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := nativeWithExactOptions(t, e, opts)
+			res, err := r.Rewrite(context.Background(), "SELECT a FROM db1.t", "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_Success ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+				t.Fatalf("res = %+v, want Success/unspecified", res)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_EffectiveTableRewriteIsLastWins(t *testing.T) {
+	v1 := tableRewriteDynamic(siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1))
+	missing := tableRewriteDynamic(siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED))
+	static := tableRewriteStatic()
+	e := newEngine(t)
+	cases := []struct {
+		name     string
+		opts     []*pb.RewriteOption
+		wantCode pb.RewriteCode
+		wantAck  pb.StorageIntegrityContractVersion
+	}{
+		{"v1 shadowed by static", []*pb.RewriteOption{v1, static}, pb.RewriteCode_Success, pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED},
+		{"v1 after static", []*pb.RewriteOption{static, v1}, pb.RewriteCode_Success, pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1},
+		{"missing shadowed by static", []*pb.RewriteOption{missing, static}, pb.RewriteCode_Success, pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED},
+		{"missing after static", []*pb.RewriteOption{static, missing}, pb.RewriteCode_InvalidRewriteRequest, pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := nativeWithExactOptions(t, e, tc.opts)
+			res, err := r.Rewrite(context.Background(), "SELECT a FROM db1.t", "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != tc.wantCode || res.StorageIntegrityContractVersion != tc.wantAck {
+				t.Fatalf("res = %+v, want code=%v ack=%v", res, tc.wantCode, tc.wantAck)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_DBLevelUsesDynamicMapWithoutAcknowledgingShadowedSI(t *testing.T) {
+	v1 := tableRewriteDynamic(siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1))
+	static := tableRewriteStatic()
+	e := newEngine(t)
+	for name, tc := range map[string]struct {
+		opts    []*pb.RewriteOption
+		wantAck pb.StorageIntegrityContractVersion
+	}{
+		"SI dynamic shadowed for table policy": {[]*pb.RewriteOption{v1, static}, pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED},
+		"SI dynamic active":                    {[]*pb.RewriteOption{static, v1}, pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := nativeWithExactOptions(t, e, tc.opts)
+			res, err := r.Rewrite(context.Background(), "USE db1", "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_USE ||
+				res.StorageIntegrityContractVersion != tc.wantAck || !strings.Contains(res.SQL, "phys") {
+				t.Fatalf("res = %+v", res)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_DescribeRetainsAcknowledgement(t *testing.T) {
+	e := newEngine(t)
+	r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(siContractDynamic(
+		pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1))})
+	defer r.Close()
+
+	res, err := r.Rewrite(context.Background(), "DESCRIBE db1.t", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_DESCRIBE ||
+		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		t.Fatalf("res = %+v, want Success/DESCRIBE/V1", res)
+	}
+}

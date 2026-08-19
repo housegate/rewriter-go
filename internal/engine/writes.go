@@ -317,6 +317,197 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 	return info, nil
 }
 
+// AllWriteTargets returns every table target needed by the fail-closed policy
+// preflight, including targets that the normal rewrite visitor intentionally
+// omits because the statement will be rejected generically (all names in a
+// multi-DROP and cross-table ALTER sources/destinations). Embedded SELECT bodies
+// are classified separately by CollectEmbeddedSelectSources so INSERT's signed
+// target exception cannot accidentally exempt its read sources; CREATE VIEW
+// bodies continue through the dedicated SELECT-body handler.
+func AllWriteTargets(e Engine, ast AST) ([]TableTarget, error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	if body == nil {
+		return nil, nil
+	}
+	var out []TableTarget
+	if kind == NodeDropTable {
+		if names, ok := body["names"].([]any); ok {
+			for _, name := range names {
+				if tbl, ok := name.(map[string]any); ok {
+					out = append(out, decodeTableTarget(tbl))
+				}
+			}
+		}
+	} else {
+		writeSlots(kind, body, func(_ WriteRole, tbl map[string]any) {
+			target := decodeTableTarget(tbl)
+			if target.DB != "" || target.Table != "" {
+				out = append(out, target)
+			}
+		})
+	}
+	if kind == NodeAlterTable {
+		extra, err := alterCrossTableTargets(e, body)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, extra...)
+	}
+	if kind == NodeCommand {
+		raw, _, err := RawTableRefs(e, ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, raw...)
+		dbs, err := rawCommandDatabaseTargets(e, ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, dbs...)
+	}
+	if kind == NodeCreateDB || kind == NodeDropDB {
+		db, _, _, err := DatabaseTarget(ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, TableTarget{DB: db})
+	}
+	if kind == NodeCreateTable || kind == NodeInsert {
+		functions, err := CollectTableFunctionTargets(ast)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, functions...)
+	}
+	return out, nil
+}
+
+// rawCommandDatabaseTargets extracts database-name operands from the database
+// DDL forms Polyglot flattens to command nodes. TableTarget{DB: name, Table: ""}
+// is the existing database-level shape used by AccessedTable metadata.
+func rawCommandDatabaseTargets(e Engine, ast AST) ([]TableTarget, error) {
+	_, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := body["this"].(string)
+	toks, err := tokenizeRaw(e, raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(toks) < 2 {
+		return nil, nil
+	}
+	head := strings.ToUpper(toks[0].Text)
+	if head != "RENAME" && head != "ATTACH" && head != "DETACH" {
+		return nil, nil
+	}
+	// DATABASE is the object keyword immediately after the verb. Do not scan
+	// deeper: ATTACH GRANT may contain a CREATE DATABASE privilege and must stay
+	// in the grant handler rather than being mistaken for database DDL.
+	database := 1
+	if !strings.EqualFold(toks[database].Text, "DATABASE") {
+		return nil, nil
+	}
+	var out []TableTarget
+	for i := database + 1; i < len(toks); i++ {
+		if isNameTok(toks[i].TokenType) {
+			out = append(out, TableTarget{DB: toks[i].Text})
+			break
+		}
+	}
+	if head == "RENAME" {
+		for i := database + 1; i+1 < len(toks); i++ {
+			if toks[i].TokenType == "TO" || strings.EqualFold(toks[i].Text, "TO") {
+				for j := i + 1; j < len(toks); j++ {
+					if isNameTok(toks[j].TokenType) {
+						out = append(out, TableTarget{DB: toks[j].Text})
+						return out, nil
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func alterCrossTableTargets(e Engine, body map[string]any) ([]TableTarget, error) {
+	actions, _ := body["actions"].([]any)
+	var out []TableTarget
+	for _, action := range actions {
+		am, ok := action.(map[string]any)
+		if !ok {
+			continue
+		}
+		if raw, ok := am["Raw"].(map[string]any); ok {
+			sql, _ := raw["sql"].(string)
+			if !rawActionIsCrossTable(sql) {
+				continue
+			}
+			toks, err := tokenizeRaw(e, sql)
+			if err != nil {
+				return nil, err
+			}
+			if target, ok := rawActionCrossTableTarget(toks); ok {
+				out = append(out, target)
+			}
+			continue
+		}
+		collectNestedTableTargets(am, &out)
+	}
+	return out, nil
+}
+
+func collectNestedTableTargets(node any, out *[]TableTarget) {
+	switch n := node.(type) {
+	case map[string]any:
+		if tbl, ok := n["table"].(map[string]any); ok {
+			if target := decodeTableTarget(tbl); target.Table != "" {
+				*out = append(*out, target)
+				return
+			}
+		}
+		for _, child := range n {
+			collectNestedTableTargets(child, out)
+		}
+	case []any:
+		for _, child := range n {
+			collectNestedTableTargets(child, out)
+		}
+	}
+}
+
+func rawActionCrossTableTarget(toks []rawToken) (TableTarget, bool) {
+	for i := 0; i < len(toks); i++ {
+		if toks[i].TokenType == "FROM" {
+			if target, ok := rawTokenTableTarget(toks, i+1); ok {
+				return target, true
+			}
+			continue
+		}
+		if toks[i].TokenType == "TO" && i+1 < len(toks) && toks[i+1].TokenType == "TABLE" {
+			if target, ok := rawTokenTableTarget(toks, i+2); ok {
+				return target, true
+			}
+		}
+	}
+	return TableTarget{}, false
+}
+
+func rawTokenTableTarget(toks []rawToken, i int) (TableTarget, bool) {
+	if i >= len(toks) || !isNameTok(toks[i].TokenType) {
+		return TableTarget{}, false
+	}
+	first := toks[i].Text
+	if i+2 < len(toks) && toks[i+1].TokenType == "DOT" && isNameTok(toks[i+2].TokenType) {
+		return TableTarget{DB: first, Table: toks[i+2].Text}, true
+	}
+	return TableTarget{Table: first}, true
+}
+
 // RewriteWriteTargets visits every rewriteable table ref and applies the
 // decision returned by decide. Only ActionRename is honored — writes are never
 // rewritten to remote() (ActionRemote/ActionSkip leave the node untouched).
@@ -613,7 +804,9 @@ func classifyWriteCommand(sql string) CommandSub {
 		return CmdBareReject
 	case strings.HasPrefix(u, "ALTER TABLE") && containsWord(u, "UPDATE"):
 		return CmdAlterUpdate
-	case strings.HasPrefix(u, "DETACH"): // DETACH TABLE/VIEW → reject (writes.cc:383-385)
+	case attachDetachDDL(u, "DETACH"): // DETACH TABLE/VIEW/DB/DICTIONARY
+		return CmdBareReject
+	case attachDetachDDL(u, "ATTACH"): // ATTACH GRANT deliberately falls through
 		return CmdBareReject
 	case strings.HasPrefix(u, "DROP DICTIONARY"): // ONLY DICTIONARY → reject (writes.cc:387-389).
 		// DROP TABLE/VIEW/DATABASE are STRUCTURED nodes (never here); DROP
@@ -630,6 +823,22 @@ func classifyWriteCommand(sql string) CommandSub {
 		// — not a write this phase rejects → pass through (Phase 3/4 / SELECT).
 		return CmdNone
 	}
+}
+
+func attachDetachDDL(upperSQL, verb string) bool {
+	if !strings.HasPrefix(upperSQL, verb+" ") {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(upperSQL, verb))
+	for _, prefix := range []string{
+		"TABLE ", "TEMPORARY TABLE ", "VIEW ", "MATERIALIZED VIEW ",
+		"DATABASE ", "DICTIONARY ",
+	} {
+		if strings.HasPrefix(rest, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // containsWord reports whether upper-cased haystack contains word as a
@@ -701,12 +910,15 @@ func isNameTok(tt string) bool {
 // QUOTED_IDENTIFIER the .Text already has its backticks stripped, so the Target
 // carries the unquoted identifier — matching the handler's unquoted rewrite key.
 func scanTableRefs(toks []rawToken, sub CommandSub) []tableRefSpan {
-	start := 0
+	start := -1
 	for i, tk := range toks {
 		if strings.EqualFold(tk.Text, "TABLE") || strings.EqualFold(tk.Text, "TABLES") {
 			start = i + 1
 			break
 		}
+	}
+	if start < 0 {
+		return nil
 	}
 	var out []tableRefSpan
 	i := start
@@ -726,7 +938,7 @@ func scanTableRefs(toks []rawToken, sub CommandSub) []tableRefSpan {
 			i++
 		}
 		out = append(out, span)
-		if sub == CmdAlterUpdate {
+		if sub == CmdAlterUpdate || sub == CmdBareReject {
 			break
 		}
 	}
@@ -734,9 +946,10 @@ func scanTableRefs(toks []rawToken, sub CommandSub) []tableRefSpan {
 }
 
 // RawTableRefs returns the table refs in a tier-C raw command (read-only), in
-// document order, together with the command sub-kind. For a non-rewriteable
-// command (anything other than rename/exchange/alter_update) it returns no refs
-// and the classified sub-kind, so the handler can decide pass-through vs reject.
+// document order, together with the command sub-kind. Bare rejects return at
+// most their first target after TABLE/TABLES so callers can attach fail-closed
+// metadata without attempting a rewrite. Other non-rewriteable commands return
+// no refs and the classified sub-kind.
 func RawTableRefs(e Engine, ast AST) ([]TableTarget, CommandSub, error) {
 	_, body, _, err := bodyOf(ast)
 	if err != nil {
@@ -744,7 +957,7 @@ func RawTableRefs(e Engine, ast AST) ([]TableTarget, CommandSub, error) {
 	}
 	raw, _ := body["this"].(string)
 	sub := classifyWriteCommand(raw)
-	if sub != CmdRename && sub != CmdExchange && sub != CmdAlterUpdate {
+	if sub != CmdRename && sub != CmdExchange && sub != CmdAlterUpdate && sub != CmdBareReject {
 		return nil, sub, nil
 	}
 	toks, err := tokenizeRaw(e, raw)

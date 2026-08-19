@@ -759,6 +759,8 @@ func TestInspectWrite_commandSubKinds(t *testing.T) {
 		{"EXCHANGE TABLES db.a AND db.b", CmdExchange},
 		{"ALTER TABLE db.t UPDATE x = 1 WHERE y = 2", CmdAlterUpdate},
 		{"OPTIMIZE TABLE db.t", CmdBareReject},
+		{"ATTACH TABLE db.t", CmdBareReject},
+		{"ATTACH GRANT SELECT ON db.t TO user", CmdNone},
 		{"USE db", CmdNone},
 		{"EXISTS TABLE db.t", CmdNone},
 	}
@@ -787,6 +789,7 @@ func TestClassifyWriteCommand(t *testing.T) {
 		// covered by the structured alter_table handler + corpus, not here.
 		{"ALTER TABLE db.t ADD COLUMN x Int32", CmdNone},
 		{"OPTIMIZE TABLE db.t", CmdBareReject},
+		{"ATTACH TABLE db.t", CmdBareReject},
 		{"UNDROP TABLE db.t", CmdBareReject},
 		{"MOVE db.t TO SHARD '...'", CmdBareReject},
 		{"BACKUP TABLE db.t TO Disk('d','f')", CmdBareReject},
@@ -825,7 +828,11 @@ func TestClassifyWriteCommand_rejectsDDL(t *testing.T) {
 	}{
 		// command-node DDL rejects — table/dictionary/database only (writes.cc):
 		{"DETACH TABLE db.t", CmdBareReject},
+		{"ATTACH TABLE db.t", CmdBareReject},
 		{"DETACH VIEW db.v", CmdBareReject},
+		{"DETACH DATABASE db", CmdBareReject},
+		{"ATTACH DATABASE db FROM '/var/lib/clickhouse/data/'", CmdBareReject},
+		{"ATTACH GRANT SELECT ON db.t TO user", CmdNone},
 		{"DROP DICTIONARY db.d", CmdBareReject}, // command-node DROP = DICTIONARY only
 		{"RENAME DATABASE db1 TO db2", CmdBareReject},
 		{"RENAME DICTIONARY db.d1 TO db.d2", CmdBareReject},
@@ -854,6 +861,61 @@ func TestClassifyWriteCommand_rejectsDDL(t *testing.T) {
 	for _, c := range cases {
 		if got := classifyWriteCommand(c.sql); got != c.sub {
 			t.Errorf("classifyWriteCommand(%q)=%q want %q", c.sql, got, c.sub)
+		}
+	}
+}
+
+func TestAllWriteTargets_tableFunctionsAndDatabaseDDL(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`INSERT INTO FUNCTION remote('h', 'hg_unsafe', 'db1__t') SELECT 1`, []TableTarget{{DB: "hg_unsafe", Table: "db1__t"}}},
+		{`INSERT INTO FUNCTION cluster('c', 'hg_safe.db1__t') SELECT 1`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`CREATE TABLE other.x AS merge('hg_safe', 'db1__t')`, []TableTarget{{DB: "other", Table: "x"}, {DB: "hg_safe", Table: "db1__t"}}},
+		{`CREATE DATABASE hg_safe`, []TableTarget{{DB: "hg_safe"}}},
+		{`DROP DATABASE hg_unsafe`, []TableTarget{{DB: "hg_unsafe"}}},
+		{`RENAME DATABASE hg_safe TO other`, []TableTarget{{DB: "hg_safe"}, {DB: "other"}}},
+		{`ATTACH DATABASE hg_safe FROM '/var/lib/clickhouse/data/'`, []TableTarget{{DB: "hg_safe"}}},
+		{`DETACH DATABASE hg_unsafe`, []TableTarget{{DB: "hg_unsafe"}}},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := AllWriteTargets(e, ast)
+		if err != nil {
+			t.Fatalf("targets %q: %v", tc.sql, err)
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%q target[%d]=%+v want %+v", tc.sql, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestAllWriteTargets_crossAlterSkipsDecoyFromTokens(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		`ALTER TABLE other.u ATTACH PARTITION 'FROM' FROM hg_safe.db1__t`,
+		`ALTER TABLE other.u ATTACH PARTITION 1 /* FROM decoy */ FROM db1.t`,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", sql, err)
+		}
+		got, err := AllWriteTargets(e, ast)
+		if err != nil {
+			t.Fatalf("targets %q: %v", sql, err)
+		}
+		last := got[len(got)-1]
+		if last.Table != "db1__t" && last.Table != "t" {
+			t.Fatalf("%q: got %+v, want real trailing FROM target", sql, got)
 		}
 	}
 }

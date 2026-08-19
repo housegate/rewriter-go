@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -24,6 +25,17 @@ func TestCompareExactFields(t *testing.T) {
 	b.TableRewrites["db.t"] = "DIFFERENT"
 	if d := Compare(a, b, nil); d.Equal() {
 		t.Fatal("differing table_rewrites should mismatch")
+	}
+}
+
+func TestCompareStorageIntegrityContractVersion(t *testing.T) {
+	got := &pb.RewriteSQLResponse{
+		StorageIntegrityContractVersion: pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+	}
+	want := &pb.RewriteSQLResponse{}
+	d := Compare(got, want, nil)
+	if d.Equal() || len(d.Mismatches) != 1 || !strings.Contains(d.Mismatches[0], "storage_integrity_contract_version") {
+		t.Fatalf("mismatches = %v", d.Mismatches)
 	}
 }
 

@@ -13,6 +13,8 @@
 | DB-level statements | `dblevel.go` | USE/SHOW/CREATE/DROP database handling |
 | GRANT/REVOKE | `grant.go` | Generic-dialect recovery, privilege deltas, ALL/ANY parity quirks |
 | EXISTS/SHOW CREATE | `exists.go` | Existence clause and show-create behavior |
+| Storage-integrity SELECT surface | `storage_integrity.go` | SAFE/UNSAFE_LATEST derived tables and reserved-column guard |
+| DESCRIBE | `describe.go` | SI metadata-shaped SELECT; ordinary targets pass through in G-minimal scope |
 | Option helpers | `options.go` | Limit/offset/settings option application |
 | Name policy | `../nameresolve` | Active static/dynamic table policy |
 

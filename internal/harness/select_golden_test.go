@@ -54,11 +54,12 @@ type staticJSON struct {
 	TableWithDatabaseMap map[string]tableWithDBJSON `json:"table_with_database_map"`
 }
 type accessedJSON struct {
-	OriginalDatabase string `json:"original_database"`
-	OriginalTable    string `json:"original_table"`
-	LogicalDatabase  string `json:"logical_database"`
-	PhysicalDatabase string `json:"physical_database"`
-	IsRemote         bool   `json:"is_remote"`
+	OriginalDatabase   string `json:"original_database"`
+	OriginalTable      string `json:"original_table"`
+	LogicalDatabase    string `json:"logical_database"`
+	PhysicalDatabase   string `json:"physical_database"`
+	IsRemote           bool   `json:"is_remote"`
+	IsStorageIntegrity bool   `json:"is_storage_integrity"`
 }
 
 func (c selectCase) options() []*pb.RewriteOption {
@@ -259,7 +260,7 @@ func checkAccessed(t *testing.T, got []*pb.AccessedTable, want []accessedJSON) {
 		g := got[i]
 		if g.GetOriginalDatabase() != w.OriginalDatabase || g.GetOriginalTable() != w.OriginalTable ||
 			g.GetLogicalDatabase() != w.LogicalDatabase || g.GetPhysicalDatabase() != w.PhysicalDatabase ||
-			g.GetIsRemote() != w.IsRemote {
+			g.GetIsRemote() != w.IsRemote || g.GetIsStorageIntegrity() != w.IsStorageIntegrity {
 			t.Errorf("accessed[%d] = %+v, want %+v", i, g, w)
 		}
 	}

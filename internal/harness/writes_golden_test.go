@@ -267,15 +267,16 @@ func checkWriteSQL(t *testing.T, c writeCase, got string, semEq SemanticEq) {
 // interface-friendly RewriteResult, not the raw proto).
 func pbFromResult(r rewriter.RewriteResult) *pb.RewriteSQLResponse {
 	return &pb.RewriteSQLResponse{
-		SqlAfterRewrite:        r.SQL,
-		Code:                   r.Code,
-		Message:                r.Message,
-		StatementType:          r.StatementType,
-		TableRewrites:          r.TableRewrites,
-		DatabaseRewrites:       r.DatabaseRewrites,
-		OriginalAccessedTables: r.OriginalAccessedTables,
-		PrivilegesDeltas:       r.PrivilegesDeltas,
-		ExistenceClause:        r.ExistenceClause,
-		FailedCteAliases:       r.FailedCTEAliases,
+		SqlAfterRewrite:                 r.SQL,
+		Code:                            r.Code,
+		Message:                         r.Message,
+		StatementType:                   r.StatementType,
+		TableRewrites:                   r.TableRewrites,
+		DatabaseRewrites:                r.DatabaseRewrites,
+		OriginalAccessedTables:          r.OriginalAccessedTables,
+		PrivilegesDeltas:                r.PrivilegesDeltas,
+		ExistenceClause:                 r.ExistenceClause,
+		FailedCteAliases:                r.FailedCTEAliases,
+		StorageIntegrityContractVersion: r.StorageIntegrityContractVersion,
 	}
 }

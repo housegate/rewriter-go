@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // TableTarget is the read view of one real table reference in a SELECT AST.
@@ -18,9 +19,10 @@ type TableTarget struct {
 type TableAction int
 
 const (
-	ActionSkip   TableAction = iota // leave the node untouched
-	ActionRename                    // set table name (+ optionally schema/db)
-	ActionRemote                    // replace the table expr with remote(...)
+	ActionSkip     TableAction = iota // leave the node untouched
+	ActionRename                      // set table name (+ optionally schema/db)
+	ActionRemote                      // replace the table expr with remote(...)
+	ActionSubquery                    // replace the table expr with a derived table (Spec G SI surface)
 )
 
 // RemoteSpec are the five positional args of a remote() table function.
@@ -32,7 +34,18 @@ type TableDecision struct {
 	NewDB    string      // ActionRename: new schema; "" keeps the existing schema untouched
 	NewTable string      // ActionRename: new table name
 	Remote   *RemoteSpec // ActionRemote: the remote() args
+	// Subquery is the derived-table body for ActionSubquery: a parsed single
+	// statement ({"select":…} or {"union":…}) obtained from Engine.ParseOne.
+	// The alias is the user's alias, else the original qualified name —
+	// same rule as ActionRemote — so column qualifiers keep resolving.
+	Subquery AST
 }
+
+// opaqueDerivedTableKey marks a derived table injected by RewriteSelectTables.
+// The marker is internal JSON metadata (polyglot ignores unknown AST fields)
+// that prevents a later collection/rewrite pass from treating the physical
+// tables inside the injected body as additional user-authored references.
+const opaqueDerivedTableKey = "_rewriter_go_opaque_derived_table"
 
 // BareTableNames returns every unqualified (no DB prefix) table name referenced
 // in the AST, without recursing into CTE bodies already in scope. This is used
@@ -92,6 +105,479 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 	return out, nil
 }
 
+// NamespaceRefSource identifies an AST surface that carries a ClickHouse
+// database/table identity outside an ordinary FROM/JOIN table node.
+type NamespaceRefSource string
+
+const (
+	NamespaceRefTableFunction    NamespaceRefSource = "table_function"
+	NamespaceRefInTable          NamespaceRefSource = "in_table"
+	NamespaceRefTableEngine      NamespaceRefSource = "table_engine"
+	NamespaceRefDictionarySource NamespaceRefSource = "dictionary_source"
+)
+
+// NamespaceRef is one namespace-bearing surface that can reach a local table
+// without passing through the ordinary table-name rewriter. This deliberately
+// models table functions, IN/GLOBAL IN <table>, CREATE TABLE engine source
+// arguments, and local CLICKHOUSE dictionary sources through one shape so
+// storage-integrity policy cannot grow another per-command allow-list gap.
+type NamespaceRef struct {
+	Source              NamespaceRefSource
+	Name                string
+	Target              TableTarget
+	Resolved            bool
+	UsesCurrentDatabase bool
+}
+
+// TableFunctionRef is the compatibility view of one recognized ClickHouse
+// table-function namespace.
+// Resolved means both database and table arguments are statically known. When
+// only the database is known, Target.DB is preserved while Resolved stays false;
+// policy can then reserve a protocol-owned database even if the table argument
+// is an expression. A fully dynamic database leaves Target.DB empty and must be
+// treated conservatively by storage-integrity policy.
+type TableFunctionRef struct {
+	Target              TableTarget
+	Resolved            bool
+	UsesCurrentDatabase bool // one-argument merge(<table-regexp>) overload
+}
+
+// CollectNamespaceRefs returns all AST surfaces that carry a database/table
+// identity outside normal table nodes. The function families are derived from
+// ClickHouse's local-catalog table functions: remote/cluster, merge/loop,
+// mergeTree* inspection functions, TimeSeries/Prometheus functions, and
+// dictionary. Prefix handling for mergeTree* intentionally covers newly added
+// inspection functions such as mergeTreeCodecBlockCounts without a brittle
+// one-name patch.
+func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode namespace references: %w", err)
+	}
+	var out []NamespaceRef
+	var walk func(any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			if fn, ok := n["function"].(map[string]any); ok {
+				if ref, ok := decodeNamespaceFunctionRef(fn); ok {
+					out = append(out, ref)
+				}
+			}
+			if in, ok := n["in"].(map[string]any); ok {
+				if ref, ok := decodeInNamespaceRef(in); ok {
+					out = append(out, ref)
+				}
+			}
+			if property, ok := n["engine_property"].(map[string]any); ok {
+				if ref, ok := decodeTableEngineNamespaceRef(property); ok {
+					out = append(out, ref)
+				}
+			}
+			if property, ok := n["dict_property"].(map[string]any); ok {
+				if ref, ok := decodeDictionarySourceNamespaceRef(property); ok {
+					out = append(out, ref)
+				}
+			}
+			for _, child := range n {
+				walk(child)
+			}
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	return out, nil
+}
+
+// CollectTableFunctionRefs returns every recognized remote/cluster/merge
+// function, including partially or wholly unresolved namespace arguments.
+func CollectTableFunctionRefs(ast AST) ([]TableFunctionRef, error) {
+	refs, err := CollectNamespaceRefs(ast)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableFunctionRef
+	for _, ref := range refs {
+		if ref.Source != NamespaceRefTableFunction {
+			continue
+		}
+		out = append(out, TableFunctionRef{
+			Target: ref.Target, Resolved: ref.Resolved,
+			UsesCurrentDatabase: ref.UsesCurrentDatabase,
+		})
+	}
+	return out, nil
+}
+
+// CollectTableFunctionTargets is the compatibility view used by ordinary
+// callers that only need fully resolved physical database/table pairs.
+func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
+	refs, err := CollectTableFunctionRefs(ast)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableTarget
+	for _, ref := range refs {
+		if ref.Resolved {
+			out = append(out, ref.Target)
+		}
+	}
+	return out, nil
+}
+
+func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
+	name, _ := fn["name"].(string)
+	args, _ := fn["args"].([]any)
+	lower := strings.ToLower(name)
+	if canonical, ok := canonicalCallableInName(lower); ok {
+		return decodeCallableInNamespaceRef(canonical, args)
+	}
+	switch lower {
+	case "remote", "remotesecure", "cluster", "clusterallreplicas":
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 1), true
+	case "merge":
+		if len(args) == 1 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "loop", "dictionary":
+		if len(args) == 1 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "timeseriesdata", "timeseriestags", "timeseriesmetrics":
+		if len(args) == 1 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "timeseriesselector":
+		if len(args) == 4 && len(args) > 0 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "prometheusquery":
+		if len(args) == 3 && len(args) > 0 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	case "prometheusqueryrange":
+		if len(args) == 5 && len(args) > 0 {
+			return decodeNamespaceSingle(NamespaceRefTableFunction, name, args[0]), true
+		}
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	}
+	if strings.HasPrefix(lower, "mergetree") {
+		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 0), true
+	}
+	return NamespaceRef{}, false
+}
+
+func canonicalCallableInName(name string) (string, bool) {
+	// ClickHouse registers the IgnoreSet implementations as callable aliases of
+	// the same IN family. Normalize that implementation suffix before applying
+	// the namespace-target policy so every alias follows one recognition path.
+	canonical := strings.TrimSuffix(name, "ignoreset")
+	switch canonical {
+	case "in", "notin", "nullin", "notnullin", "globalin", "globalnotin", "globalnullin", "globalnotnullin":
+		return canonical, true
+	default:
+		return "", false
+	}
+}
+
+func decodeCallableInNamespaceRef(name string, args []any) (NamespaceRef, bool) {
+	if len(args) != 2 || !isNamespaceIdentifierArg(args[1]) {
+		return NamespaceRef{}, false
+	}
+	display := map[string]string{
+		"in": "IN", "notin": "NOT IN", "nullin": "NULL IN", "notnullin": "NOT NULL IN",
+		"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN", "globalnullin": "GLOBAL NULL IN", "globalnotnullin": "GLOBAL NOT NULL IN",
+	}[name]
+	ref := decodeNamespaceSingle(NamespaceRefInTable, display, args[1])
+	if ref.Target.Table == "" && !ref.Resolved {
+		return NamespaceRef{}, false
+	}
+	return ref, true
+}
+
+func isNamespaceIdentifierArg(arg any) bool {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, column := m["column"]
+	_, dot := m["dot"]
+	return column || dot
+}
+
+func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
+	isField, _ := in["is_field"].(bool)
+	exprs, _ := in["expressions"].([]any)
+	if !isField || len(exprs) != 1 {
+		return NamespaceRef{}, false
+	}
+	name := "IN"
+	if not, _ := in["not"].(bool); not {
+		name = "NOT IN"
+	}
+	if global, _ := in["global"].(bool); global {
+		name = "GLOBAL " + name
+	}
+	ref := decodeNamespaceSingle(NamespaceRefInTable, name, exprs[0])
+	if ref.Target.Table == "" && !ref.Resolved {
+		return NamespaceRef{}, false
+	}
+	return ref, true
+}
+
+func decodeTableEngineNamespaceRef(property map[string]any) (NamespaceRef, bool) {
+	outer, _ := property["this"].(map[string]any)
+	anon, _ := outer["anonymous"].(map[string]any)
+	nameHolder, _ := anon["this"].(map[string]any)
+	name := identName(nameHolder["identifier"])
+	args, _ := anon["expressions"].([]any)
+	var first int
+	switch strings.ToLower(name) {
+	case "remote", "distributed":
+		first = 1
+	case "merge", "buffer":
+		first = 0
+	default:
+		return NamespaceRef{}, false
+	}
+	return decodeNamespacePair(NamespaceRefTableEngine, name, args, first), true
+}
+
+func decodeDictionarySourceNamespaceRef(property map[string]any) (NamespaceRef, bool) {
+	propertyName, _ := property["this"].(map[string]any)
+	if !strings.EqualFold(identName(propertyName["identifier"]), "SOURCE") {
+		return NamespaceRef{}, false
+	}
+	kind, _ := property["kind"].(string)
+	if !strings.EqualFold(kind, "CLICKHOUSE") {
+		return NamespaceRef{}, false
+	}
+	ref := NamespaceRef{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}
+	settings, _ := property["settings"].(map[string]any)
+	tuple, _ := settings["tuple"].(map[string]any)
+	pairs, _ := tuple["expressions"].([]any)
+	var databaseArg, tableArg any
+	hasOpaqueSetting := false
+	for _, rawPair := range pairs {
+		pair, _ := rawPair.(map[string]any)
+		body, _ := pair["tuple"].(map[string]any)
+		expressions, _ := body["expressions"].([]any)
+		if len(expressions) != 2 {
+			continue
+		}
+		keyHolder, _ := expressions[0].(map[string]any)
+		key := strings.ToUpper(identName(keyHolder["identifier"]))
+		switch key {
+		case "DB", "DATABASE":
+			databaseArg = expressions[1]
+		case "TABLE":
+			tableArg = expressions[1]
+		case "QUERY", "WHERE", "INVALIDATE_QUERY", "NAME":
+			// SQL-bearing filters/probes and named collections can override or
+			// extend DB/TABLE. Even when those two fields are constant, the final
+			// execution namespace is not proven and SI policy must fail closed.
+			hasOpaqueSetting = true
+		}
+	}
+	if hasOpaqueSetting {
+		if databaseArg != nil {
+			ref = decodeNamespacePair(
+				NamespaceRefDictionarySource, "CLICKHOUSE", []any{databaseArg, tableArg}, 0)
+			ref.Resolved = false
+			ref.UsesCurrentDatabase = false
+			return ref, true
+		}
+		if tableArg != nil {
+			ref.Target.Table, _ = tableFunctionArgText(tableArg)
+		}
+		return ref, true
+	}
+	if databaseArg == nil && tableArg == nil {
+		return ref, true
+	}
+	if databaseArg == nil {
+		ref = decodeNamespaceSingle(NamespaceRefDictionarySource, "CLICKHOUSE", tableArg)
+		// A dynamic TABLE expression still executes in the current DB.
+		ref.UsesCurrentDatabase = true
+		return ref, true
+	}
+	return decodeNamespacePair(NamespaceRefDictionarySource, "CLICKHOUSE", []any{databaseArg, tableArg}, 0), true
+}
+
+func decodeNamespaceSingle(source NamespaceRefSource, name string, arg any) NamespaceRef {
+	ref := NamespaceRef{Source: source, Name: name, UsesCurrentDatabase: true}
+	if isCurrentDatabaseArg(arg) {
+		ref.UsesCurrentDatabase = true
+		return ref
+	}
+	value, ok := tableFunctionArgText(arg)
+	if !ok {
+		return ref
+	}
+	if db, table, qualified := exactFunctionQualified(value); qualified {
+		ref.Target = TableTarget{DB: db, Table: table}
+		ref.Resolved = true
+		ref.UsesCurrentDatabase = false
+		return ref
+	}
+	ref.Target.Table = value
+	return ref
+}
+
+func decodeNamespacePair(source NamespaceRefSource, name string, args []any, first int) NamespaceRef {
+	ref := NamespaceRef{Source: source, Name: name}
+	if first >= len(args) {
+		return ref
+	}
+	if isCurrentDatabaseArg(args[first]) {
+		ref.UsesCurrentDatabase = true
+		if first+1 < len(args) {
+			ref.Target.Table, _ = tableFunctionArgText(args[first+1])
+		}
+		return ref
+	}
+	firstArg, firstOK := tableFunctionArgText(args[first])
+	if firstOK {
+		if db, table, qualified := exactFunctionQualified(firstArg); qualified {
+			ref.Target = TableTarget{DB: db, Table: table}
+			ref.Resolved = true
+			return ref
+		}
+		ref.Target.DB = firstArg
+	}
+	if first+1 >= len(args) {
+		return ref
+	}
+	secondArg, secondOK := tableFunctionArgText(args[first+1])
+	if secondOK {
+		ref.Target.Table = secondArg
+	}
+	ref.Resolved = firstOK && secondOK && firstArg != "" && secondArg != ""
+	return ref
+}
+
+func isCurrentDatabaseArg(arg any) bool {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return false
+	}
+	fn, ok := m["function"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, _ := fn["name"].(string)
+	return strings.EqualFold(name, "currentDatabase")
+}
+
+// CollectEmbeddedSelectSources returns the table nodes and recognized table
+// functions inside top-level SELECT/set-operation bodies nested under a write
+// AST. Write targets outside those bodies are deliberately excluded.
+func CollectEmbeddedSelectSources(ast AST) ([]TableTarget, []TableFunctionRef, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, nil, fmt.Errorf("engine: decode embedded SELECT: %w", err)
+	}
+	var tables []TableTarget
+	var functions []TableFunctionRef
+	var walk func(any) error
+	walk = func(node any) error {
+		switch n := node.(type) {
+		case map[string]any:
+			if isReadQueryRoot(n) {
+				encoded, err := json.Marshal(n)
+				if err != nil {
+					return fmt.Errorf("engine: encode embedded SELECT: %w", err)
+				}
+				gotTables, err := CollectSelectTables(AST(encoded))
+				if err != nil {
+					return err
+				}
+				gotFunctions, err := CollectTableFunctionRefs(AST(encoded))
+				if err != nil {
+					return err
+				}
+				tables = append(tables, gotTables...)
+				functions = append(functions, gotFunctions...)
+				return nil // the read visitor already recurses into nested subqueries
+			}
+			for _, child := range n {
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, child := range n {
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(root); err != nil {
+		return nil, nil, err
+	}
+	return tables, functions, nil
+}
+
+func isReadQueryRoot(node map[string]any) bool {
+	for _, kind := range []string{NodeSelect, NodeUnion, NodeIntersect, NodeExcept} {
+		if _, ok := node[kind]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func tableFunctionArgText(arg any) (string, bool) {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if lit, ok := m["literal"].(map[string]any); ok {
+		value, ok := lit["value"].(string)
+		return value, ok && value != ""
+	}
+	if col, ok := m["column"].(map[string]any); ok {
+		name := identName(col["name"])
+		if name == "" {
+			return "", false
+		}
+		if table := identName(col["table"]); table != "" {
+			return table + "." + name, true
+		}
+		return name, true
+	}
+	if dot, ok := m["dot"].(map[string]any); ok {
+		left, lok := tableFunctionArgText(dot["this"])
+		right := identName(dot["field"])
+		if lok && right != "" {
+			return left + "." + right, true
+		}
+	}
+	if name := identName(m); name != "" {
+		return name, true
+	}
+	return "", false
+}
+
+func exactFunctionQualified(s string) (db, table string, ok bool) {
+	if strings.Count(s, ".") != 1 {
+		return "", "", false
+	}
+	dot := strings.IndexByte(s, '.')
+	db, table = s[:dot], s[dot+1:]
+	return db, table, db != "" && table != ""
+}
+
 // RewriteSelectTables walks every real table reference (same traversal as
 // CollectSelectTables) and applies the TableDecision returned by decide. The AST
 // is decoded once, mutated in place (Go maps are references), and re-encoded.
@@ -120,6 +606,11 @@ func RewriteSelectTables(ast AST, decide func(TableTarget) TableDecision) (AST, 
 func visitTables(node any, scope map[string]bool, visit func(expr, tbl map[string]any, tt TableTarget)) {
 	switch n := node.(type) {
 	case map[string]any:
+		if subquery, ok := n["subquery"].(map[string]any); ok {
+			if opaque, _ := subquery[opaqueDerivedTableKey].(bool); opaque {
+				return
+			}
+		}
 		if sel, ok := n["select"].(map[string]any); ok {
 			scope = forkCTEScope(sel, scope)
 			for _, v := range sel {
@@ -212,9 +703,273 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 			"this":               map[string]any{"function": fn},
 			"trailing_comments":  []any{},
 		}
+	case ActionSubquery:
+		if len(d.Subquery) == 0 {
+			return // misconfigured decision — leave the table untouched
+		}
+		var body any
+		if err := json.Unmarshal(d.Subquery, &body); err != nil {
+			return
+		}
+		aliasName := tt.Alias
+		if aliasName == "" {
+			aliasName = originName(tt)
+		}
+		delete(expr, "table")
+		// Shape mirrors what polyglot emits for `FROM (SELECT …) AS x`
+		// (see testdata/ast-shapes/select_subquery_from.json).
+		expr["subquery"] = map[string]any{
+			"this":                body,
+			"alias":               ident(aliasName),
+			"alias_explicit_as":   true,
+			"alias_keyword":       "AS",
+			"column_aliases":      []any{},
+			"lateral":             false,
+			"limit":               nil,
+			"modifiers_inside":    false,
+			"offset":              nil,
+			"order_by":            nil,
+			"trailing_comments":   []any{},
+			opaqueDerivedTableKey: true,
+		}
 	case ActionSkip:
 		// no-op
 	}
+}
+
+// ReferencesIdentifier reports whether any column reference in the AST has
+// the final name part `name` (bare `_hg_row_id`, qualified `t._hg_row_id`,
+// in select list / WHERE / ORDER BY / function args / subqueries), or any
+// `* EXCEPT|REPLACE|RENAME (...)` entry names it. String literals never
+// match. Used for the Spec G reserved-column guard.
+func ReferencesIdentifier(ast AST, name string) (bool, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return false, fmt.Errorf("engine: decode: %w", err)
+	}
+	return refWalk(root, name), nil
+}
+
+// QuoteIdentifier forces Identifier-shaped nodes named name to render quoted.
+// Polyglot's parser normalizes some quoted ClickHouse keywords (for example
+// `from` inside star EXCEPT) back to quoted=false, so trusted synthesized ASTs
+// must restore the structural quote before generation. Callers should use this
+// only on a generated fragment whose identifier roles they control.
+func QuoteIdentifier(ast AST, name string) (AST, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode: %w", err)
+	}
+	quoteIdentifierWalk(root, name)
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode: %w", err)
+	}
+	return AST(out), nil
+}
+
+func quoteIdentifierWalk(node any, name string) {
+	switch n := node.(type) {
+	case map[string]any:
+		if got, ok := n["name"].(string); ok && got == name {
+			n["quoted"] = true
+		}
+		for _, v := range n {
+			quoteIdentifierWalk(v, name)
+		}
+	case []any:
+		for _, v := range n {
+			quoteIdentifierWalk(v, name)
+		}
+	}
+}
+
+// UnsupportedTableWrapperTargets returns only the table expressions whose
+// wrappers carry semantics ActionSubquery cannot preserve: FINAL, SAMPLE, or an
+// alias column list. Keeping the target attached to the finding lets callers
+// reject an SI wrapper without falsely rejecting an ordinary JOIN peer's wrapper.
+// WITH OFFSET is lost by Polyglot during parse and is token-checked separately.
+func UnsupportedTableWrapperTargets(ast AST) ([]TableTarget, error) {
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode: %w", err)
+	}
+	var out []TableTarget
+	appendUnique := func(tt TableTarget) {
+		for _, existing := range out {
+			if existing == tt {
+				return
+			}
+		}
+		out = append(out, tt)
+	}
+	visitTables(root, nil, func(_ map[string]any, tbl map[string]any, tt TableTarget) {
+		final, _ := tbl["final_"].(bool)
+		sampled := tbl["table_sample"] != nil
+		aliases, _ := tbl["column_aliases"].([]any)
+		if final || sampled || len(aliases) > 0 {
+			appendUnique(tt)
+		}
+	})
+	collectSelectLevelSampleTargets(root, appendUnique)
+	return out, nil
+}
+
+// HasUnsupportedTableWrapper is retained as the coarse compatibility helper;
+// new policy code should use UnsupportedTableWrapperTargets.
+func HasUnsupportedTableWrapper(ast AST) (bool, error) {
+	targets, err := UnsupportedTableWrapperTargets(ast)
+	return len(targets) > 0, err
+}
+
+func collectSelectLevelSampleTargets(node any, appendTarget func(TableTarget)) {
+	switch n := node.(type) {
+	case map[string]any:
+		if sel, ok := n["select"].(map[string]any); ok && sel["sample"] != nil {
+			if from, ok := sel["from"].(map[string]any); ok {
+				found := false
+				visitTables(from, nil, func(_ map[string]any, _ map[string]any, tt TableTarget) {
+					if !found {
+						appendTarget(tt)
+						found = true
+					}
+				})
+			}
+		}
+		for _, v := range n {
+			collectSelectLevelSampleTargets(v, appendTarget)
+		}
+	case []any:
+		for _, v := range n {
+			collectSelectLevelSampleTargets(v, appendTarget)
+		}
+	}
+}
+
+// HasWithOffset recognizes the actual WITH OFFSET keyword pair from the lexer.
+// Whitespace is irrelevant because tokens are adjacent, while string literals
+// and comments cannot false-positive because their token types are not WITH and
+// OFFSET.
+func HasWithOffset(e Engine, sql string) (bool, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return false, err
+	}
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i].TokenType == "WITH" && toks[i+1].TokenType == "OFFSET" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// WithOffsetTargets binds each real WITH OFFSET keyword pair to the nearest
+// preceding FROM/JOIN table name in the token stream. This keeps wrapper policy
+// attached to the table that owns the modifier instead of rejecting an entire
+// mixed SI/ordinary SELECT. String literals and comments cannot participate
+// because only keyword token types are considered.
+func WithOffsetTargets(e Engine, sql string) ([]TableTarget, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableTarget
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i].TokenType != "WITH" || toks[i+1].TokenType != "OFFSET" {
+			continue
+		}
+		boundary := -1
+		nesting := 0
+		for j := i - 1; j >= 0; j-- {
+			if toks[j].Text == ")" {
+				nesting++
+				continue
+			}
+			if toks[j].Text == "(" && nesting > 0 {
+				nesting--
+				continue
+			}
+			if nesting == 0 && (toks[j].TokenType == "FROM" || toks[j].TokenType == "JOIN" || toks[j].TokenType == "COMMA") {
+				boundary = j
+				break
+			}
+		}
+		if boundary < 0 {
+			continue
+		}
+		if target, ok := rawTokenTableTarget(toks, boundary+1); ok {
+			out = append(out, target)
+		}
+	}
+	return out, nil
+}
+
+func refWalk(node any, name string) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		// Every Polyglot Identifier-shaped node (columns, aliases, CTE names,
+		// table aliases, star rename pairs, etc.) carries name+quoted. The SI
+		// contract rejects ANY user identifier equal to the reserved RID, not
+		// just column.name, so inspect that shape before role-specific fallbacks.
+		if got, ok := n["name"].(string); ok && got == name {
+			if _, identifierShape := n["quoted"]; identifierShape {
+				return true
+			}
+		}
+		if col, ok := n["column"].(map[string]any); ok && identName(col["name"]) == name {
+			return true
+		}
+		if dot, ok := n["dot"].(map[string]any); ok && identName(dot["field"]) == name {
+			return true
+		}
+		if using, ok := n["using"].([]any); ok {
+			for _, e := range using {
+				if identName(e) == name {
+					return true
+				}
+			}
+		}
+		if star, ok := n["star"].(map[string]any); ok {
+			if list, ok := star["except"].([]any); ok {
+				for _, e := range list {
+					if identName(e) == name {
+						return true
+					}
+				}
+			}
+			if list, ok := star["replace"].([]any); ok {
+				for _, e := range list {
+					if m, ok := e.(map[string]any); ok && identName(m["alias"]) == name {
+						return true
+					}
+				}
+			}
+			if list, ok := star["rename"].([]any); ok {
+				for _, e := range list {
+					pair, ok := e.([]any)
+					if ok {
+						for _, side := range pair {
+							if identName(side) == name {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+		for _, v := range n {
+			if refWalk(v, name) {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if refWalk(v, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // needsQuoting reports whether s must be quoted to survive as a single ClickHouse

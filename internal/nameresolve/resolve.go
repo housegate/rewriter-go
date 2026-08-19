@@ -5,6 +5,8 @@
 package nameresolve
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -178,9 +180,10 @@ type Selection struct {
 
 // Accessed is the best-effort resolution used to populate original_accessed_tables.
 type Accessed struct {
-	LogicalDB  string
-	PhysicalDB string
-	IsRemote   bool
+	LogicalDB          string
+	PhysicalDB         string
+	IsRemote           bool
+	IsStorageIntegrity bool
 }
 
 // FindActive scans options for the active TableNameRewrite policy. Last-wins
@@ -230,16 +233,282 @@ func ResolveAccessed(db, table string, sel Selection) Accessed {
 		o := LookupStatic(db, table, sel.Static)
 		return Accessed{LogicalDB: "", PhysicalDB: o.PhysicalDB, IsRemote: o.Status == StatusRemote}
 	case ModeDynamic:
+		if _, ok := LookupStorageIntegrityPhysical(db, table, sel.Dynamic); ok {
+			physicalDB := db
+			if physicalDB == "" {
+				physicalDB = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
+			}
+			return Accessed{PhysicalDB: physicalDB, IsStorageIntegrity: true}
+		}
 		logical := db
 		if logical == "" {
 			logical = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
 		}
 		phys, _ := resolvePhysicalDatabase(logical, sel.Dynamic)
 		_, isRemote := sel.Dynamic.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]
-		return Accessed{LogicalDB: logical, PhysicalDB: phys, IsRemote: isRemote}
+		_, _, isSI := LookupStorageIntegrity(db, table, sel.Dynamic)
+		if isSI {
+			isRemote = false
+		}
+		return Accessed{LogicalDB: logical, PhysicalDB: phys, IsRemote: isRemote, IsStorageIntegrity: isSI}
 	default:
 		return Accessed{}
 	}
+}
+
+func splitQualified(name string) (string, string) {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		return name[:i], name[i+1:]
+	}
+	return "", name
+}
+
+// DefaultReservedRowIDColumn is the protocol row-identity column hidden from
+// the logical surface (Spec G D3).
+const DefaultReservedRowIDColumn = "_hg_row_id"
+
+// LookupStorageIntegrity reports whether (db, table) — db resolved through
+// upstream_logical_database_in_context when empty — is a key of
+// dynamic_args.storage_integrity.tables. It is consulted BEFORE the ordinary
+// dynamic resolution by every table-targeting handler; the SI mapping wins.
+// It never rejects: an unqualified target with no context simply misses.
+func LookupStorageIntegrity(db, table string, a *pb.RewriteTableDynamicArgs) (*pb.StorageIntegrityArgs_Table, string, bool) {
+	tables := a.GetStorageIntegrity().GetTables()
+	if len(tables) == 0 || table == "" {
+		return nil, "", false
+	}
+	logical := db
+	if logical == "" {
+		logical = a.GetUpstreamLogicalDatabaseInContext()
+	}
+	if logical == "" {
+		return nil, "", false
+	}
+	key := logical + "." + table
+	tbl, ok := tables[key]
+	if !ok || tbl == nil {
+		return nil, "", false
+	}
+	return tbl, key, true
+}
+
+// LookupStorageIntegrityPhysical reports whether the caller addressed one of
+// the protocol-owned safe/unsafe physical table names directly. Those names are
+// never part of the public SQL surface, even when the physical database is not
+// listed in known_physical_databases.
+func LookupStorageIntegrityPhysical(db, table string, a *pb.RewriteTableDynamicArgs) (string, bool) {
+	if a == nil || table == "" {
+		return "", false
+	}
+	effectiveDB := db
+	if effectiveDB == "" {
+		effectiveDB = a.GetUpstreamLogicalDatabaseInContext()
+	}
+	if effectiveDB == "" {
+		return "", false
+	}
+	for logicalKey, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		for _, physical := range []string{tbl.GetSafeTable(), tbl.GetUnsafeTable()} {
+			physicalDB, _, ok := exactQualifiedTable(physical)
+			if ok && effectiveDB == physicalDB {
+				return logicalKey, true
+			}
+		}
+	}
+	return "", false
+}
+
+// IsStorageIntegrityPhysicalDatabase reports whether db is one of the
+// configured safe/unsafe physical namespaces. The reservation is database-wide:
+// once a database hosts a protocol-owned SI table, no user-authored SQL may
+// address any object in that database directly (including table functions and
+// database-scope DDL/DCL).
+func IsStorageIntegrityPhysicalDatabase(db string, a *pb.RewriteTableDynamicArgs) bool {
+	if a == nil || db == "" {
+		return false
+	}
+	for _, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		for _, physical := range []string{tbl.GetSafeTable(), tbl.GetUnsafeTable()} {
+			physicalDB, _, ok := exactQualifiedTable(physical)
+			if ok && db == physicalDB {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsStorageIntegrityLogicalDatabase reports whether db owns at least one
+// storage_integrity.tables key. Namespace-bearing functions and table engines
+// are not passed through the ordinary table rewriter, so a database-level match
+// must be reserved even when their table argument is a regexp or expression.
+func IsStorageIntegrityLogicalDatabase(db string, a *pb.RewriteTableDynamicArgs) bool {
+	if a == nil || db == "" {
+		return false
+	}
+	for key, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		logicalDB, _, ok := exactQualifiedTable(key)
+		if ok && logicalDB == db {
+			return true
+		}
+	}
+	return false
+}
+
+// StorageIntegrityPhysicalDatabases returns the configured protocol-owned
+// safe/unsafe database namespaces in deterministic order. It is used to attach
+// conservative SI classification metadata when a table-function database
+// expression cannot be resolved statically.
+func StorageIntegrityPhysicalDatabases(a *pb.RewriteTableDynamicArgs) []string {
+	seen := map[string]bool{}
+	for _, tbl := range a.GetStorageIntegrity().GetTables() {
+		if tbl == nil {
+			continue
+		}
+		for _, physical := range []string{tbl.GetSafeTable(), tbl.GetUnsafeTable()} {
+			db, _, ok := exactQualifiedTable(physical)
+			if ok {
+				seen[db] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for db := range seen {
+		out = append(out, db)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AuthorizeStorageIntegrityLogical requires the logical database selected by a
+// storage_integrity.tables key to be present in the account-filtered
+// database_map. known_physical_databases is deliberately not an authorization
+// source for a global logical SI key; it only preserves ordinary direct-physical
+// compatibility outside the protocol-owned safe/unsafe namespace.
+func AuthorizeStorageIntegrityLogical(db string, a *pb.RewriteTableDynamicArgs) (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	logical := db
+	if logical == "" {
+		logical = a.GetUpstreamLogicalDatabaseInContext()
+	}
+	if logical == "" {
+		return "", false
+	}
+	_, ok := a.GetDatabaseMap()[logical]
+	return logical, ok
+}
+
+// ReservedRowIDColumn returns storage_integrity.reserved_row_id_column, or the
+// protocol default when unset.
+func ReservedRowIDColumn(a *pb.RewriteTableDynamicArgs) string {
+	if rid := a.GetStorageIntegrity().GetReservedRowIdColumn(); rid != "" {
+		return rid
+	}
+	return DefaultReservedRowIDColumn
+}
+
+// StorageIntegrityWriteRejectMessage is the shared (Go + C++) message for any
+// non-lane write/DDL touching an SI table (Spec G §4.4).
+func StorageIntegrityWriteRejectMessage(logicalKey string) string {
+	return "storage-integrity table " + logicalKey + " accepts writes only through the signed statement lane"
+}
+
+func StorageIntegrityUnauthorizedMessage(logical string) string {
+	return "storage-integrity logical database " + logical + " is not authorized by database_map"
+}
+
+func StorageIntegrityPhysicalRejectMessage(physical string) string {
+	return "storage-integrity physical table " + physical + " is not directly addressable"
+}
+
+func StorageIntegrityPhysicalDatabaseRejectMessage(physical string) string {
+	return "storage-integrity physical database " + physical + " is not directly addressable"
+}
+
+func StorageIntegrityTableFunctionNamespaceRejectMessage(physical string) string {
+	return "storage-integrity table function namespace " + physical + " is not directly addressable"
+}
+
+func StorageIntegrityUnresolvedTableFunctionNamespaceRejectMessage() string {
+	return "storage-integrity table function namespace is not statically resolvable"
+}
+
+// ValidateStorageIntegrity checks the v1 configuration before the service
+// publishes an acknowledgement. Invalid entries must be a structured request
+// rejection, never a nil/non-SI fallthrough or a later parser error.
+func ValidateStorageIntegrity(a *pb.RewriteTableDynamicArgs) error {
+	si := a.GetStorageIntegrity()
+	if si == nil {
+		return nil
+	}
+	rid := si.GetReservedRowIdColumn()
+	if rid != "" && !simpleIdentifier(rid) {
+		return fmt.Errorf("storage-integrity reserved_row_id_column must be a simple identifier")
+	}
+	switch si.GetReadMode() {
+	case pb.StorageIntegrityArgs_READ_MODE_UNSPECIFIED,
+		pb.StorageIntegrityArgs_READ_MODE_SAFE,
+		pb.StorageIntegrityArgs_READ_MODE_UNSAFE_LATEST:
+	default:
+		return fmt.Errorf("storage-integrity read_mode %d is not supported", si.GetReadMode())
+	}
+	keys := make([]string, 0, len(si.GetTables()))
+	for key := range si.GetTables() {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, _, ok := exactQualifiedTable(key); !ok {
+			return fmt.Errorf("storage-integrity logical table key %s must have exact <database>.<table> shape", key)
+		}
+		tbl := si.GetTables()[key]
+		if tbl == nil {
+			return fmt.Errorf("storage-integrity table %s must not be nil", key)
+		}
+		if tbl.GetSafeTable() == "" || tbl.GetUnsafeTable() == "" {
+			return fmt.Errorf("storage-integrity table %s requires non-empty safe_table and unsafe_table", key)
+		}
+		if _, _, ok := exactQualifiedTable(tbl.GetSafeTable()); !ok {
+			return fmt.Errorf("storage-integrity table %s safe_table %s must have exact <database>.<table> shape", key, tbl.GetSafeTable())
+		}
+		if _, _, ok := exactQualifiedTable(tbl.GetUnsafeTable()); !ok {
+			return fmt.Errorf("storage-integrity table %s unsafe_table %s must have exact <database>.<table> shape", key, tbl.GetUnsafeTable())
+		}
+	}
+	return nil
+}
+
+func exactQualifiedTable(s string) (db, table string, ok bool) {
+	if strings.Count(s, ".") != 1 {
+		return "", "", false
+	}
+	db, table = splitQualified(s)
+	return db, table, simpleIdentifier(db) && simpleIdentifier(table)
+}
+
+func simpleIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		alpha := r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+		digit := r >= '0' && r <= '9'
+		if !alpha && !(i > 0 && digit) {
+			return false
+		}
+	}
+	return true
 }
 
 // ApplyDynamic resolves (db, table) under dynamic args. Mirrors applyDynamicRewrite.

@@ -39,6 +39,36 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		kw, stmt = "REVOKE", pb.StatementType_STATEMENT_TYPE_REVOKE
 	}
 	resp := newGrantResp(stmt)
+	siSel := nameresolve.FindActive(opts)
+	origDB, origTable, scopeDatabase, anyDatabase := splitSecurable(gp.Securable)
+	effectiveScopeDB := origDB
+	if effectiveScopeDB == "" && scopeDatabase && siSel.Mode == nameresolve.ModeDynamic {
+		effectiveScopeDB = siSel.Dynamic.GetUpstreamLogicalDatabaseInContext()
+	}
+	if gp.HasOn && scopeDatabase && siSel.Mode == nameresolve.ModeDynamic &&
+		nameresolve.IsStorageIntegrityPhysicalDatabase(effectiveScopeDB, siSel.Dynamic) {
+		recordAccessedDatabase(resp, effectiveScopeDB, siSel.Dynamic)
+		rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(effectiveScopeDB))
+		return resp, true, nil
+	}
+	if gp.HasOn && !scopeDatabase && !anyDatabase && origTable != "" && siSel.Mode == nameresolve.ModeDynamic {
+		target := engine.TableTarget{DB: origDB, Table: origTable}
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(origDB, origTable, siSel.Dynamic); ok {
+			recordAccessedWrite(resp, target, siSel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(origDB, origTable)))
+			return resp, true, nil
+		}
+		if _, key, ok := nameresolve.LookupStorageIntegrity(origDB, origTable, siSel.Dynamic); ok {
+			recordAccessedWrite(resp, target, siSel)
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(origDB, siSel.Dynamic)
+			if !authorized {
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+			} else {
+				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			}
+			return resp, true, nil
+		}
+	}
 
 	// Statement-level rejects, in grant.cc order.
 	if gp.IsAttach {
@@ -77,7 +107,6 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return resp, true, nil
 	}
 
-	origDB, origTable, scopeDatabase, anyDatabase := splitSecurable(gp.Securable)
 	if anyDatabase {
 		rejectUnsupported(resp, kw+" ON *.* (global scope) is not supported")
 		return resp, true, nil

@@ -247,3 +247,444 @@ func sortTargets(s []TableTarget) {
 		return ki < kj
 	})
 }
+
+func TestRewriteSelectTables_subquerySubstitution(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	body, err := e.ParseOne(`SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RewriteSelectTables(load(t, "select"), func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionSubquery, Subquery: body}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	want := `SELECT a FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t) AS "db.t" WHERE x IN (1, 2)`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestRewriteSelectTables_subqueryKeepsUserAliasInJoin(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	ast, err := e.ParseOne(`SELECT count() FROM db.t AS a JOIN db.u AS b ON a.id = b.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := e.ParseOne(`SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t`)
+	out, err := RewriteSelectTables(ast, func(tt TableTarget) TableDecision {
+		if tt.Table == "t" {
+			return TableDecision{Action: ActionSubquery, Subquery: body}
+		}
+		return TableDecision{Action: ActionSkip}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := genOf(t, out)
+	want := `SELECT count() FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db__t) AS a JOIN db.u AS b ON a.id = b.id`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// The substituted body's own table must NOT be re-visited/collected.
+	tabs, err := CollectSelectTables(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tabs {
+		if tt.DB == "hg_safe" {
+			t.Fatalf("substituted body table leaked into collection: %+v", tabs)
+		}
+	}
+}
+
+func TestReferencesIdentifier(t *testing.T) {
+	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
+		t.Skip("needs engine")
+	}
+	e, err := NewPolyglot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	cases := []struct {
+		sql  string
+		want bool
+	}{
+		{`SELECT _hg_row_id FROM t`, true},
+		{`SELECT a FROM t WHERE _hg_row_id = 'x'`, true},
+		{`SELECT a FROM t ORDER BY _hg_row_id`, true},
+		{`SELECT lower(t._hg_row_id) FROM t`, true},
+		{`SELECT db.t._hg_row_id FROM db.t`, true},
+		{`SELECT * EXCEPT (_hg_row_id) FROM t`, true},
+		{`SELECT * REPLACE (1 AS _hg_row_id) FROM t`, true},
+		{`SELECT * RENAME (a AS _hg_row_id) FROM t`, true},
+		{`SELECT * RENAME (_hg_row_id AS x) FROM t`, true},
+		{`SELECT 1 AS _hg_row_id FROM t`, true},
+		{`WITH 1 AS _hg_row_id SELECT a FROM t`, true},
+		{`SELECT * FROM t AS a JOIN u AS b USING (_hg_row_id)`, true},
+		{`SELECT a FROM t WHERE b IN (SELECT _hg_row_id FROM u)`, true},
+		{`SELECT a FROM t`, false},
+		{`SELECT '_hg_row_id' FROM t`, false},
+		{`SELECT hg_row_id FROM t`, false},
+	}
+	for _, c := range cases {
+		ast, err := e.ParseOne(c.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.sql, err)
+		}
+		got, err := ReferencesIdentifier(ast, "_hg_row_id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("%q: got %v want %v ast=%s", c.sql, got, c.want, ast)
+		}
+	}
+}
+
+func TestCollectTableFunctionTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`SELECT * FROM merge('hg_safe', 'db1__t')`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`SELECT * FROM remote('127.0.0.1', 'hg_safe', 'db1__t')`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`SELECT * FROM remote('127.0.0.1', 'hg_safe.db1__t')`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}},
+		{`SELECT * FROM cluster('c', hg_unsafe, db1__t)`, []TableTarget{{DB: "hg_unsafe", Table: "db1__t"}}},
+		{`SELECT * FROM cluster('c', 'hg_unsafe.db1__t')`, []TableTarget{{DB: "hg_unsafe", Table: "db1__t"}}},
+		{`SELECT * FROM numbers(10)`, nil},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := CollectTableFunctionTargets(ast)
+		if err != nil {
+			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+	}
+}
+
+func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableFunctionRef
+	}{
+		{`SELECT * FROM remote('h', 'hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
+		{`SELECT * FROM cluster('c', 'hg_unsafe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
+		{`SELECT * FROM merge('hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
+		{`SELECT * FROM merge('db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}}},
+		{`SELECT * FROM remote('h', concat('hg_', 'safe'), 'db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}}}},
+		{`SELECT * FROM remote('h', 'hg_safe', 'db1__t')`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}}},
+		{`SELECT * FROM numbers(10)`, nil},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := CollectTableFunctionRefs(ast)
+		if err != nil {
+			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+	}
+}
+
+func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []NamespaceRef
+	}{
+		{
+			`SELECT * FROM other.u WHERE id GLOBAL IN hg_safe.db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM other.u WHERE id IN db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`SELECT * FROM other.u WHERE id NOT IN hg_safe.db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM other.u WHERE id GLOBAL NOT IN hg_unsafe.db1__t`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT in(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT nullIn(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotNullIn(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT inIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT nullInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT notNullInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNullInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT globalNotNullInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeIndex", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`SELECT * FROM mergeTreeProjection('hg_safe', 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeProjection", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM mergeTreeCodecBlockCounts('hg_safe', 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "mergeTreeCodecBlockCounts", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM loop(hg_safe.db1__t)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "loop", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM timeSeriesSelector(hg_safe.db1__t, 'x', 0, 1)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "timeSeriesSelector", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM prometheusQuery(hg_safe.db1__t, 'x', 1)`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "prometheusQuery", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`SELECT * FROM dictionary('hg_safe.db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableFunction, Name: "dictionary", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'hg_safe', 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableEngine, Name: "Remote", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`CREATE TABLE other.x (a UInt64) ENGINE = Merge(currentDatabase(), 'db1__t')`,
+			[]NamespaceRef{{Source: NamespaceRefTableEngine, Name: "Merge", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'hg_safe' TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB concat('hg_', 'safe') TABLE 'db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{Table: "db1__t"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' WHERE 'id > 0')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' INVALIDATE_QUERY 'SELECT max(updated_at) FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(NAME 'shared_clickhouse')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE"}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(NAME 'shared_clickhouse' DB 'other' TABLE 'u')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+		{
+			`CREATE DICTIONARY other.d (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'u' QUERY 'SELECT id FROM hg_safe.db1__t')) LAYOUT(HASHED()) LIFETIME(0)`,
+			[]NamespaceRef{{Source: NamespaceRefDictionarySource, Name: "CLICKHOUSE", Target: TableTarget{DB: "other", Table: "u"}}},
+		},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("refs = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedSelectSources(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql       string
+		wantTable []TableTarget
+		wantFn    []TableFunctionRef
+	}{
+		{`CREATE TABLE other.x AS SELECT * FROM hg_safe.db1__t`, []TableTarget{{DB: "hg_safe", Table: "db1__t"}}, nil},
+		{`INSERT INTO other.u SELECT * FROM db1.t`, []TableTarget{{DB: "db1", Table: "t"}}, nil},
+		{`INSERT INTO other.u SELECT * FROM remote('h', 'hg_unsafe', concat('db1', '__t'))`, nil, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
+		{`CREATE TABLE other.x AS SELECT * FROM merge('db1__t')`, nil, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}}},
+		{`CREATE TABLE other.x (a UInt64) ENGINE = MergeTree ORDER BY a`, nil, nil},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		gotTables, gotFns, err := CollectEmbeddedSelectSources(ast)
+		if err != nil {
+			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(gotTables, tc.wantTable) || !reflect.DeepEqual(gotFns, tc.wantFn) {
+			t.Errorf("%q: tables=%+v functions=%+v, want tables=%+v functions=%+v ast=%s", tc.sql, gotTables, gotFns, tc.wantTable, tc.wantFn, ast)
+		}
+	}
+}
+
+func TestUnsupportedTableWrapperTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`SELECT * FROM db1.t FINAL`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t SAMPLE 0.1`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t AS x(a)`, []TableTarget{{DB: "db1", Table: "t", Alias: "x"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u FINAL ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u SAMPLE 0.1 ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u AS o(id) ON s.id = o.id`, []TableTarget{{DB: "other", Table: "u", Alias: "o"}}},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.sql, err)
+		}
+		got, err := UnsupportedTableWrapperTargets(ast)
+		if err != nil {
+			t.Fatalf("inspect %q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v ast=%s", tc.sql, got, tc.want, ast)
+		}
+	}
+}
+
+func TestHasWithOffset(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want bool
+	}{
+		{"SELECT * FROM t WITH OFFSET AS off", true},
+		{"SELECT * FROM t WITH\nOFFSET AS off", true},
+		{"SELECT * FROM t WITH\tOFFSET AS off", true},
+		{"SELECT 'WITH OFFSET' FROM t", false},
+		{"SELECT 'WITH' FROM t OFFSET 1", false},
+		{"-- WITH OFFSET\nSELECT * FROM t", false},
+	} {
+		got, err := HasWithOffset(e, tc.sql)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.sql, err)
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %v want %v", tc.sql, got, tc.want)
+		}
+	}
+}
+
+func TestWithOffsetTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		want []TableTarget
+	}{
+		{`SELECT * FROM db1.t WITH OFFSET AS off`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{"SELECT * FROM db1.t WITH\nOFFSET AS off", []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t AS s JOIN other.u WITH OFFSET AS off ON 1`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT * FROM other.u, db1.t WITH OFFSET AS off`, []TableTarget{{DB: "db1", Table: "t"}}},
+		{`SELECT * FROM db1.t, other.u WITH OFFSET AS off`, []TableTarget{{DB: "other", Table: "u"}}},
+		{`SELECT 'WITH OFFSET' FROM db1.t`, nil},
+	} {
+		got, err := WithOffsetTargets(e, tc.sql)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.sql, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: got %+v want %+v", tc.sql, got, tc.want)
+		}
+	}
+}

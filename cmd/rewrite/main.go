@@ -52,22 +52,27 @@ func main() {
 		fatal("rewrite:", err)
 	}
 
-	out, err := protojson.MarshalOptions{Multiline: true, UseProtoNames: true}.Marshal(&pb.RewriteSQLResponse{
-		Code:                   res.Code,
-		Message:                res.Message,
-		StatementType:          res.StatementType,
-		SqlAfterRewrite:        res.SQL,
-		TableRewrites:          res.TableRewrites,
-		DatabaseRewrites:       res.DatabaseRewrites,
-		OriginalAccessedTables: res.OriginalAccessedTables,
-		PrivilegesDeltas:       res.PrivilegesDeltas,
-		ExistenceClause:        res.ExistenceClause,
-		FailedCteAliases:       res.FailedCTEAliases,
-	})
+	out, err := protojson.MarshalOptions{Multiline: true, UseProtoNames: true}.Marshal(responseFromResult(res))
 	if err != nil {
 		fatal("marshal response:", err)
 	}
 	fmt.Println(string(out))
+}
+
+func responseFromResult(res rewriter.RewriteResult) *pb.RewriteSQLResponse {
+	return &pb.RewriteSQLResponse{
+		Code:                            res.Code,
+		Message:                         res.Message,
+		StatementType:                   res.StatementType,
+		SqlAfterRewrite:                 res.SQL,
+		TableRewrites:                   res.TableRewrites,
+		DatabaseRewrites:                res.DatabaseRewrites,
+		OriginalAccessedTables:          res.OriginalAccessedTables,
+		PrivilegesDeltas:                res.PrivilegesDeltas,
+		ExistenceClause:                 res.ExistenceClause,
+		FailedCteAliases:                res.FailedCTEAliases,
+		StorageIntegrityContractVersion: res.StorageIntegrityContractVersion,
+	}
 }
 
 func fatal(msg string, err error) {

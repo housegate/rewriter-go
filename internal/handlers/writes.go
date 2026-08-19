@@ -22,6 +22,11 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return nil, false, err
 	}
 	sel := nameresolve.FindActive(opts)
+	if resp, rejected, err := preflightStorageIntegrityWrite(e, ast, info, sel); err != nil {
+		return nil, false, err
+	} else if rejected {
+		return resp, true, nil
+	}
 
 	switch info.Kind {
 	case engine.NodeCreateTable:
@@ -35,7 +40,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	case engine.NodeDelete:
 		return dispatchSingle(e, ast, info, sel, pb.StatementType_STATEMENT_TYPE_DELETE)
 	case engine.NodeCreateView:
-		return dispatchView(e, ast, info, opts, sel)
+		return dispatchView(e, ast, sql, info, opts, sel)
 	case engine.NodeInsert:
 		return dispatchInsert(e, ast, sql, info, sel)
 	case engine.NodeCommand:
@@ -56,6 +61,111 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		// the caller routes them to RewriteDBLevel / SELECT.
 		return nil, false, nil
 	}
+}
+
+// preflightStorageIntegrityWrite runs before statement-specific generic guards
+// (multi-DROP, cross-table ALTER, AS table-function, bare rejects). Otherwise
+// those guards can return a non-Success response without the SI access marker
+// Housegate needs to keep fail-closed semantics.
+func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+	if sel.Mode != nameresolve.ModeDynamic {
+		return nil, false, nil
+	}
+	// RewriteWrite is probed before the SELECT dispatcher. Never let write-side
+	// namespace policy claim a read root; SELECT applies the same extractor with
+	// RewriteError semantics and preserves ordinary accessed-table bookkeeping.
+	switch info.Kind {
+	case engine.NodeSelect, engine.NodeUnion, engine.NodeIntersect, engine.NodeExcept:
+		return nil, false, nil
+	}
+	inspectTarget := func(tt engine.TableTarget, allowInsertTarget bool) (*pb.RewriteSQLResponse, bool) {
+		if tt.Table == "" {
+			if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
+				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+				recordAccessedDatabase(resp, tt.DB, sel.Dynamic)
+				rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(tt.DB))
+				return resp, true
+			}
+			return nil, false
+		}
+		key := qualify(tt.DB, tt.Table)
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(key))
+			return resp, true
+		}
+		if _, logicalKey, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
+			if !authorized {
+				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+				recordAccessedWrite(resp, tt, sel)
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+				return resp, true
+			}
+			if allowInsertTarget {
+				return nil, false // authorized signed ingress owns logical SI INSERT acceptance
+			}
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(logicalKey))
+			return resp, true
+		}
+		return nil, false
+	}
+
+	targets, err := engine.AllWriteTargets(e, ast)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	for _, tt := range targets {
+		key := qualify(tt.DB, tt.Table)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert); rejected {
+			return resp, true, nil
+		}
+	}
+
+	// Namespace-bearing reads/writes that are not ordinary table nodes share
+	// one extractor and one fail-closed policy. This covers IN <table>, local
+	// catalog table functions, INSERT INTO FUNCTION, and CREATE TABLE engine
+	// sources before any command-specific generic reject can erase SI metadata.
+	namespaceRefs, err := engine.CollectNamespaceRefs(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	namespaceResp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+	if rejectStorageIntegrityNamespaces(namespaceResp, namespaceRefs, sel, pb.RewriteCode_UnsupportedStatement) {
+		return namespaceResp, true, nil
+	}
+
+	// CREATE TABLE AS SELECT and INSERT ... SELECT carry a second read-side
+	// namespace that ordinary write slots do not visit. Fail closed on SI
+	// sources before any statement-specific rewrite can forward a raw physical
+	// read. CREATE VIEW has its own body pipeline, which preserves view-target
+	// metadata and applies the same rejection later.
+	if info.Kind == engine.NodeCreateTable || info.Kind == engine.NodeInsert {
+		embeddedTables, _, err := engine.CollectEmbeddedSelectSources(ast)
+		if err != nil {
+			return nil, false, err
+		}
+		seenSources := map[string]bool{}
+		for _, tt := range embeddedTables {
+			key := qualify(tt.DB, tt.Table)
+			if seenSources[key] {
+				continue
+			}
+			seenSources[key] = true
+			if resp, rejected := inspectTarget(tt, false); rejected {
+				return resp, true, nil
+			}
+		}
+	}
+	return nil, false, nil
 }
 
 func newWriteResp(stmt pb.StatementType) *pb.RewriteSQLResponse {
@@ -87,6 +197,15 @@ func rejectInvalid(resp *pb.RewriteSQLResponse, msg string) {
 // reject code and returns ok=false so the caller short-circuits.
 func decideWriteTarget(tt engine.TableTarget, kind string, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (engine.TableDecision, bool) {
 	recordAccessedWrite(resp, tt, sel) // record BEFORE any reject (C++ writes.cc:118)
+	// Spec G §4.4: every non-INSERT slot resolving to a storage-integrity
+	// table is refused (INSERT stays on the ordinary path — the caller's
+	// signed ingress owns that decision, see plan deviation D-1).
+	if sel.Mode == nameresolve.ModeDynamic && kind != engine.NodeInsert {
+		if _, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			return engine.TableDecision{}, false
+		}
+	}
 	o := nameresolve.Resolve(tt.DB, tt.Table, sel)
 	switch o.Status {
 	case nameresolve.StatusRewrite:
@@ -114,6 +233,7 @@ func recordAccessedWrite(resp *pb.RewriteSQLResponse, tt engine.TableTarget, sel
 	resp.OriginalAccessedTables = append(resp.OriginalAccessedTables, &pb.AccessedTable{
 		OriginalDatabase: tt.DB, OriginalTable: tt.Table,
 		LogicalDatabase: a.LogicalDB, PhysicalDatabase: a.PhysicalDB, IsRemote: a.IsRemote,
+		IsStorageIntegrity: a.IsStorageIntegrity,
 	})
 }
 
@@ -164,11 +284,11 @@ func finishStructured(e engine.Engine, ast engine.AST, info engine.WriteInfo, se
 	if !ok {
 		return resp, true, nil // reject populated by applyStructuredSlots
 	}
-	sql, err := e.Generate(rewritten)
+	out, err := e.Generate(rewritten)
 	if err != nil {
 		return nil, false, err
 	}
-	resp.SqlAfterRewrite = sql
+	resp.SqlAfterRewrite = out
 	return resp, true, nil
 }
 
@@ -264,7 +384,7 @@ func dispatchAlter(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel n
 // matching C++, which returns Rejected the instant the name rewrite fails
 // (writes.cc:205-229). LIVE/WINDOW views are not modeled here (the C++ caller
 // rejects them upstream; Polyglot surfaces no such body for this phase).
-func dispatchView(e engine.Engine, ast engine.AST, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	stmt := pb.StatementType_STATEMENT_TYPE_CREATE_VIEW
 	if info.Materialized {
 		stmt = pb.StatementType_STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW
@@ -288,22 +408,39 @@ func dispatchView(e engine.Engine, ast engine.AST, info engine.WriteInfo, opts [
 			return nil, false, err
 		}
 		if has {
-			newBody, bodyResp, err := rewriteSelectCore(e, body, opts)
+			newBody, bodyResp, err := rewriteSelectCore(e, body, opts, sql)
 			if err != nil {
 				return nil, false, err
 			}
 			mergeViewBody(resp, bodyResp)
+			if sel.Mode == nameresolve.ModeDynamic {
+				for _, accessed := range bodyResp.GetOriginalAccessedTables() {
+					_, key, ok := nameresolve.LookupStorageIntegrity(accessed.GetOriginalDatabase(), accessed.GetOriginalTable(), sel.Dynamic)
+					if !ok {
+						continue
+					}
+					_, authorized := nameresolve.AuthorizeStorageIntegrityLogical(accessed.GetOriginalDatabase(), sel.Dynamic)
+					if authorized {
+						rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+						return resp, true, nil
+					}
+				}
+			}
+			if bodyResp.Code != pb.RewriteCode_Success {
+				resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
+				return resp, true, nil
+			}
 			if rewritten, err = engine.SetViewBody(rewritten, newBody); err != nil {
 				return nil, false, err
 			}
 		}
 	}
 
-	sql, err := e.Generate(rewritten)
+	out, err := e.Generate(rewritten)
 	if err != nil {
 		return nil, false, err
 	}
-	resp.SqlAfterRewrite = sql
+	resp.SqlAfterRewrite = out
 	return resp, true, nil
 }
 
@@ -365,6 +502,13 @@ func dispatchCommand(e engine.Engine, ast engine.AST, sql string, info engine.Wr
 		return dispatchRawTables(e, ast, sql, info, sel)
 	case engine.CmdBareReject:
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		targets, _, err := engine.RawTableRefs(e, ast)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, tt := range targets {
+			recordAccessedWrite(resp, tt, sel)
+		}
 		rejectUnsupported(resp, "statement is not supported")
 		return resp, true, nil
 	default: // CmdNone: USE/SHOW/GRANT/REVOKE/EXISTS — not a write this phase handles

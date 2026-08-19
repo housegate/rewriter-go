@@ -29,8 +29,8 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	if err != nil {
 		return nil, false, err
 	}
-	if t.Verb == engine.VerbNone {
-		return nil, false, nil // not EXISTS / SHOW CREATE → caller falls through
+	if t.Verb != engine.VerbExists && t.Verb != engine.VerbShowCreate {
+		return nil, false, nil // not EXISTS / SHOW CREATE (DESCRIBE has its own handler) → caller falls through
 	}
 
 	stmt := pb.StatementType_STATEMENT_TYPE_EXISTS_TABLE
@@ -39,14 +39,55 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 		stmt, keyword = pb.StatementType_STATEMENT_TYPE_SHOW_CREATE_TABLE, "SHOW CREATE"
 	}
 	resp := newWriteResp(stmt)
+	sel := nameresolve.FindActive(opts)
+	if sel.Mode == nameresolve.ModeDynamic {
+		if t.ObjType == "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.Table, sel.Dynamic) {
+			recordAccessedDatabase(resp, t.Table, sel.Dynamic)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(t.Table))
+			return resp, true, nil
+		}
+		effectiveDB := t.DB
+		if effectiveDB == "" {
+			effectiveDB = sel.Dynamic.GetUpstreamLogicalDatabaseInContext()
+		}
+		if t.ObjType != "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(effectiveDB, sel.Dynamic) {
+			tt := engine.TableTarget{DB: t.DB, Table: t.Table}
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(effectiveDB, t.Table)))
+			return resp, true, nil
+		}
+	}
 
 	if t.ObjType != "TABLE" {
 		rejectUnsupported(resp, keyword+" "+t.ObjType+" is not supported; only "+keyword+" TABLE is allowed")
 		return resp, true, nil
 	}
 
-	sel := nameresolve.FindActive(opts)
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
+	if sel.Mode == nameresolve.ModeDynamic {
+		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+			recordAccessedWrite(resp, tt, sel)
+			rejectUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table)))
+			return resp, true, nil
+		}
+		if tbl, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+			recordAccessedWrite(resp, tt, sel)
+			logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
+			if !authorized {
+				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+				return resp, true, nil
+			}
+			if t.Verb == engine.VerbShowCreate {
+				// The physical DDL would expose engine/zk path/_hg_row_id (Spec G §4.3).
+				rejectUnsupported(resp, "SHOW CREATE TABLE on storage-integrity table "+key+" is not supported")
+				return resp, true, nil
+			}
+			db, table := splitPhysicalName(tbl.GetSafeTable())
+			recordRewrite(resp.TableRewrites, tt, db, table)
+			resp.SqlAfterRewrite = buildObjectSQL(keyword, t.Temporary, db, table)
+			return resp, true, nil
+		}
+	}
 	d, ok := decideWriteTarget(tt, keyword+" TABLE", sel, resp)
 	if !ok {
 		return resp, true, nil // reject populated (accessed recorded first, like C++)

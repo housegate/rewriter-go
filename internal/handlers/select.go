@@ -2,6 +2,7 @@
 package handlers
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/housegate/rewriter-go/internal/engine"
@@ -15,10 +16,13 @@ import (
 //
 // It is a thin wrapper over rewriteSelectCore: run the pipeline, then Generate the
 // rewritten AST into SqlAfterRewrite.
-func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
-	rewritten, resp, err := rewriteSelectCore(e, ast, opts)
+func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption, sourceSQL ...string) (*pb.RewriteSQLResponse, error) {
+	rewritten, resp, err := rewriteSelectCore(e, ast, opts, sourceSQL...)
 	if err != nil {
 		return nil, err
+	}
+	if resp.Code != pb.RewriteCode_Success {
+		return resp, nil // reject: leave SqlAfterRewrite empty; native.finalize echoes the input
 	}
 	sql, err := e.Generate(rewritten)
 	if err != nil {
@@ -34,7 +38,7 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (*
 // RewriteSelect (top-level) and the view-body path (handlers/writes.go dispatchView,
 // mirroring C++ rewriteEmbeddedViewBody which runs the same SELECT pipeline on a
 // view's embedded body).
-func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption) (engine.AST, *pb.RewriteSQLResponse, error) {
+func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption, sourceSQL ...string) (engine.AST, *pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{
 		Code:          pb.RewriteCode_Success,
 		Message:       "success",
@@ -98,13 +102,102 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if err != nil {
 		return nil, nil, err
 	}
+	var namespaceRefs []engine.NamespaceRef
+	if sel.Mode == nameresolve.ModeDynamic {
+		var ferr error
+		namespaceRefs, ferr = engine.CollectNamespaceRefs(ast)
+		if ferr != nil {
+			return nil, nil, ferr
+		}
+	}
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
+	if sel.Mode == nameresolve.ModeDynamic {
+		if rejectStorageIntegrityNamespaces(resp, namespaceRefs, sel, pb.RewriteCode_RewriteError) {
+			return ast, resp, nil
+		}
+		for _, tt := range originals {
+			if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
+				resp.Code = pb.RewriteCode_RewriteError
+				resp.Message = nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table))
+				return ast, resp, nil
+			}
+			if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+				logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(tt.DB, sel.Dynamic)
+				if !authorized {
+					resp.Code = pb.RewriteCode_InvalidRewriteRequest
+					resp.Message = nameresolve.StorageIntegrityUnauthorizedMessage(logical)
+					return ast, resp, nil
+				}
+			}
+		}
+	}
+
+	// Spec G D3: a statement that touches at least one SI table must not
+	// address the reserved row-id column anywhere. Checked on the ORIGINAL
+	// AST (the substituted bodies legitimately mention it in EXCEPT). FINAL
+	// and SAMPLE are rejected at the same pre-rewrite boundary because a
+	// derived-table substitution cannot silently discard their semantics.
+	if sel.Mode == nameresolve.ModeDynamic && touchesStorageIntegrity(resp.OriginalAccessedTables) {
+		wrapperTargets, merr := engine.UnsupportedTableWrapperTargets(ast)
+		if merr != nil {
+			return nil, nil, merr
+		}
+		modified := false
+		for _, tt := range wrapperTargets {
+			if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+				modified = true
+				break
+			}
+		}
+		if !modified && len(sourceSQL) > 0 {
+			withOffsetTargets, oerr := engine.WithOffsetTargets(e, sourceSQL[0])
+			if oerr != nil {
+				return nil, nil, oerr
+			}
+			for _, tt := range withOffsetTargets {
+				if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+					modified = true
+					break
+				}
+			}
+		}
+		if modified {
+			resp.Code = pb.RewriteCode_RewriteError
+			resp.Message = "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported"
+			return ast, resp, nil
+		}
+		rid := nameresolve.ReservedRowIDColumn(sel.Dynamic)
+		hit, herr := engine.ReferencesIdentifier(ast, rid)
+		if herr != nil {
+			return nil, nil, herr
+		}
+		if hit {
+			resp.Code = pb.RewriteCode_RewriteError
+			resp.Message = fmt.Sprintf(reservedColumnRejectFmt, rid)
+			return ast, resp, nil
+		}
+	}
+
+	var siErr error
 	rewritten, err := engine.RewriteSelectTables(ast, func(tt engine.TableTarget) engine.TableDecision {
+		if sel.Mode == nameresolve.ModeDynamic {
+			if tbl, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+				d, derr := storageIntegrityDecision(e, tt, tbl, sel.Dynamic.GetStorageIntegrity(), resp.TableRewrites)
+				if derr != nil {
+					siErr = derr
+					return engine.TableDecision{Action: engine.ActionSkip}
+				}
+				return d
+			}
+		}
 		return decideTable(tt, sel, resp.TableRewrites)
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if siErr != nil {
+		return nil, nil, siErr
 	}
 
 	rewritten, err = applyOptions(rewritten, opts)
@@ -171,6 +264,7 @@ func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*p
 		out = append(out, &pb.AccessedTable{
 			OriginalDatabase: tt.DB, OriginalTable: tt.Table,
 			LogicalDatabase: a.LogicalDB, PhysicalDatabase: a.PhysicalDB, IsRemote: a.IsRemote,
+			IsStorageIntegrity: a.IsStorageIntegrity,
 		})
 	}
 	return out
@@ -182,4 +276,14 @@ func qualify(db, table string) string {
 		return table
 	}
 	return db + "." + table
+}
+
+// touchesStorageIntegrity reports whether any accessed table is SI-flagged.
+func touchesStorageIntegrity(accessed []*pb.AccessedTable) bool {
+	for _, a := range accessed {
+		if a.GetIsStorageIntegrity() {
+			return true
+		}
+	}
+	return false
 }

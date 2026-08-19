@@ -38,6 +38,9 @@ func Compare(got, want *pb.RewriteSQLResponse, semanticEq SemanticEq) Diff {
 	if got.GetExistenceClause() != want.GetExistenceClause() {
 		add("existence_clause", got.GetExistenceClause(), want.GetExistenceClause())
 	}
+	if got.GetStorageIntegrityContractVersion() != want.GetStorageIntegrityContractVersion() {
+		add("storage_integrity_contract_version", got.GetStorageIntegrityContractVersion(), want.GetStorageIntegrityContractVersion())
+	}
 	if !mapEq(got.GetTableRewrites(), want.GetTableRewrites()) {
 		add("table_rewrites", got.GetTableRewrites(), want.GetTableRewrites())
 	}
