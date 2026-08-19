@@ -233,7 +233,7 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 	args, _ := fn["args"].([]any)
 	lower := strings.ToLower(name)
 	switch lower {
-	case "in", "notin", "globalin", "globalnotin":
+	case "in", "notin", "nullin", "notnullin", "globalin", "globalnotin", "globalnullin", "globalnotnullin":
 		return decodeCallableInNamespaceRef(lower, args)
 	case "remote", "remotesecure", "cluster", "clusterallreplicas":
 		return decodeNamespacePair(NamespaceRefTableFunction, name, args, 1), true
@@ -279,8 +279,8 @@ func decodeCallableInNamespaceRef(name string, args []any) (NamespaceRef, bool) 
 		return NamespaceRef{}, false
 	}
 	display := map[string]string{
-		"in": "IN", "notin": "NOT IN",
-		"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN",
+		"in": "IN", "notin": "NOT IN", "nullin": "NULL IN", "notnullin": "NOT NULL IN",
+		"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN", "globalnullin": "GLOBAL NULL IN", "globalnotnullin": "GLOBAL NOT NULL IN",
 	}[name]
 	ref := decodeNamespaceSingle(NamespaceRefInTable, display, args[1])
 	if ref.Target.Table == "" && !ref.Resolved {
