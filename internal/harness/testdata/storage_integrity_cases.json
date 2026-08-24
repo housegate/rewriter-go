@@ -6781,5 +6781,61 @@
     "want_table_rewrites": {
       "other.x": "phys.other.x"
     }
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_unmodelled_statement_rejected",
+    "reject": true,
+    "sql": "SYSTEM RELOAD CONFIG",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_unmodelled_statement_on_ordinary_table_rejected",
+    "reject": true,
+    "sql": "CHECK TABLE other.u",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
+    "want_stmt": ""
   }
 ]

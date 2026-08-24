@@ -85,6 +85,14 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 	return r
 }
 
+// StorageIntegrityUnmodelledMessage is returned when a request carries a
+// non-empty storage_integrity.tables map and execution reaches the
+// unmodelled-statement pass-through. The rewriter cannot prove such a
+// statement is harmless to the protocol-owned namespaces, so it refuses to
+// forward it (Spec I D1). Enumerated classes replace this text with a more
+// specific one; see handlers.AnnotateStorageIntegrityReject.
+const StorageIntegrityUnmodelledMessage = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+
 // doRewrite is the engine-level rewrite pipeline shared by NativeRewriter
 // (per-connection, options via callback) and Service (stateless, options
 // from the request). A non-nil error means an unexpected/internal failure
@@ -186,7 +194,16 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	}
 
 	// Pass-through: regenerate (proves the engine round-trips); fall back to
-	// the input on any generate hiccup so SQL is always runnable.
+	// the input on any generate hiccup so SQL is always runnable. With an
+	// active storage-integrity contract this branch is a refusal instead:
+	// reaching it means no handler modelled the statement, so no handler
+	// checked it against the protocol-owned namespaces (Spec I D1).
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = StorageIntegrityUnmodelledMessage
+		finalize(resp, sql, ec, siVersion)
+		return resp, nil
+	}
 	if gen, gerr := e.Generate(ast); gerr == nil && gen != "" {
 		resp.SqlAfterRewrite = gen
 	}

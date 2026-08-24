@@ -848,3 +848,62 @@ func TestStorageIntegrityContract_DescribeRetainsAcknowledgement(t *testing.T) {
 		t.Fatalf("res = %+v, want Success/DESCRIBE/V1", res)
 	}
 }
+
+func TestDoRewrite_UnmodelledStatementPassesThroughWithoutStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			DynamicArgs: &pb.RewriteTableDynamicArgs{
+				DatabaseMap:            map[string]string{"db1": "phys"},
+				KnownPhysicalDatabases: []string{"phys"},
+				Delim:                  "_",
+			}}}}}
+	resp, err := doRewrite(e, "SYSTEM RELOAD CONFIG", opts)
+	if err != nil {
+		t.Fatalf("doRewrite: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %v (%s), want Success — empty-SI requests keep the legacy pass-through",
+			resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+		t.Fatalf("contract ack = %v, want UNSPECIFIED", resp.GetStorageIntegrityContractVersion())
+	}
+}
+
+func TestDoRewrite_UnmodelledStatementFailsClosedWithStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			DynamicArgs: &pb.RewriteTableDynamicArgs{
+				DatabaseMap:            map[string]string{"db1": "phys"},
+				KnownPhysicalDatabases: []string{"phys"},
+				Delim:                  "_",
+				StorageIntegrity: &pb.StorageIntegrityArgs{
+					Tables: map[string]*pb.StorageIntegrityArgs_Table{
+						"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"}},
+					ReadMode:            pb.StorageIntegrityArgs_READ_MODE_SAFE,
+					ReservedRowIdColumn: "_hg_row_id",
+					ContractVersion:     pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+				},
+			}}}}}
+	resp, err := doRewrite(e, "SYSTEM RELOAD CONFIG", opts)
+	if err != nil {
+		t.Fatalf("doRewrite: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("code = %v, want UnsupportedStatement", resp.GetCode())
+	}
+	if resp.GetMessage() != StorageIntegrityUnmodelledMessage {
+		t.Fatalf("message = %q, want %q", resp.GetMessage(), StorageIntegrityUnmodelledMessage)
+	}
+	if resp.GetSqlAfterRewrite() != "SYSTEM RELOAD CONFIG" {
+		t.Fatalf("reject must echo the original SQL, got %q", resp.GetSqlAfterRewrite())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED {
+		t.Fatalf("statement_type = %v, want UNSPECIFIED on a reject", resp.GetStatementType())
+	}
+	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		t.Fatalf("contract ack = %v, want V1 on every SI response path", resp.GetStorageIntegrityContractVersion())
+	}
+}
