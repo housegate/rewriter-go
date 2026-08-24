@@ -158,11 +158,18 @@ func TestStorageIntegrityGolden(t *testing.T) {
 			}
 			if c.Reject {
 				if res.SQL != c.SQL {
-					t.Errorf("reject must echo original SQL: got %q", res.SQL)
+					t.Errorf("reject must echo original SQL:\n got %q\nwant %q", res.SQL, c.SQL)
 				}
-			} else if c.WantSQL != "" {
-				if eq, err := semEq(res.SQL, c.WantSQL); err != nil || !eq {
-					t.Errorf("sql (semantic):\n got %q\nwant %q (err=%v)", res.SQL, c.WantSQL, err)
+			} else {
+				// Spec J D3: comparison is always exact, after the shared
+				// literal-aware normalization. sql_exact no longer exists.
+				want := c.WantSQL
+				if c.AllowSQLDivergence {
+					want = c.WantSQLGo
+				}
+				got := NormalizeSIIdentifierQuotes(res.SQL)
+				if norm := NormalizeSIIdentifierQuotes(want); got != norm {
+					t.Errorf("sql (exact after normalization):\n got %q\nwant %q", got, norm)
 				}
 			}
 			for _, sub := range c.WantSQLContains {
