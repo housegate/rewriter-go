@@ -1,58 +1,18 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
-
-// siDynamicJSON is dblevelDynamicJSON plus the storage_integrity block.
-type siDynamicJSON struct {
-	DatabaseMap                          map[string]string             `json:"database_map"`
-	KnownPhysicalDatabases               []string                      `json:"known_physical_databases"`
-	UpstreamLogical                      string                        `json:"upstream_logical_database_in_context"`
-	UpstreamPhysical                     string                        `json:"upstream_physical_database_in_context"`
-	Delim                                string                        `json:"delim"`
-	LogicalDatabaseToRemoteUpstreamIndex map[string]string             `json:"logical_database_to_remote_upstream_index"`
-	RemoteUpstreams                      map[string]remoteUpstreamJSON `json:"remote_upstreams"`
-	StorageIntegrity                     *siArgsJSON                   `json:"storage_integrity"`
-}
-
-type siArgsJSON struct {
-	Tables              map[string]siTableJSON `json:"tables"`
-	ReadMode            string                 `json:"read_mode"` // "SAFE" | "UNSAFE_LATEST"
-	ReservedRowIDColumn string                 `json:"reserved_row_id_column"`
-}
-
-type siTableJSON struct {
-	SafeTable           string   `json:"safe_table"`
-	UnsafeTable         string   `json:"unsafe_table"`
-	ExcludedUnsafeParts []string `json:"excluded_unsafe_parts"`
-}
-
-type siCase struct {
-	Name                string            `json:"name"`
-	SQL                 string            `json:"sql"`
-	Dynamic             *siDynamicJSON    `json:"dynamic"`
-	WantCode            string            `json:"want_code"`
-	WantStmt            string            `json:"want_stmt"`
-	WantTableRewrites   map[string]string `json:"want_table_rewrites"`
-	WantAccessed        []accessedJSON    `json:"want_accessed"`
-	WantSQL             string            `json:"want_sql"`
-	SQLExact            bool              `json:"sql_exact"`
-	WantSQLContains     []string          `json:"want_sql_contains"`
-	WantSQLNotContains  []string          `json:"want_sql_not_contains"`
-	WantMessageContains string            `json:"want_message_contains"`
-	Reject              bool              `json:"reject"`
-	AllowSQLDivergence  bool              `json:"allow_sql_divergence"`
-	WantNoContractAck   bool              `json:"want_no_contract_ack"`
-}
 
 var siReadModeByName = map[string]pb.StorageIntegrityArgs_ReadMode{
 	"":              pb.StorageIntegrityArgs_READ_MODE_UNSPECIFIED,
@@ -81,7 +41,7 @@ func siStmtType(name string) pb.StatementType {
 	return phase4StmtType(name)
 }
 
-func (c siCase) options() []*pb.RewriteOption {
+func (c SICase) options() []*pb.RewriteOption {
 	if c.Dynamic == nil {
 		return nil
 	}
@@ -119,23 +79,10 @@ func (c siCase) options() []*pb.RewriteOption {
 		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{DynamicArgs: da}}}}
 }
 
-func loadSICases(t *testing.T) []siCase {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "storage_integrity_cases.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cases []siCase
-	if err := json.Unmarshal(b, &cases); err != nil {
-		t.Fatal(err)
-	}
-	return cases
-}
-
 // TestStorageIntegrityGolden is the Spec G parity gate. Cases are driven
 // through the public NativeRewriter (full doRewrite dispatch) so every
-// statement family is covered. Structured fields compare exactly, SQL
-// semantically (exact when sql_exact), plus engine-agnostic
+// statement family is covered. Structured fields compare exactly, while
+// UPDATE_GOLDEN writes normalized exact SQL pins. Engine-agnostic
 // want_sql_contains / want_sql_not_contains substrings that the C++ test
 // applies to the identical JSON.
 func TestStorageIntegrityGolden(t *testing.T) {
@@ -150,13 +97,40 @@ func TestStorageIntegrityGolden(t *testing.T) {
 	oracle, _ := DialOracle()
 	defer oracle.Close()
 	semEq := semanticSQLEq(e)
+	update := os.Getenv(UpdateGoldenEnv) == "1"
+	if update && oracle == nil {
+		t.Fatalf("%s=1 requires %s to point at a running rewriter-grpc so want_sql_cpp can be regenerated",
+			UpdateGoldenEnv, OracleAddrEnv)
+	}
+	cases := LoadSICorpus(t)
 
-	for _, c := range loadSICases(t) {
+	for i := range cases {
+		c := &cases[i]
 		t.Run(c.Name, func(t *testing.T) {
 			r := newWriteRewriter(e, c.options())
 			res, err := r.Rewrite(context.Background(), c.SQL, "acct")
 			if err != nil {
 				t.Fatalf("rewrite: %v", err)
+			}
+			if update {
+				if c.Reject {
+					return // reject cases echo the input; nothing to pin
+				}
+				want, oerr := oracle.Rewrite(c.SQL, c.options())
+				if oerr != nil {
+					t.Fatalf("oracle: %v", oerr)
+				}
+				goSQL := NormalizeSIIdentifierQuotes(res.SQL)
+				cppSQL := NormalizeSIIdentifierQuotes(want.GetSqlAfterRewrite())
+				c.WantSQL, c.WantSQLGo, c.WantSQLCPP = "", "", ""
+				if goSQL == cppSQL {
+					c.AllowSQLDivergence = false
+					c.WantSQL = goSQL
+				} else {
+					c.AllowSQLDivergence = true
+					c.WantSQLGo, c.WantSQLCPP = goSQL, cppSQL
+				}
+				return
 			}
 			if c.Dynamic != nil && c.Dynamic.StorageIntegrity != nil && len(c.Dynamic.StorageIntegrity.Tables) > 0 {
 				want := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1
@@ -184,18 +158,18 @@ func TestStorageIntegrityGolden(t *testing.T) {
 			}
 			if c.Reject {
 				if res.SQL != c.SQL {
-					t.Errorf("reject must echo original SQL: got %q", res.SQL)
+					t.Errorf("reject must echo original SQL:\n got %q\nwant %q", res.SQL, c.SQL)
 				}
 			} else {
-				switch {
-				case c.SQLExact:
-					if res.SQL != c.WantSQL {
-						t.Errorf("sql (exact):\n got %q\nwant %q", res.SQL, c.WantSQL)
-					}
-				case c.WantSQL != "":
-					if eq, err := semEq(res.SQL, c.WantSQL); err != nil || !eq {
-						t.Errorf("sql (semantic):\n got %q\nwant %q (err=%v)", res.SQL, c.WantSQL, err)
-					}
+				// Spec J D3: comparison is always exact, after the shared
+				// literal-aware normalization. sql_exact no longer exists.
+				want := c.WantSQL
+				if c.AllowSQLDivergence {
+					want = c.WantSQLGo
+				}
+				got := NormalizeSIIdentifierQuotes(res.SQL)
+				if norm := NormalizeSIIdentifierQuotes(want); got != norm {
+					t.Errorf("sql (exact after normalization):\n got %q\nwant %q", got, norm)
 				}
 			}
 			for _, sub := range c.WantSQLContains {
@@ -226,5 +200,174 @@ func TestStorageIntegrityGolden(t *testing.T) {
 				}
 			}
 		})
+	}
+	if update {
+		if t.Failed() {
+			t.Fatal("regeneration failed; corpus was not rewritten")
+		}
+		writeSICorpus(t, cases)
+	}
+}
+
+// writeSICorpus rewrites the corpus file deterministically.
+//
+// SetEscapeHTML(false) is mandatory: the corpus contains SQL such as
+// `WHERE a > 1`, and the default encoder would escape every `>`, producing a
+// 145 KB diff of pure escaping noise.
+func writeSICorpus(t *testing.T, cases []SICase) {
+	t.Helper()
+	path := SICorpusPath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documents []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &documents); err != nil {
+		t.Fatalf("decode %s for update: %v", path, err)
+	}
+	if len(documents) != len(cases) {
+		t.Fatalf("update %s: decoded %d raw cases, generated %d cases", path, len(documents), len(cases))
+	}
+	for i := range cases {
+		var name string
+		if err := json.Unmarshal(documents[i]["name"], &name); err != nil {
+			t.Fatalf("update %s case %d name: %v", path, i, err)
+		}
+		if name != cases[i].Name {
+			t.Fatalf("update %s case %d order changed: raw name %q, generated name %q",
+				path, i, name, cases[i].Name)
+		}
+
+		// Preserve the raw JSON for every non-mutable field. Re-encoding the
+		// SICase structs directly would collapse explicit empty maps and add
+		// zero-valued fields from nested shared structs, hiding unrelated
+		// corpus changes inside the regeneration diff.
+		for _, key := range []string{
+			"want_sql", "want_sql_go", "want_sql_cpp", "allow_sql_divergence", "sql_exact",
+		} {
+			delete(documents[i], key)
+		}
+		putString := func(key, value string) {
+			if value == "" {
+				return
+			}
+			var encoded bytes.Buffer
+			stringEncoder := json.NewEncoder(&encoded)
+			stringEncoder.SetEscapeHTML(false)
+			if err := stringEncoder.Encode(value); err != nil {
+				t.Fatalf("encode %s.%s: %v", name, key, err)
+			}
+			documents[i][key] = bytes.TrimSpace(encoded.Bytes())
+		}
+		putString("want_sql", cases[i].WantSQL)
+		putString("want_sql_go", cases[i].WantSQLGo)
+		putString("want_sql_cpp", cases[i].WantSQLCPP)
+		if cases[i].AllowSQLDivergence {
+			documents[i]["allow_sql_divergence"] = json.RawMessage("true")
+		}
+	}
+
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(documents); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("rewrote %s: %d cases, %d bytes", path, len(cases), out.Len())
+}
+
+func TestWriteSICorpusPreservesNonMutableFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "storage_integrity_cases.json")
+	raw := []byte(`[
+  {
+    "name": "agree",
+    "sql": "SELECT a FROM db.t WHERE a > 1",
+    "dynamic": {"database_map": {}},
+    "want_code": "Success",
+    "want_stmt": "",
+    "want_sql": "old",
+    "sql_exact": true,
+    "want_accessed": [{"original_database": "", "is_remote": false}]
+  },
+  {
+    "name": "diverge",
+    "sql": "SELECT b FROM db.t",
+    "want_code": "Success",
+    "want_sql": "stale",
+    "allow_sql_divergence": false
+  }
+]`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SICorpusPathEnv, path)
+
+	cases := []SICase{
+		{Name: "agree", WantSQL: `SELECT a FROM phys."db.t" WHERE a > 1`},
+		{
+			Name: "diverge", AllowSQLDivergence: true,
+			WantSQLGo: `SELECT b FROM phys."db.t"`, WantSQLCPP: `SELECT b FROM phys."db.t" AS "db.t"`,
+		},
+	}
+	var before []map[string]any
+	if err := json.Unmarshal(raw, &before); err != nil {
+		t.Fatal(err)
+	}
+	stripMutable := func(documents []map[string]any) {
+		for _, document := range documents {
+			for _, key := range []string{
+				"want_sql", "want_sql_go", "want_sql_cpp", "allow_sql_divergence", "sql_exact",
+			} {
+				delete(document, key)
+			}
+		}
+	}
+	stripMutable(before)
+
+	writeSICorpus(t, cases)
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(first, []byte(`\u003e`)) {
+		t.Fatalf("writer escaped SQL comparison operator: %s", first)
+	}
+	var after []map[string]any
+	if err := json.Unmarshal(first, &after); err != nil {
+		t.Fatal(err)
+	}
+	stripMutable(after)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("non-mutable corpus fields changed:\n before=%#v\n  after=%#v", before, after)
+	}
+	var pins []map[string]json.RawMessage
+	if err := json.Unmarshal(first, &pins); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pins[0]["sql_exact"]; ok {
+		t.Fatal("sql_exact survived regeneration")
+	}
+	if _, ok := pins[0]["allow_sql_divergence"]; ok {
+		t.Fatal("agreeing case retained allow_sql_divergence")
+	}
+	if got := string(pins[0]["want_sql"]); got != `"SELECT a FROM phys.\"db.t\" WHERE a > 1"` {
+		t.Fatalf("agreeing pin = %s", got)
+	}
+	if string(pins[1]["allow_sql_divergence"]) != "true" ||
+		len(pins[1]["want_sql_go"]) == 0 || len(pins[1]["want_sql_cpp"]) == 0 {
+		t.Fatalf("divergent pins = %v", pins[1])
+	}
+
+	writeSICorpus(t, cases)
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("writer output is not deterministic")
 	}
 }

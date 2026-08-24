@@ -92,7 +92,7 @@
     "materialized": false,
     "temporary": false,
     "secure": false,
-    "security_sql_style": true,
+    "security_sql_style": false,
     "security_after_name": false,
     "query_parenthesized": false,
     "copy_grants": false,

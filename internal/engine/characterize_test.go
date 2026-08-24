@@ -1,9 +1,13 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"testing"
 
 	polyglot "github.com/tobilg/polyglot/packages/go"
@@ -65,10 +69,50 @@ var characterizeCases = map[string]string{
 	"create_mv_to":      "CREATE MATERIALIZED VIEW db.mv TO db.dst AS SELECT * FROM db.s",
 }
 
+// updateGoldenEnv mirrors harness.UpdateGoldenEnv. internal/harness imports
+// internal/engine, so the constant cannot be shared without an import cycle.
+const updateGoldenEnv = "UPDATE_GOLDEN"
+
+func sortedCharacterizeCaseNames(cases map[string]string) []string {
+	names := make([]string, 0, len(cases))
+	for name := range cases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestSortedCharacterizeCaseNamesStableAcrossInsertionOrder(t *testing.T) {
+	want := []string{"alter", "create", "delete", "insert", "select", "update"}
+
+	for seed := int64(0); seed < 32; seed++ {
+		insertionOrder := slices.Clone(want)
+		rand.New(rand.NewSource(seed)).Shuffle(len(insertionOrder), func(i, j int) {
+			insertionOrder[i], insertionOrder[j] = insertionOrder[j], insertionOrder[i]
+		})
+		cases := make(map[string]string, len(insertionOrder))
+		for _, name := range insertionOrder {
+			cases[name] = name
+		}
+
+		if got := sortedCharacterizeCaseNames(cases); !slices.Equal(got, want) {
+			t.Fatalf("seed %d: sorted case names = %v, want %v", seed, got, want)
+		}
+	}
+}
+
+// TestCharacterizeAST pins the polyglot AST shapes that ast_test.go and
+// nodes_test.go read. It compares by default and only regenerates under
+// UPDATE_GOLDEN=1 (Spec J D7). It used to overwrite the fixtures on every run
+// and assert nothing, which meant a semantic change in the pinned engine
+// rewrote the goldens silently and left the suite order-dependent between this
+// writer and its two readers.
 func TestCharacterizeAST(t *testing.T) {
 	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
 		t.Skip("POLYGLOT_SQL_FFI_PATH not set; run via `make test`")
 	}
+	update := os.Getenv(updateGoldenEnv) == "1"
+
 	c, err := polyglot.OpenDefault()
 	if err != nil {
 		t.Fatalf("OpenDefault: %v", err)
@@ -76,21 +120,44 @@ func TestCharacterizeAST(t *testing.T) {
 	defer c.Close()
 
 	dir := filepath.Join("testdata", "ast-shapes")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, sql := range characterizeCases {
-		ast, err := c.ParseOne(sql, "clickhouse")
-		if err != nil {
-			t.Errorf("%s: ParseOne(%q): %v", name, sql, err)
-			continue
-		}
-		var pretty json.RawMessage = ast
-		buf, _ := json.MarshalIndent(json.RawMessage(pretty), "", "  ")
-		out := filepath.Join(dir, name+".json")
-		if err := os.WriteFile(out, buf, 0o644); err != nil {
+	if update {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("wrote %s (%d bytes)", out, len(buf))
+	}
+
+	for _, name := range sortedCharacterizeCaseNames(characterizeCases) {
+		sql := characterizeCases[name]
+		t.Run(name, func(t *testing.T) {
+			ast, err := c.ParseOne(sql, "clickhouse")
+			if err != nil {
+				t.Fatalf("ParseOne(%q): %v", sql, err)
+			}
+			// json.MarshalIndent over a RawMessage is how the committed
+			// fixtures were produced; keep it byte-for-byte so a formatting
+			// change never masquerades as an AST change.
+			got, err := json.MarshalIndent(json.RawMessage(ast), "", "  ")
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			out := filepath.Join(dir, name+".json")
+			if update {
+				if err := os.WriteFile(out, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("wrote %s (%d bytes)", out, len(got))
+				return
+			}
+			want, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatalf("read fixture %s: %v\nregenerate with: %s=1 make test", out, err, updateGoldenEnv)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("%s is stale against the pinned polyglot.\n"+
+					"--- committed ---\n%s\n--- produced ---\n%s\n"+
+					"If the new shape is correct, regenerate with: %s=1 make test",
+					out, want, got, updateGoldenEnv)
+			}
+		})
 	}
 }

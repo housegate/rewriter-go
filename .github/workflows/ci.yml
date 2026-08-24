@@ -52,6 +52,14 @@ jobs:
           key: polyglot-ffi-${{ runner.os }}-${{ steps.polyglot.outputs.sha }}
       - run: make ffi
       - run: make test
+      # Spec J D7: no test may rewrite a tracked file. characterize_test.go
+      # used to overwrite internal/engine/testdata/ast-shapes/*.json on every
+      # run and assert nothing, so fixture drift was invisible. It now compares
+      # and regenerates only under UPDATE_GOLDEN=1; this step is what keeps it
+      # honest. --ignore-submodules=all so a cargo build inside
+      # third_party/polyglot-src cannot trip it.
+      - name: assert tests did not mutate tracked files
+        run: git diff --exit-code --ignore-submodules=all
       - name: fidelity spike
         run: POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.so" go run ./cmd/fidelity-spike
 
