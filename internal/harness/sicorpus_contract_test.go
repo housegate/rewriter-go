@@ -22,6 +22,25 @@ func TestSICorpusContract(t *testing.T) {
 	}
 }
 
+func TestSICorpusIsBytePinned(t *testing.T) {
+	raw, err := os.ReadFile(SICorpusPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(raw); got != SICorpusBytes {
+		t.Errorf("corpus size = %d bytes, want %d", got, SICorpusBytes)
+	}
+	if got := siCorpusFingerprint(raw); got != SICorpusFingerprint {
+		t.Errorf("corpus fingerprint = %d, want %d\n"+
+			"The shared corpus changed. Copy it to rewriter-grpc/tests/testdata/ and update the pinned\n"+
+			"constants in BOTH internal/harness/sicorpus_test.go and rewriter-grpc/tests/si_corpus.h.",
+			got, SICorpusFingerprint)
+	}
+	if got := len(LoadSICorpus(t)); got != SICorpusCases {
+		t.Errorf("corpus case count = %d, want %d", got, SICorpusCases)
+	}
+}
+
 func TestLoadSICorpus_RequiresExactlyOneJSONValue(t *testing.T) {
 	valid := `[{"name":"one","sql":"SELECT 1","want_code":"Success","want_sql":"SELECT 1"}]`
 	tests := []struct {

@@ -222,6 +222,28 @@ func siContainsEquivalent(sql, sub string) bool {
 		strings.Contains(NormalizeSIIdentifierQuotes(sql), NormalizeSIIdentifierQuotes(sub))
 }
 
+// The shared corpus must stay byte-identical to
+// rewriter-grpc/tests/testdata/storage_integrity_cases.json. This repo locally
+// pins its own exact bytes, catching accidental edits and stale local pins.
+// Intentional updates require paired PRs, an explicit byte-for-byte cmp, and a
+// recorded SHA-256 in each PR description.
+const (
+	SICorpusFingerprint uint64 = 15778819420408124525
+	SICorpusBytes       int    = 183351
+	SICorpusCases       int    = 178
+)
+
+// siCorpusFingerprint is FNV-1a/64 over the exact file bytes, mirrored by
+// si_corpus::Fingerprint in rewriter-grpc.
+func siCorpusFingerprint(raw []byte) uint64 {
+	h := uint64(14695981039346656037)
+	for _, b := range raw {
+		h ^= uint64(b)
+		h *= 1099511628211
+	}
+	return h
+}
+
 // legacySICase is the pre-migration shape, decoded leniently so
 // LegacyCoverageReport can read a corpus that still carries `sql_exact`.
 type legacySICase struct {
