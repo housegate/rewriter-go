@@ -55,7 +55,12 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 // classify() stamps it, so clear it here) and echoes the original SQL so
 // RewriteResult.SQL stays runnable (design §8). NOTE: unlike statement_type,
 // existence_clause is NOT cleared on a reject.
-func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause, siVersion pb.StorageIntegrityContractVersion) {
+//
+// When storage integrity is active, this is also the shared final rejection
+// annotation point: every non-Success response is checked for an SI object so
+// opaque and otherwise unmodelled statement classes still name what they
+// addressed (Spec I D2).
+func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.ExistenceClause, siVersion pb.StorageIntegrityContractVersion, e engine.Engine, sel nameresolve.Selection) {
 	resp.ExistenceClause = ec
 	resp.StorageIntegrityContractVersion = siVersion
 	if resp.GetCode() == pb.RewriteCode_Success {
@@ -64,6 +69,9 @@ func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause, si
 	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	if resp.GetSqlAfterRewrite() == "" {
 		resp.SqlAfterRewrite = sql
+	}
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		handlers.AnnotateStorageIntegrityRejectAST(e, resp, ast, sql, sel)
 	}
 }
 
@@ -135,6 +143,22 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		ec = pb.ExistenceClause_EXISTENCE_CLAUSE_IF_EXISTS
 	}
 
+	// Polyglot exposes LIVE VIEW spellings (notably a DEFINER prefix) as an
+	// ordinary create_view node and sometimes as an opaque raw/command node.
+	// The total classifier cheaply excludes unrelated node kinds and opaque
+	// literal/comment decoys before it invokes the engine tokenizer. Exact
+	// grammar is eligible for D2 object attribution; malformed prefixes and
+	// classifier failures stay generic.
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		liveViewClass, classifyErr := engine.ClassifyLiveView(e, ast, sql)
+		if classifyErr != nil || liveViewClass != engine.NotLiveView {
+			resp.Code = pb.RewriteCode_UnsupportedStatement
+			resp.Message = StorageIntegrityUnmodelledMessage
+			finalize(resp, ast, sql, ec, siVersion, e, selection)
+			return resp, nil
+		}
+	}
+
 	// Phase 2: route writes (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME/EXCHANGE/
 	// views, + bare-rejects, + out-of-phase CREATE/DROP DATABASE) before SELECT.
 	if wresp, handled, werr := handlers.RewriteWrite(e, ast, sql, opts); werr != nil {
@@ -142,7 +166,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	} else if handled {
 		// Design §8 + oracle parity: stamp existence_clause; echo input + clear
 		// statement_type on reject.
-		finalize(wresp, sql, ec, siVersion)
+		finalize(wresp, ast, sql, ec, siVersion, e, selection)
 		return wresp, nil
 	}
 
@@ -151,7 +175,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	if dresp, handled, derr := handlers.RewriteDBLevel(e, ast, sql, opts); derr != nil {
 		return nil, derr
 	} else if handled {
-		finalize(dresp, sql, ec, siVersion)
+		finalize(dresp, ast, sql, ec, siVersion, e, selection)
 		return dresp, nil
 	}
 
@@ -161,7 +185,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	if dresp, handled, derr := handlers.RewriteDescribe(e, ast, sql, opts); derr != nil {
 		return nil, derr
 	} else if handled {
-		finalize(dresp, sql, ec, siVersion)
+		finalize(dresp, ast, sql, ec, siVersion, e, selection)
 		return dresp, nil
 	}
 
@@ -172,13 +196,13 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(e, ast, sql, opts); xerr != nil {
 		return nil, xerr
 	} else if handled {
-		finalize(xresp, sql, ec, siVersion)
+		finalize(xresp, ast, sql, ec, siVersion, e, selection)
 		return xresp, nil
 	}
 	if gresp, handled, gerr := handlers.RewriteGrant(e, ast, sql, opts); gerr != nil {
 		return nil, gerr
 	} else if handled {
-		finalize(gresp, sql, ec, siVersion)
+		finalize(gresp, ast, sql, ec, siVersion, e, selection)
 		return gresp, nil
 	}
 
@@ -189,7 +213,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		if herr != nil {
 			return nil, herr
 		}
-		finalize(hresp, sql, ec, siVersion) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
+		finalize(hresp, ast, sql, ec, siVersion, e, selection) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
 		return hresp, nil
 	}
 
@@ -201,14 +225,14 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = StorageIntegrityUnmodelledMessage
-		finalize(resp, sql, ec, siVersion)
+		finalize(resp, ast, sql, ec, siVersion, e, selection)
 		return resp, nil
 	}
 	if gen, gerr := e.Generate(ast); gerr == nil && gen != "" {
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
-	finalize(resp, sql, ec, siVersion)
+	finalize(resp, ast, sql, ec, siVersion, e, selection)
 	return resp, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // WriteRole identifies the function a table reference plays inside a write
@@ -645,19 +646,9 @@ func insertHasFormatClause(ast AST) bool {
 // preserved → valid SQL). The payload itself tokenizes as a single VAR whose span
 // is collapsed to EOF, so we deliberately key off the format-NAME token's end.
 func insertFormatTail(e Engine, originalSQL string) (string, bool, error) {
-	toksAST, err := e.Tokenize(originalSQL)
+	toks, err := tokenizeRaw(e, originalSQL)
 	if err != nil {
 		return "", false, err
-	}
-	var toks []struct {
-		TokenType string `json:"token_type"`
-		Span      struct {
-			Start int `json:"start"`
-			End   int `json:"end"`
-		} `json:"span"`
-	}
-	if err := json.Unmarshal(toksAST, &toks); err != nil {
-		return "", false, fmt.Errorf("engine: decode tokens: %w", err)
 	}
 	boundary, found := -1, false
 	for i, tk := range toks {
@@ -852,7 +843,9 @@ func containsWord(haystack, word string) bool {
 	return false
 }
 
-// rawToken is one lexer token from Engine.Tokenize. Empirically (probed against
+// rawToken is one lexer token from Engine.Tokenize. tokenizeRaw normalizes the
+// engine's Unicode-scalar spans to Go byte offsets before returning it.
+// Empirically (probed against
 // Polyglot's ClickHouse tokenizer): plain identifiers are token_type=="VAR";
 // backtick-quoted identifiers are token_type=="QUOTED_IDENTIFIER" with the
 // backticks STRIPPED from text (Text=="weird.name" for `weird.name`) while span
@@ -879,7 +872,48 @@ func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 	if err := json.Unmarshal(toksAST, &toks); err != nil {
 		return nil, fmt.Errorf("engine: decode tokens: %w", err)
 	}
+	cursor := newTokenStream(sql)
+	for i := range toks {
+		start, end, ok := cursor.byteRange(toks[i].Span.Start, toks[i].Span.End)
+		if !ok {
+			return nil, fmt.Errorf("engine: invalid token span [%d,%d) for %d-character SQL",
+				toks[i].Span.Start, toks[i].Span.End, cursor.characters())
+		}
+		toks[i].Span.Start, toks[i].Span.End = start, end
+	}
 	return toks, nil
+}
+
+// tokenStream is the sole authority for translating Polyglot token spans.
+// Polyglot indexes Unicode scalar values; Go slices index bytes. Keeping one
+// rune-to-byte table here makes every token consumer (LIVE adapters, raw write
+// splices, GRANT cluster stripping, and INSERT FORMAT tails) share the same
+// semantics.
+type tokenStream struct {
+	sql        string
+	runeToByte []int
+}
+
+func newTokenStream(sql string) tokenStream {
+	offsets := make([]int, 0, utf8.RuneCountInString(sql)+1)
+	for byteOffset := range sql {
+		offsets = append(offsets, byteOffset)
+	}
+	offsets = append(offsets, len(sql))
+	return tokenStream{sql: sql, runeToByte: offsets}
+}
+
+func (s tokenStream) characters() int { return len(s.runeToByte) - 1 }
+
+func (s tokenStream) byteRange(start, end int) (int, int, bool) {
+	// Polyglot intentionally represents an INSERT FORMAT inline payload with a
+	// zero-width VAR at EOF.  Zero-width spans are valid cursor positions; the
+	// consumers that need a non-empty token enforce that requirement locally.
+	if start < 0 || end < start || end >= len(s.runeToByte) {
+		return 0, 0, false
+	}
+	startByte, endByte := s.runeToByte[start], s.runeToByte[end]
+	return startByte, endByte, startByte >= 0 && endByte >= startByte && endByte <= len(s.sql)
 }
 
 // tableRefSpan is one [db.]table name-run located in the raw token stream, with

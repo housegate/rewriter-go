@@ -6837,5 +6837,504 @@
     "want_code": "UnsupportedStatement",
     "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
     "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_system_start_merges_unsafe_rejected",
+    "reject": true,
+    "sql": "SYSTEM START MERGES hg_unsafe.db1__t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_system_stop_merges_safe_rejected",
+    "reject": true,
+    "sql": "SYSTEM STOP MERGES hg_safe.db1__t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_system_restart_replica_unsafe_rejected",
+    "reject": true,
+    "sql": "SYSTEM RESTART REPLICA hg_unsafe.db1__t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_system_sync_replica_logical_rejected",
+    "reject": true,
+    "sql": "SYSTEM SYNC REPLICA db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_check_table_logical_rejected",
+    "reject": true,
+    "sql": "CHECK TABLE db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_truncate_database_safe_rejected",
+    "reject": true,
+    "sql": "TRUNCATE DATABASE hg_safe",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical database hg_safe is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_truncate_all_tables_from_unsafe_rejected",
+    "reject": true,
+    "sql": "TRUNCATE ALL TABLES FROM hg_unsafe",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical database hg_unsafe is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_alter_database_safe_rejected",
+    "reject": true,
+    "sql": "ALTER DATABASE hg_safe MODIFY COMMENT 'x'",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical database hg_safe is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_drop_dictionary_safe_rejected",
+    "reject": true,
+    "sql": "DROP DICTIONARY hg_safe.d",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_safe.d is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_create_live_view_over_si_rejected",
+    "reject": true,
+    "sql": "CREATE LIVE VIEW other.v AS SELECT * FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_update_assignment_logical_read_rejected",
+    "reject": true,
+    "sql": "UPDATE other.u SET x = (SELECT count() FROM db1.t) WHERE id = 1",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_update_predicate_safe_read_rejected",
+    "reject": true,
+    "sql": "UPDATE other.u SET x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
+    "want_accessed": [
+      {
+        "original_database": "hg_safe",
+        "original_table": "db1__t",
+        "physical_database": "hg_safe",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_delete_predicate_unsafe_read_rejected",
+    "reject": true,
+    "sql": "DELETE FROM other.u WHERE id IN (SELECT id FROM hg_unsafe.db1__t)",
+    "want_accessed": [
+      {
+        "original_database": "hg_unsafe",
+        "original_table": "db1__t",
+        "physical_database": "hg_unsafe",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_alter_update_assignment_logical_read_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE other.u UPDATE x = (SELECT count() FROM db1.t) WHERE id = 1",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_alter_update_predicate_safe_read_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE other.u UPDATE x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
+    "want_accessed": [
+      {
+        "original_database": "hg_safe",
+        "original_table": "db1__t",
+        "physical_database": "hg_safe",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_stmt": ""
+  },
+  {
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_alter_delete_predicate_logical_read_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE other.u DELETE WHERE id IN (SELECT id FROM db1.t)",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_stmt": ""
   }
 ]

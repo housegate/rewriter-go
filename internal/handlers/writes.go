@@ -22,7 +22,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return nil, false, err
 	}
 	sel := nameresolve.FindActive(opts)
-	if resp, rejected, err := preflightStorageIntegrityWrite(e, ast, info, sel); err != nil {
+	if resp, rejected, err := preflightStorageIntegrityWrite(e, ast, sql, info, sel); err != nil {
 		return nil, false, err
 	} else if rejected {
 		return resp, true, nil
@@ -67,7 +67,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 // (multi-DROP, cross-table ALTER, AS table-function, bare rejects). Otherwise
 // those guards can return a non-Success response without the SI access marker
 // Housegate needs to keep fail-closed semantics.
-func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	if sel.Mode != nameresolve.ModeDynamic {
 		return nil, false, nil
 	}
@@ -127,6 +127,36 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, info engine
 		seen[key] = true
 		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert); rejected {
 			return resp, true, nil
+		}
+	}
+
+	// UPDATE/DELETE mutation expressions may carry SELECT subqueries even when
+	// their outer write target is ordinary. Inspect the grammar surfaces in the
+	// same order as ClickHouse: UPDATE assignments before predicate, DELETE
+	// predicate only. Opaque ALTER mutations go through an exact sentinel probe
+	// in the engine package. If that adapter cannot prove its complete surface,
+	// active storage integrity must reject generically rather than return a Go
+	// error that legacy callers could treat as fail-open.
+	if len(sel.Dynamic.GetStorageIntegrity().GetTables()) > 0 {
+		mutation, err := engine.CollectMutationReadSurface(e, ast, sql)
+		if err != nil {
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			rejectUnsupported(resp, "statement is not supported")
+			resp.SqlAfterRewrite = sql
+			return resp, true, nil
+		}
+		for _, reads := range []engine.MutationReadSet{mutation.Assignments, mutation.Predicate} {
+			for _, tt := range reads.Tables {
+				if resp, rejected := inspectTarget(tt, false); rejected {
+					resp.SqlAfterRewrite = sql
+					return resp, true, nil
+				}
+			}
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			if rejectStorageIntegrityNamespaces(resp, reads.Namespaces, sel, pb.RewriteCode_UnsupportedStatement) {
+				resp.SqlAfterRewrite = sql
+				return resp, true, nil
+			}
 		}
 	}
 
