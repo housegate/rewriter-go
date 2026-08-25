@@ -135,6 +135,8 @@ type NamespaceRef struct {
 	Target              TableTarget
 	Resolved            bool
 	UsesCurrentDatabase bool
+	databaseIdentifier  bool
+	tableIdentifier     bool
 }
 
 // TableFunctionRef is the compatibility view of one recognized ClickHouse
@@ -189,6 +191,13 @@ type namespaceRefDetail struct {
 	tableOrigin    namespaceValueOrigin
 }
 
+func (detail namespaceRefDetail) refWithOrigins() NamespaceRef {
+	ref := detail.ref
+	ref.databaseIdentifier = ref.databaseIdentifier || detail.databaseOrigin == namespaceValueIdentifier
+	ref.tableIdentifier = ref.tableIdentifier || detail.tableOrigin == namespaceValueIdentifier
+	return ref
+}
+
 // CollectNamespaceRefs returns all AST surfaces that carry a database/table
 // identity outside normal table nodes. The function families are derived from
 // ClickHouse's local-catalog table functions: remote/cluster, merge/loop,
@@ -207,7 +216,7 @@ func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
 	var out []NamespaceRef
 	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
 		namespace: func(_ map[string]any, detail namespaceRefDetail) {
-			out = append(out, detail.ref)
+			out = append(out, detail.refWithOrigins())
 		},
 	}); err != nil {
 		return nil, err
@@ -344,7 +353,7 @@ func isNamespaceIdentifierArg(arg any) bool {
 
 func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
 	detail, ok := decodeInNamespaceRefDetail(in)
-	return detail.ref, ok
+	return detail.refWithOrigins(), ok
 }
 
 func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
@@ -447,7 +456,7 @@ func decodeDictionarySourceNamespaceRef(property map[string]any) (NamespaceRef, 
 }
 
 func decodeNamespaceSingle(source NamespaceRefSource, name string, arg any) NamespaceRef {
-	return decodeNamespaceSingleDetail(source, name, arg).ref
+	return decodeNamespaceSingleDetail(source, name, arg).refWithOrigins()
 }
 
 func decodeNamespaceSingleDetail(source NamespaceRefSource, name string, arg any) namespaceRefDetail {
@@ -474,7 +483,7 @@ func decodeNamespaceSingleDetail(source NamespaceRefSource, name string, arg any
 }
 
 func decodeNamespacePair(source NamespaceRefSource, name string, args []any, first int) NamespaceRef {
-	return decodeNamespacePairDetail(source, name, args, first).ref
+	return decodeNamespacePairDetail(source, name, args, first).refWithOrigins()
 }
 
 func decodeNamespacePairDetail(source NamespaceRefSource, name string, args []any, first int) namespaceRefDetail {

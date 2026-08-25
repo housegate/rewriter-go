@@ -6805,7 +6805,7 @@
     },
     "name": "si_unmodelled_statement_rejected",
     "reject": true,
-    "sql": "SYSTEM RELOAD CONFIG",
+    "sql": "SYSTEM RELOAD CONFIG ON CLUSTER hg_safe",
     "want_code": "UnsupportedStatement",
     "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
     "want_stmt": ""
@@ -6887,11 +6887,11 @@
         "reserved_row_id_column": "_hg_row_id"
       }
     },
-    "name": "si_system_stop_merges_safe_rejected",
+    "name": "si_system_stop_pulling_replication_log_cluster_decoy_rejected",
     "reject": true,
-    "sql": "SYSTEM STOP MERGES hg_safe.db1__t",
+    "sql": "SYSTEM STOP PULLING REPLICATION LOG ON CLUSTER hg_safe hg_unsafe.db1__t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_message_contains": "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
     "want_stmt": ""
   },
   {
@@ -7127,6 +7127,7 @@
       "known_physical_databases": [
         "phys"
       ],
+      "upstream_logical_database_in_context": "db1",
       "delim": "_",
       "storage_integrity": {
         "tables": {
@@ -7141,10 +7142,10 @@
     },
     "name": "si_update_assignment_logical_read_rejected",
     "reject": true,
-    "sql": "UPDATE other.u SET x = (SELECT count() FROM db1.t) WHERE id = 1",
+    "sql": "UPDATE other.u SET x=(WITH t AS (SELECT count() FROM t) SELECT count() FROM t) WHERE id=1",
     "want_accessed": [
       {
-        "original_database": "db1",
+        "original_database": "",
         "original_table": "t",
         "logical_database": "db1",
         "physical_database": "phys",
@@ -7484,7 +7485,7 @@
   },
   {
     "name": "si_prewhere_rejected",
-    "sql": "SELECT a FROM db1.t PREWHERE a > 1",
+    "sql": "SELECT a FROM `\\x64b1`.t PREWHERE a > 1",
     "dynamic": {
       "database_map": {"db1": "phys", "other": "phys"},
       "known_physical_databases": ["phys"],
@@ -7556,5 +7557,60 @@
     "want_sql_not_contains": ["'EXCEPT (_hg_row_id)'"],
     "want_table_rewrites": {"db1.t": "hg_safe.db1__t"},
     "allow_sql_divergence": true
+  },
+  {
+    "name": "si_show_dictionaries_safe_database_rejected",
+    "sql": "SHOW DICTIONARIES FROM hg_safe",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical database hg_safe is not directly addressable",
+    "want_accessed": [
+      {"original_database": "hg_safe", "original_table": "", "logical_database": "", "physical_database": "hg_safe", "is_remote": false, "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_show_dictionaries_logical_database_rejected",
+    "sql": "SHOW DICTIONARIES FROM db1",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity logical database db1 is not directly addressable",
+    "want_accessed": [
+      {"original_database": "db1", "original_table": "", "logical_database": "db1", "physical_database": "phys", "is_remote": false, "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_show_dictionaries_ordinary_database_passthrough",
+    "sql": "SHOW DICTIONARIES FROM other",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "SHOW_TABLES",
+    "want_sql": "SHOW DICTIONARIES FROM other",
+    "want_accessed": []
   }
 ]

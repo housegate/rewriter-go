@@ -155,7 +155,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 					}
 				case engine.MutationReadNamespace:
 					resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-					if rejectStorageIntegrityNamespaces(resp, []engine.NamespaceRef{read.Namespace}, sel, pb.RewriteCode_UnsupportedStatement) {
+					if rejectStorageIntegrityNamespaces(e, resp, []engine.NamespaceRef{read.Namespace}, sel, pb.RewriteCode_UnsupportedStatement) {
 						resp.SqlAfterRewrite = sql
 						return resp, true, nil
 					}
@@ -173,7 +173,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 		return nil, false, err
 	}
 	namespaceResp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-	if rejectStorageIntegrityNamespaces(namespaceResp, namespaceRefs, sel, pb.RewriteCode_UnsupportedStatement) {
+	if rejectStorageIntegrityNamespaces(e, namespaceResp, namespaceRefs, sel, pb.RewriteCode_UnsupportedStatement) {
 		return namespaceResp, true, nil
 	}
 

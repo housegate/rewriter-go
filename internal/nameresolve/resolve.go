@@ -436,6 +436,10 @@ func StorageIntegrityPhysicalDatabaseRejectMessage(physical string) string {
 	return "storage-integrity physical database " + physical + " is not directly addressable"
 }
 
+func StorageIntegrityLogicalDatabaseRejectMessage(logical string) string {
+	return "storage-integrity logical database " + logical + " is not directly addressable"
+}
+
 func StorageIntegrityTableFunctionNamespaceRejectMessage(physical string) string {
 	return "storage-integrity table function namespace " + physical + " is not directly addressable"
 }

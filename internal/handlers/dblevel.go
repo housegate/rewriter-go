@@ -201,6 +201,12 @@ func passthroughDB(e engine.Engine, ast engine.AST, sql string, resp *pb.Rewrite
 	return resp, true, nil
 }
 
+// passthroughOriginalDB preserves syntax that the formatter may normalize away.
+func passthroughOriginalDB(sql string, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+	resp.SqlAfterRewrite = sql
+	return resp, true, nil
+}
+
 // dispatchUse ports use.cc handleUseQuery. No dynamic_args → passthrough.
 // Unresolvable physical → InvalidRewriteRequest. Logical mapped to a remote
 // upstream → UnsupportedStatement (USE has no remote analog). physical != origin
@@ -240,28 +246,53 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 // dispatchShowTables ports show_tables.cc handleShowTablesQuery. Only SHOW TABLES
 // proper is rewritten into a synthetic system.tables enumeration; SHOW CLUSTERS/
 // DICTIONARIES/SETTINGS/MERGES/CACHES (and a no-dynamic request) pass through.
+// Before that pass-through, SHOW DICTIONARIES' explicit or contextual database
+// is checked against protocol-owned SI namespaces: unlike the other variants,
+// ClickHouse evaluates this SHOW family inside a user-selected database.
 // The FROM clause (logical db) wins over upstream_logical_database_in_context; an
 // unresolvable physical or a dangling remote-upstream key is InvalidRewriteRequest.
 // A remote-mapped logical routes the enumeration through remote(...), but the
 // (database, prefix) filter still uses the database_map physical name.
 func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_SHOW_TABLES)
-	// Only SHOW TABLES proper is rewritten; SHOW CLUSTERS/DICTIONARIES/SETTINGS/
-	// MERGES/CACHES (and a no-dynamic request) pass through.
-	if info.ShowWhat != "TABLES" || dyn == nil {
+	if dyn == nil {
+		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
+			return passthroughOriginalDB(sql, resp)
+		}
 		return passthroughDB(e, ast, sql, resp)
 	}
-	fromLogical := info.DB
-	if dot := strings.IndexByte(fromLogical, '.'); dot >= 0 {
-		fromLogical = fromLogical[:dot]
+	// Only SHOW TABLES proper is rewritten. SHOW DICTIONARIES still carries a
+	// database namespace, so prove that namespace ordinary before preserving the
+	// historical pass-through behavior. The remaining SHOW variants have no
+	// database target and must not inherit the current SI context accidentally.
+	if info.ShowWhat != "TABLES" {
+		if info.ShowWhat == "DICTIONARIES" {
+			if rejectShowDictionariesStorageIntegrityNamespace(resp, sql, info, dyn) {
+				return resp, true, nil
+			}
+			if info.ShowFull || info.ShowTemporary {
+				return passthroughOriginalDB(sql, resp)
+			}
+		}
+		return passthroughDB(e, ast, sql, resp)
 	}
-	logical := fromLogical
-	if logical == "" {
-		logical = dyn.GetUpstreamLogicalDatabaseInContext()
+	logical, present, resolved := showDatabaseTarget(info, dyn.GetUpstreamLogicalDatabaseInContext())
+	if !resolved && info.HasDBClause {
+		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
+			rejectUnresolvedShowDatabase(resp, sql, info.ShowWhat)
+		} else {
+			rejectDBInvalid(resp, "SHOW TABLES target database is not statically resolvable")
+		}
+		return resp, true, nil
 	}
-	if logical == "" {
+	if !present {
 		rejectDBInvalid(resp, "SHOW TABLES has no FROM clause and no upstream_logical_database_in_context is set; caller must send `USE <db>` or use `SHOW TABLES FROM <db>`")
 		return resp, true, nil
+	}
+	if info.HasDBClause {
+		if dot := strings.IndexByte(logical, '.'); dot >= 0 {
+			logical = logical[:dot]
+		}
 	}
 	if nameresolve.IsStorageIntegrityPhysicalDatabase(logical, dyn) {
 		recordAccessedDatabase(resp, logical, dyn)
@@ -288,6 +319,83 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	resp.SqlAfterRewrite = "SELECT multiIf(startsWith(name, '" + ep + "'), substring(name, length('" + ep + "') + 1), name) AS name FROM (SELECT name FROM " + source + " WHERE database = '" + ephys + "' AND startsWith(name, '" + ep + "'))"
 	recordDatabaseRewrite(resp, logical, physical)
 	return resp, true, nil
+}
+
+// rejectShowDictionariesStorageIntegrityNamespace closes the non-TABLES
+// pass-through hole for SHOW DICTIONARIES. An explicit FROM/IN target wins over
+// the logical session context. Physical safe/unsafe databases and logical
+// databases owning an SI table are protocol-owned at database scope, so both
+// are rejected with one database-shaped SI access event. Logical authorization
+// is checked before the supported-but-forbidden response, matching all other
+// indirect SI namespace surfaces.
+func rejectShowDictionariesStorageIntegrityNamespace(resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
+	if len(dyn.GetStorageIntegrity().GetTables()) == 0 {
+		return false
+	}
+	// A bare SHOW executes in the configured physical context. Guard reserved
+	// physical databases before consulting the logical context; an explicit
+	// FROM/IN target remains authoritative over both context fields.
+	if !info.HasDBClause {
+		physical := dyn.GetUpstreamPhysicalDatabaseInContext()
+		if nameresolve.IsStorageIntegrityPhysicalDatabase(physical, dyn) {
+			recordAccessedDatabase(resp, physical, dyn)
+			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+			resp.SqlAfterRewrite = sql
+			rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(physical))
+			return true
+		}
+	}
+	target, present, resolved := showDatabaseTarget(info, dyn.GetUpstreamLogicalDatabaseInContext())
+	if !present {
+		return false
+	}
+	if !resolved {
+		rejectUnresolvedShowDatabase(resp, sql, info.ShowWhat)
+		return true
+	}
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
+		recordAccessedDatabase(resp, target, dyn)
+		resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+		resp.SqlAfterRewrite = sql
+		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(target))
+		return true
+	}
+	if !nameresolve.IsStorageIntegrityLogicalDatabase(target, dyn) {
+		return false
+	}
+	logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(target, dyn)
+	recordAccessedStorageIntegrityLogicalDatabaseUnique(resp, target, dyn)
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	if !authorized {
+		rejectDBInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+		return true
+	}
+	rejectDBUnsupported(resp, nameresolve.StorageIntegrityLogicalDatabaseRejectMessage(logical))
+	return true
+}
+
+// showDatabaseTarget distinguishes an absent FROM/IN clause from an explicit
+// target that the parser cannot reduce to a static identifier. ParseDBLevel and
+// the upstream context both supply semantic database names, so neither is
+// decoded again here.
+func showDatabaseTarget(info engine.DBLevelInfo, logicalContext string) (target string, present, resolved bool) {
+	if info.HasDBClause {
+		if !info.DBResolved || info.DB == "" {
+			return "", true, false
+		}
+		return info.DB, true, true
+	}
+	if logicalContext == "" {
+		return "", false, false
+	}
+	return logicalContext, true, true
+}
+
+func rejectUnresolvedShowDatabase(resp *pb.RewriteSQLResponse, sql, showWhat string) {
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	rejectDBUnsupported(resp, "storage-integrity SHOW "+showWhat+" database is not statically resolvable")
 }
 
 // dispatchShowDatabases ports show_databases.cc handleShowDatabasesQuery. With no

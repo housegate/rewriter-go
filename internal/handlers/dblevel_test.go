@@ -4,8 +4,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-proto/gen/pb"
+	"google.golang.org/protobuf/proto"
 )
+
+type showGenerateOverrideEngine struct {
+	engine.Engine
+	generated string
+}
+
+func (e showGenerateOverrideEngine) Generate(engine.AST) (string, error) {
+	return e.generated, nil
+}
 
 func TestRewriteDBLevel_usePhysicalRewrite(t *testing.T) {
 	e := newEngine(t)
@@ -105,6 +116,36 @@ func TestRewriteDBLevel_showTablesSynthetic(t *testing.T) {
 	}
 }
 
+func TestRewriteDBLevel_showTablePrefixesRetainPolicySemantics(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, tc := range []struct {
+		name      string
+		baseSQL   string
+		prefixSQL string
+	}{
+		{name: "physical", baseSQL: "SHOW TABLES FROM hg_safe", prefixSQL: "SHOW FULL TABLES FROM hg_safe"},
+		{name: "logical protected", baseSQL: "SHOW TABLES FROM db1", prefixSQL: "SHOW FULL TEMPORARY TABLES FROM db1"},
+		{name: "ordinary", baseSQL: "SHOW TABLES FROM other", prefixSQL: "SHOW TEMPORARY TABLES FROM other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rewrite := func(sql string) *pb.RewriteSQLResponse {
+				t.Helper()
+				ast := mustParse(t, e, sql)
+				resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+				if err != nil || !handled {
+					t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
+				}
+				return resp
+			}
+			base, prefixed := rewrite(tc.baseSQL), rewrite(tc.prefixSQL)
+			if !proto.Equal(prefixed, base) {
+				t.Fatalf("prefixed=%+v\nbase=%+v", prefixed, base)
+			}
+		})
+	}
+}
+
 // Bare SHOW TABLES (no FROM) falls back to upstream_logical_database_in_context.
 func TestRewriteDBLevel_showTablesUpstreamContext(t *testing.T) {
 	e := newEngine(t)
@@ -141,6 +182,28 @@ func TestRewriteDBLevel_showTablesNoContextInvalid(t *testing.T) {
 	}
 }
 
+func TestRewriteDBLevel_showTablesExplicitUnresolvedStorageIntegrityFailsClosed(t *testing.T) {
+	e := newEngine(t)
+	sql := "SHOW TABLES FROM {db:Identifier}"
+	ast := mustParse(t, e, sql)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.UpstreamLogicalDatabaseInContext = "other"
+	resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+		resp.GetMessage() != "storage-integrity SHOW TABLES database is not statically resolvable" {
+		t.Fatalf("code=%v message=%q", resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED || resp.GetSqlAfterRewrite() != sql {
+		t.Fatalf("stmt=%v sql=%q", resp.GetStatementType(), resp.GetSqlAfterRewrite())
+	}
+	if len(resp.GetOriginalAccessedTables()) != 0 || len(resp.GetDatabaseRewrites()) != 0 {
+		t.Fatalf("accessed=%+v rewrites=%v, want empty", resp.GetOriginalAccessedTables(), resp.GetDatabaseRewrites())
+	}
+}
+
 // SHOW CLUSTERS is not SHOW TABLES proper → passthrough (Success, stmt SHOW_TABLES,
 // verbatim SHOW CLUSTERS).
 func TestRewriteDBLevel_showClustersPassthrough(t *testing.T) {
@@ -159,6 +222,324 @@ func TestRewriteDBLevel_showClustersPassthrough(t *testing.T) {
 	}
 	if len(resp.GetDatabaseRewrites()) != 0 {
 		t.Errorf("database_rewrites=%v", resp.GetDatabaseRewrites())
+	}
+}
+
+func TestRewriteDBLevel_showDictionariesStorageIntegrityNamespaces(t *testing.T) {
+	e := newEngine(t)
+	tests := []struct {
+		name         string
+		sql          string
+		contextDB    string
+		physicalDB   string
+		unauthorized bool
+		mapContext   bool
+		wantCode     pb.RewriteCode
+		wantMessage  string
+		wantDB       string
+		wantLogical  string
+		wantPhysical string
+		wantSI       bool
+	}{
+		{
+			name:         "physical FROM namespace",
+			sql:          "SHOW DICTIONARIES FROM hg_safe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_safe is not directly addressable",
+			wantDB:       "hg_safe",
+			wantPhysical: "hg_safe",
+			wantSI:       true,
+		},
+		{
+			name:         "FULL physical FROM namespace",
+			sql:          "SHOW FULL DICTIONARIES FROM hg_safe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_safe is not directly addressable",
+			wantDB:       "hg_safe",
+			wantPhysical: "hg_safe",
+			wantSI:       true,
+		},
+		{
+			name:         "physical IN namespace",
+			sql:          "SHOW DICTIONARIES IN hg_unsafe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_unsafe is not directly addressable",
+			wantDB:       "hg_unsafe",
+			wantPhysical: "hg_unsafe",
+			wantSI:       true,
+		},
+		{
+			name:        "explicit unresolved FROM namespace fails closed",
+			sql:         "SHOW DICTIONARIES FROM {db:Identifier}",
+			contextDB:   "other",
+			wantCode:    pb.RewriteCode_UnsupportedStatement,
+			wantMessage: "storage-integrity SHOW DICTIONARIES database is not statically resolvable",
+		},
+		{
+			name:        "explicit unresolved IN namespace fails closed",
+			sql:         "SHOW DICTIONARIES IN {db:Identifier}",
+			contextDB:   "other",
+			wantCode:    pb.RewriteCode_UnsupportedStatement,
+			wantMessage: "storage-integrity SHOW DICTIONARIES database is not statically resolvable",
+		},
+		{
+			name:         "escaped physical namespace",
+			sql:          "SHOW DICTIONARIES FROM `hg\\x5Fsafe`",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_safe is not directly addressable",
+			wantDB:       "hg_safe",
+			wantPhysical: "hg_safe",
+			wantSI:       true,
+		},
+		{
+			name:         "logical protected namespace",
+			sql:          "SHOW DICTIONARIES FROM db1",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "FULL TEMPORARY logical protected namespace",
+			sql:          "SHOW FULL TEMPORARY DICTIONARIES FROM db1",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "logical protected context",
+			sql:          "SHOW DICTIONARIES",
+			contextDB:    "db1",
+			physicalDB:   "phys",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "physical context with empty logical context",
+			sql:          "SHOW DICTIONARIES",
+			physicalDB:   "hg_safe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_safe is not directly addressable",
+			wantDB:       "hg_safe",
+			wantPhysical: "hg_safe",
+			wantSI:       true,
+		},
+		{
+			name:         "physical context wins over ordinary logical context",
+			sql:          "SHOW DICTIONARIES",
+			contextDB:    "other",
+			physicalDB:   "hg_unsafe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_unsafe is not directly addressable",
+			wantDB:       "hg_unsafe",
+			wantPhysical: "hg_unsafe",
+			wantSI:       true,
+		},
+		{
+			name:         "escaped logical protected namespace",
+			sql:          "SHOW DICTIONARIES FROM `\\x64b1`",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "logical protected namespace requires authorization",
+			sql:          "SHOW DICTIONARIES FROM db1",
+			unauthorized: true,
+			wantCode:     pb.RewriteCode_InvalidRewriteRequest,
+			wantMessage:  "storage-integrity logical database db1 is not authorized by database_map",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantSI:       true,
+		},
+		{
+			name:        "ordinary namespace remains passthrough",
+			sql:         "SHOW DICTIONARIES FROM other",
+			physicalDB:  "hg_safe",
+			wantCode:    pb.RewriteCode_Success,
+			wantMessage: "success",
+		},
+		{
+			name:        "TEMPORARY ordinary namespace remains passthrough",
+			sql:         "SHOW TEMPORARY DICTIONARIES FROM other",
+			wantCode:    pb.RewriteCode_Success,
+			wantMessage: "success",
+		},
+		{
+			name:        "FULL ordinary namespace preserves request SQL",
+			sql:         "sHoW FULL DICTIONARIES   FROM other",
+			wantCode:    pb.RewriteCode_Success,
+			wantMessage: "success",
+		},
+		{
+			name:        "semantic context is not decoded again",
+			sql:         "SHOW DICTIONARIES",
+			contextDB:   `hg\x5Fsafe`,
+			mapContext:  true,
+			wantCode:    pb.RewriteCode_Success,
+			wantMessage: "success",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tt.contextDB
+			if tt.physicalDB != "" {
+				physical := tt.physicalDB
+				dyn.UpstreamPhysicalDatabaseInContext = &physical
+			}
+			if tt.mapContext {
+				dyn.DatabaseMap[tt.contextDB] = "phys"
+			}
+			if tt.unauthorized {
+				delete(dyn.DatabaseMap, "db1")
+			}
+			ast := mustParse(t, e, tt.sql)
+			resp, handled, err := RewriteDBLevel(e, ast, tt.sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != tt.wantCode || resp.GetMessage() != tt.wantMessage {
+				t.Fatalf("code=%v message=%q, want code=%v message=%q", resp.GetCode(), resp.GetMessage(), tt.wantCode, tt.wantMessage)
+			}
+			if resp.GetSqlAfterRewrite() != tt.sql {
+				t.Fatalf("sql=%q, want exact original %q", resp.GetSqlAfterRewrite(), tt.sql)
+			}
+			if tt.wantCode == pb.RewriteCode_Success {
+				if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES {
+					t.Fatalf("statement_type=%v, want SHOW_TABLES", resp.GetStatementType())
+				}
+				if len(resp.GetOriginalAccessedTables()) != 0 || len(resp.GetDatabaseRewrites()) != 0 {
+					t.Fatalf("ordinary accessed=%+v rewrites=%v", resp.GetOriginalAccessedTables(), resp.GetDatabaseRewrites())
+				}
+				return
+			}
+			if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED {
+				t.Fatalf("statement_type=%v, want UNSPECIFIED", resp.GetStatementType())
+			}
+			if tt.wantDB == "" {
+				if len(resp.GetOriginalAccessedTables()) != 0 || len(resp.GetDatabaseRewrites()) != 0 {
+					t.Fatalf("unresolved accessed=%+v rewrites=%v, want empty", resp.GetOriginalAccessedTables(), resp.GetDatabaseRewrites())
+				}
+				return
+			}
+			if len(resp.GetOriginalAccessedTables()) != 1 {
+				t.Fatalf("accessed=%+v, want exactly one", resp.GetOriginalAccessedTables())
+			}
+			got := resp.GetOriginalAccessedTables()[0]
+			if got.GetOriginalDatabase() != tt.wantDB || got.GetOriginalTable() != "" ||
+				got.GetLogicalDatabase() != tt.wantLogical || got.GetPhysicalDatabase() != tt.wantPhysical ||
+				got.GetIsRemote() || got.GetIsStorageIntegrity() != tt.wantSI {
+				t.Fatalf("accessed=%+v", got)
+			}
+		})
+	}
+}
+
+func TestRewriteDBLevel_showDictionariesWithoutStorageIntegrityPassthrough(t *testing.T) {
+	e := newEngine(t)
+	dyn := &pb.RewriteTableDynamicArgs{
+		DatabaseMap:            map[string]string{"other": "phys"},
+		KnownPhysicalDatabases: []string{"phys"},
+	}
+	for _, sql := range []string{
+		"SHOW DICTIONARIES FROM other",
+		"SHOW DICTIONARIES FROM {db:Identifier}",
+		"SHOW FULL TEMPORARY DICTIONARIES FROM other",
+		"SHOW FULL DICTIONARIES FROM {db:Identifier}",
+		"sHoW FULL TEMPORARY DICTIONARIES   FROM other",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast := mustParse(t, e, sql)
+			resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES ||
+				resp.GetSqlAfterRewrite() != sql {
+				t.Fatalf("code=%v stmt=%v sql=%q message=%q", resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
+			}
+			if len(resp.GetOriginalAccessedTables()) != 0 || len(resp.GetDatabaseRewrites()) != 0 {
+				t.Fatalf("accessed=%+v rewrites=%v", resp.GetOriginalAccessedTables(), resp.GetDatabaseRewrites())
+			}
+		})
+	}
+}
+
+func TestRewriteDBLevel_prefixedShowDictionariesPreservesRequestWithoutRegeneration(t *testing.T) {
+	base := newEngine(t)
+	sql := "sHoW FULL TEMPORARY DICTIONARIES   FROM other"
+	ast := mustParse(t, base, sql)
+	e := showGenerateOverrideEngine{Engine: base, generated: "SHOW DICTIONARIES FROM formatter_output"}
+	for _, tc := range []struct {
+		name string
+		opts []*pb.RewriteOption
+	}{
+		{name: "active SI ordinary namespace", opts: dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))},
+		{name: "no SI dynamic args", opts: dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"other": "phys"}})},
+		{name: "no dynamic args"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, handled, err := RewriteDBLevel(e, ast, sql, tc.opts)
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES ||
+				resp.GetSqlAfterRewrite() != sql {
+				t.Fatalf("code=%v stmt=%v sql=%q message=%q", resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
+			}
+		})
+	}
+}
+
+func TestRewriteDBLevel_showDictionariesKeywordDatabaseNamesRemainOrdinary(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, db := range []string{"system", "default", "select", "from", "table", "settings", "123db"} {
+		sql := "SHOW FULL DICTIONARIES FROM " + db
+		t.Run(db, func(t *testing.T) {
+			ast := mustParse(t, e, sql)
+			resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES ||
+				resp.GetSqlAfterRewrite() != sql {
+				t.Fatalf("code=%v stmt=%v sql=%q message=%q", resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
+			}
+			if len(resp.GetOriginalAccessedTables()) != 0 || len(resp.GetDatabaseRewrites()) != 0 {
+				t.Fatalf("accessed=%+v rewrites=%v", resp.GetOriginalAccessedTables(), resp.GetDatabaseRewrites())
+			}
+		})
+	}
+}
+
+func TestRewriteDBLevel_nonDatabaseShowIgnoresStorageIntegrityContext(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.UpstreamLogicalDatabaseInContext = "hg_safe"
+	for _, sql := range []string{"SHOW CLUSTERS", "SHOW SETTINGS", "SHOW MERGES", "SHOW CACHES"} {
+		ast := mustParse(t, e, sql)
+		resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+		if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
+			t.Fatalf("%q: handled=%v err=%v resp=%+v", sql, handled, err, resp)
+		}
+		if resp.GetSqlAfterRewrite() != sql || len(resp.GetOriginalAccessedTables()) != 0 {
+			t.Fatalf("%q: sql=%q accessed=%+v", sql, resp.GetSqlAfterRewrite(), resp.GetOriginalAccessedTables())
+		}
 	}
 }
 

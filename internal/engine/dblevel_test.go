@@ -28,6 +28,8 @@ func TestParseDBLevel(t *testing.T) {
 		{"SHOW DATABASES ILIKE 'z%'", DBShow, "DATABASES", "", true, "z%", false, true},
 		{"SHOW CLUSTERS", DBShow, "CLUSTERS", "", false, "", false, false},
 		{"SHOW DICTIONARIES", DBShow, "DICTIONARIES", "", false, "", false, false},
+		{"SHOW DICTIONARIES FROM hg_safe", DBShow, "DICTIONARIES", "hg_safe", false, "", false, false},
+		{"SHOW DICTIONARIES IN `db1`", DBShow, "DICTIONARIES", "db1", false, "", false, false},
 		// The kind word after SHOW lexes as a keyword (not VAR) for these; ShowWhat
 		// must still capture it so the handler can distinguish SHOW CREATE (a separate
 		// ClickHouse AST) from the ASTShowTablesQuery family (CLUSTER/SETTINGS/...).
@@ -49,6 +51,89 @@ func TestParseDBLevel(t *testing.T) {
 			got.HasLike != c.hasLike || got.Like != c.like || got.LikeNot != c.likeNot || got.LikeCaseInsensitive != c.likeCI {
 			t.Errorf("%q: got %+v", c.sql, got)
 		}
+	}
+}
+
+func TestParseDBLevel_distinguishesUnresolvedDatabaseClause(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql          string
+		wantClause   bool
+		wantResolved bool
+		wantDB       string
+	}{
+		{sql: "SHOW DICTIONARIES", wantClause: false, wantResolved: false},
+		{sql: "SHOW DICTIONARIES FROM db1", wantClause: true, wantResolved: true, wantDB: "db1"},
+		{sql: "SHOW DICTIONARIES FROM {db:Identifier}", wantClause: true, wantResolved: false},
+		{sql: "SHOW DICTIONARIES IN {db:Identifier}", wantClause: true, wantResolved: false},
+		{sql: "SHOW DICTIONARIES FROM hg_safe WHERE name IN other", wantClause: true, wantResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW DICTIONARIES FROM other WHERE name IN hg_safe", wantClause: true, wantResolved: true, wantDB: "other"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			got, err := ParseDBLevel(e, tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.HasDBClause != tc.wantClause || got.DBResolved != tc.wantResolved || got.DB != tc.wantDB {
+				t.Fatalf("got %+v, want clause=%v resolved=%v db=%q", got, tc.wantClause, tc.wantResolved, tc.wantDB)
+			}
+		})
+	}
+}
+
+func TestParseDBLevel_showPrefixesPrecedeKindAndDatabaseClause(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql           string
+		wantShow      string
+		wantFull      bool
+		wantTemporary bool
+		wantClause    bool
+		wantResolved  bool
+		wantDB        string
+	}{
+		{sql: "SHOW FULL DICTIONARIES FROM hg_safe", wantShow: "DICTIONARIES", wantFull: true, wantClause: true, wantResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW TEMPORARY DICTIONARIES IN db1", wantShow: "DICTIONARIES", wantTemporary: true, wantClause: true, wantResolved: true, wantDB: "db1"},
+		{sql: "SHOW FULL TEMPORARY DICTIONARIES FROM {db:Identifier}", wantShow: "DICTIONARIES", wantFull: true, wantTemporary: true, wantClause: true},
+		{sql: "SHOW FULL TABLES FROM hg_safe", wantShow: "TABLES", wantFull: true, wantClause: true, wantResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW TEMPORARY TABLES IN db1", wantShow: "TABLES", wantTemporary: true, wantClause: true, wantResolved: true, wantDB: "db1"},
+		{sql: "SHOW TEMPORARY FULL DICTIONARIES FROM hg_safe", wantShow: "FULL", wantTemporary: true},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			got, err := ParseDBLevel(e, tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShowWhat != tc.wantShow || got.ShowFull != tc.wantFull || got.ShowTemporary != tc.wantTemporary ||
+				got.HasDBClause != tc.wantClause ||
+				got.DBResolved != tc.wantResolved || got.DB != tc.wantDB {
+				t.Fatalf("got %+v, want show=%q full=%v temporary=%v clause=%v resolved=%v db=%q", got, tc.wantShow, tc.wantFull, tc.wantTemporary, tc.wantClause, tc.wantResolved, tc.wantDB)
+			}
+		})
+	}
+}
+
+func TestParseDBLevel_showDatabaseClauseUsesParserIdentifierAuthority(t *testing.T) {
+	e := newTestEngine(t)
+	for _, db := range []string{"system", "default", "select", "from", "table", "settings", "123db"} {
+		sql := "SHOW DICTIONARIES FROM " + db
+		t.Run(db, func(t *testing.T) {
+			got, err := ParseDBLevel(e, sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShowWhat != "DICTIONARIES" || !got.HasDBClause || !got.DBResolved || got.DB != db {
+				t.Fatalf("got %+v, want resolved database %q", got, db)
+			}
+		})
+	}
+
+	got, err := ParseDBLevel(e, "SHOW DICTIONARIES FROM {db:Identifier}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.HasDBClause || got.DBResolved || got.DB != "" {
+		t.Fatalf("parameterized target got %+v, want explicit unresolved clause", got)
 	}
 }
 

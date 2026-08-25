@@ -153,8 +153,9 @@ func collectMutationExpression(node any) (MutationReadSet, error) {
 			reads.Tables = append(reads.Tables, target)
 		},
 		namespace: func(_ map[string]any, detail namespaceRefDetail) {
-			reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadNamespace, Namespace: detail.ref})
-			reads.Namespaces = append(reads.Namespaces, detail.ref)
+			ref := detail.refWithOrigins()
+			reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadNamespace, Namespace: ref})
+			reads.Namespaces = append(reads.Namespaces, ref)
 		},
 	})
 	return reads, err
