@@ -2,9 +2,12 @@ package engine
 
 import (
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // NameRefKind identifies the grammar role in which a name was found. A bare
@@ -1414,6 +1417,14 @@ func opaqueSQLPrefixTokens(sql string) []string {
 		switch {
 		case isOpaqueSQLSpace(sql[i]):
 			i++
+		case sql[i] >= utf8.RuneSelf:
+			r, size := utf8.DecodeRuneInString(sql[i:])
+			if r == '\uFEFF' || unicode.IsSpace(r) {
+				i += size
+				continue
+			}
+			toks = append(toks, "<NONASCII>")
+			i += size
 		case i+1 < len(sql) && sql[i] == '-' && sql[i+1] == '-':
 			i += 2
 			for i < len(sql) && sql[i] != '\n' && sql[i] != '\r' {
@@ -1426,11 +1437,18 @@ func opaqueSQLPrefixTokens(sql string) []string {
 			}
 		case i+1 < len(sql) && sql[i] == '/' && sql[i+1] == '*':
 			i += 2
-			for i+1 < len(sql) && !(sql[i] == '*' && sql[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(sql) {
-				i += 2
+			depth := 1
+			for i < len(sql) && depth > 0 {
+				switch {
+				case i+1 < len(sql) && sql[i] == '/' && sql[i+1] == '*':
+					depth++
+					i += 2
+				case i+1 < len(sql) && sql[i] == '*' && sql[i+1] == '/':
+					depth--
+					i += 2
+				default:
+					i++
+				}
 			}
 		case sql[i] == '\'' || sql[i] == '"' || sql[i] == '`':
 			quote := sql[i]
@@ -1952,6 +1970,75 @@ const liveViewQueryProbeAlias = "__hg_live_view_query_probe__"
 // SETTINGS and functions ending in ')' while preventing post-AS security,
 // FORMAT, or garbage from being mistaken for valid LIVE VIEW grammar.
 func parseLiveViewQueryExact(e Engine, sql string, toks []rawToken, start, end int) (AST, bool) {
+	ranges, parallel, valid := liveViewParallelQueryRanges(toks, start, end)
+	if !valid {
+		return nil, false
+	}
+	if parallel {
+		parts := make([]json.RawMessage, 0, len(ranges))
+		for _, queryRange := range ranges {
+			ast, ok := parseLiveViewSingleQueryExact(e, sql, toks, queryRange[0], queryRange[1])
+			if !ok {
+				return nil, false
+			}
+			parts = append(parts, json.RawMessage(ast))
+		}
+		combined, err := json.Marshal(parts)
+		return AST(combined), err == nil
+	}
+	return parseLiveViewSingleQueryExact(e, sql, toks, start, end)
+}
+
+// liveViewParallelQueryRanges splits ClickHouse's top-level
+// `<select> PARALLEL WITH <select>` chain without treating nested expression
+// tokens as delimiters. Each member is then independently proven by the same
+// exact SelectWithUnion wrapper below, and the resulting AST roots are walked
+// as one ordered array.
+func liveViewParallelQueryRanges(toks []rawToken, start, end int) ([][2]int, bool, bool) {
+	if start < 0 || end <= start || end > len(toks) {
+		return nil, false, false
+	}
+	ranges := make([][2]int, 0, 2)
+	segmentStart := start
+	closers := make([]string, 0, 2)
+	for i := start; i < end; i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			closers = append(closers, "R_PAREN")
+			continue
+		case "L_BRACKET":
+			closers = append(closers, "R_BRACKET")
+			continue
+		case "L_BRACE":
+			closers = append(closers, "R_BRACE")
+			continue
+		case "R_PAREN", "R_BRACKET", "R_BRACE":
+			if len(closers) == 0 || closers[len(closers)-1] != toks[i].TokenType {
+				return nil, false, false
+			}
+			closers = closers[:len(closers)-1]
+			continue
+		}
+		if len(closers) == 0 && keywordsAt(toks, i, "PARALLEL", "WITH") {
+			if segmentStart == i || i+2 >= end {
+				return nil, true, false
+			}
+			ranges = append(ranges, [2]int{segmentStart, i})
+			segmentStart = i + 2
+			i++
+		}
+	}
+	if len(closers) != 0 {
+		return nil, len(ranges) > 0, false
+	}
+	if len(ranges) == 0 {
+		return nil, false, true
+	}
+	ranges = append(ranges, [2]int{segmentStart, end})
+	return ranges, true, true
+}
+
+func parseLiveViewSingleQueryExact(e Engine, sql string, toks []rawToken, start, end int) (AST, bool) {
 	if start < 0 || end <= start || end > len(toks) {
 		return nil, false
 	}
@@ -2055,9 +2142,6 @@ func adaptLiveViewOpaqueAliases(sql string, toks []rawToken, start, end int) (st
 		})
 		i = parameterEnd - 1
 	}
-	if len(candidates) == 0 {
-		return "", nil, false
-	}
 	all := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
 		all[candidate.sentinel] = true
@@ -2074,26 +2158,52 @@ func renderLiveViewOpaqueAliases(
 	selected map[string]bool,
 ) (string, bool) {
 	startByte, endByte := toks[start].Span.Start, toks[end-1].Span.End
-	if startByte < 0 || endByte <= startByte || endByte > len(sql) || len(selected) == 0 {
+	if startByte < 0 || endByte <= startByte || endByte > len(sql) {
 		return "", false
 	}
+	type replacement struct {
+		start int
+		end   int
+		text  string
+	}
+	replacements := make([]replacement, 0, len(candidates)+1)
+	for _, candidate := range candidates {
+		if selected[candidate.sentinel] {
+			replacements = append(replacements, replacement{
+				start: candidate.start,
+				end:   candidate.end,
+				text:  candidate.sentinel,
+			})
+		}
+	}
+	// ClickHouse 25.8 accepts ONLY JOIN as the legacy spelling of ANTI LEFT
+	// JOIN, while the pinned Polyglot parser silently truncates it. Normalize
+	// exactly that lexical pair inside the same source-span renderer used for
+	// opaque aliases; the exact wrapper then proves the full adapted query.
+	for i := start; i+1 < end; i++ {
+		if keywordsAt(toks, i, "ONLY", "JOIN") {
+			replacements = append(replacements, replacement{
+				start: toks[i].Span.Start,
+				end:   toks[i+1].Span.End,
+				text:  "ANTI LEFT JOIN",
+			})
+			i++
+		}
+	}
+	if len(replacements) == 0 {
+		return "", false
+	}
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start < replacements[j].start })
+
 	var out strings.Builder
 	cursor := startByte
-	used := 0
-	for _, candidate := range candidates {
-		if !selected[candidate.sentinel] {
-			continue
-		}
-		if candidate.start < cursor || candidate.end <= candidate.start || candidate.end > endByte {
+	for _, replacement := range replacements {
+		if replacement.start < cursor || replacement.end <= replacement.start || replacement.end > endByte {
 			return "", false
 		}
-		out.WriteString(sql[cursor:candidate.start])
-		out.WriteString(candidate.sentinel)
-		cursor = candidate.end
-		used++
-	}
-	if used == 0 {
-		return "", false
+		out.WriteString(sql[cursor:replacement.start])
+		out.WriteString(replacement.text)
+		cursor = replacement.end
 	}
 	out.WriteString(sql[cursor:endByte])
 	return out.String(), true
@@ -2161,9 +2271,9 @@ func isImplicitAliasParameter(toks []rawToken, start, parameterStart, parameterE
 	}
 	for _, boundary := range []string{
 		"FROM", "JOIN", "GLOBAL", "ANY", "ALL", "ASOF", "SEMI", "ANTI", "PASTE",
-		"INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ARRAY", "ON", "USING",
+		"INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ARRAY", "ONLY", "ON", "USING", "WITH",
 		"FINAL", "SAMPLE", "PREWHERE", "WHERE", "GROUP", "HAVING", "WINDOW", "QUALIFY", "ORDER", "LIMIT", "OFFSET", "SETTINGS",
-		"UNION", "INTERSECT", "EXCEPT",
+		"UNION", "INTERSECT", "EXCEPT", "PARALLEL",
 	} {
 		if keywordAt(toks, parameterEnd, boundary) {
 			return true

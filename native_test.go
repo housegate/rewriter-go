@@ -204,6 +204,10 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 			name: "raw line comment decoy",
 			sql:  "CREATE WINDOW VIEW other.v AS SELECT 1 -- LIVE VIEW\n",
 		},
+		{
+			name: "raw nested block comment decoy",
+			sql:  "CREATE /* outer /* inner */ LIVE VIEW */ WINDOW VIEW other.v AS SELECT 1",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &fakeEngine{
@@ -234,6 +238,26 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 		{
 			name: "raw live view split by line comment",
 			sql:  "ATTACH LIVE -- comment\n VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after BOM",
+			sql:  "\uFEFFCREATE LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after no-break space",
+			sql:  "\u00A0CREATE LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after em space",
+			sql:  "\u2003CREATE LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view separated by Unicode whitespace",
+			sql:  "CREATE\u00A0LIVE\u2003VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view separated by Unicode line separator and BOM",
+			sql:  "CREATE\u2028LIVE\uFEFFVIEW other.v AS SELECT 1",
 		},
 		{
 			name: "raw live view after AS definer user",
@@ -1317,5 +1341,27 @@ func TestDoRewrite_UnmodelledStatementFailsClosedWithStorageIntegrity(t *testing
 	}
 	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
 		t.Fatalf("contract ack = %v, want V1 on every SI response path", resp.GetStorageIntegrityContractVersion())
+	}
+}
+
+func TestDoRewrite_StorageIntegritySealsCollectorErrors(t *testing.T) {
+	e := newEngine(t)
+	sql := "SELECT arrayMap(x -> x IN hg_safe.db1__t, [1])"
+	dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+
+	resp, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatalf("active SI collector failure escaped through the Go error channel: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+		resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 ||
+		resp.GetSqlAfterRewrite() != sql {
+		t.Fatalf("resp = %+v, want acknowledged UnsupportedStatement echoing the original SQL", resp)
+	}
+
+	legacy := *dyn
+	legacy.StorageIntegrity = nil
+	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(&legacy)}); err == nil {
+		t.Fatal("empty-SI collector failure must retain the legacy Go error channel")
 	}
 }

@@ -146,16 +146,20 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 			return resp, true, nil
 		}
 		for _, reads := range []engine.MutationReadSet{mutation.Assignments, mutation.Predicate} {
-			for _, tt := range reads.Tables {
-				if resp, rejected := inspectTarget(tt, false); rejected {
-					resp.SqlAfterRewrite = sql
-					return resp, true, nil
+			for _, read := range reads.Ordered {
+				switch read.Kind {
+				case engine.MutationReadTable:
+					if resp, rejected := inspectTarget(read.Table, false); rejected {
+						resp.SqlAfterRewrite = sql
+						return resp, true, nil
+					}
+				case engine.MutationReadNamespace:
+					resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+					if rejectStorageIntegrityNamespaces(resp, []engine.NamespaceRef{read.Namespace}, sel, pb.RewriteCode_UnsupportedStatement) {
+						resp.SqlAfterRewrite = sql
+						return resp, true, nil
+					}
 				}
-			}
-			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-			if rejectStorageIntegrityNamespaces(resp, reads.Namespaces, sel, pb.RewriteCode_UnsupportedStatement) {
-				resp.SqlAfterRewrite = sql
-				return resp, true, nil
 			}
 		}
 	}

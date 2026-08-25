@@ -105,6 +105,26 @@ func TestRewriteWrite_StorageIntegrityMutationAssignmentWinsPredicate(t *testing
 	}
 }
 
+func TestRewriteWrite_StorageIntegrityMutationCrossKindSourceOrder(t *testing.T) {
+	e := newEngine(t)
+	sql := "UPDATE other.u SET x=(SELECT count() FROM merge('hg_safe','x'))+" +
+		"(SELECT count() FROM db1.t) WHERE id=1"
+	resp, handled, err := RewriteWrite(e, mustParse(t, e, sql), sql,
+		dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	wantMessage := "storage-integrity physical table hg_safe.x is not directly addressable"
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != wantMessage {
+		t.Fatalf("code=%v message=%q, want first namespace reject %q", resp.GetCode(), resp.GetMessage(), wantMessage)
+	}
+	accessed := resp.GetOriginalAccessedTables()
+	if len(accessed) != 1 || accessed[0].GetOriginalDatabase() != "hg_safe" ||
+		accessed[0].GetOriginalTable() != "x" || !accessed[0].GetIsStorageIntegrity() {
+		t.Fatalf("first namespace must be the sole recorded SI hit: %+v", accessed)
+	}
+}
+
 type failingMutationProbeEngine struct{ engine.Engine }
 
 func (e failingMutationProbeEngine) ParseOne(sql string) (engine.AST, error) {
@@ -138,5 +158,25 @@ func TestRewriteWrite_StorageIntegrityMutationAdaptationFailsClosed(t *testing.T
 	if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
 		t.Fatalf("non-SI rewrite = handled=%v err=%v code=%v message=%q",
 			handled, err, resp.GetCode(), resp.GetMessage())
+	}
+}
+
+func TestRewriteWrite_StorageIntegrityStructuredMutationCompletenessFailsClosed(t *testing.T) {
+	e := newEngine(t)
+	for _, sql := range []string{
+		"DELETE FROM other.u IN PARTITION 'p1' WHERE 1",
+		"UPDATE other.u SET x=1 ON CLUSTER c IN PARTITION 'p1' WHERE id=1",
+	} {
+		resp, handled, err := RewriteWrite(e, mustParse(t, e, sql), sql,
+			dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
+		if err != nil || !handled {
+			t.Fatalf("%q: active SI incomplete mutation must be a response reject: handled=%v err=%v", sql, handled, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+			resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED ||
+			resp.GetSqlAfterRewrite() != sql || resp.GetMessage() != "statement is not supported" {
+			t.Fatalf("%q: response = code=%v stmt=%v sql=%q message=%q",
+				sql, resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
+		}
 	}
 }

@@ -57,6 +57,29 @@ func TestCollectMutationReadSurface_StructuredGrammarOrder(t *testing.T) {
 	}
 }
 
+func TestCollectMutationReadSurface_PreservesCrossKindSourceOrder(t *testing.T) {
+	e := newTestEngine(t)
+	sql := "UPDATE other.u SET x=(SELECT count() FROM merge('hg_safe','x'))+" +
+		"(SELECT count() FROM db1.t) WHERE id=1"
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatalf("ParseOne: %v", err)
+	}
+	got, err := CollectMutationReadSurface(e, ast, sql)
+	if err != nil {
+		t.Fatalf("CollectMutationReadSurface: %v", err)
+	}
+	want := []MutationRead{
+		{Kind: MutationReadNamespace, Namespace: NamespaceRef{
+			Source: NamespaceRefTableFunction, Name: "merge", Target: TableTarget{DB: "hg_safe", Table: "x"}, Resolved: true,
+		}},
+		{Kind: MutationReadTable, Table: TableTarget{DB: "db1", Table: "t"}},
+	}
+	if !reflect.DeepEqual(got.Assignments.Ordered, want) {
+		t.Fatalf("ordered reads = %#v, want %#v", got.Assignments.Ordered, want)
+	}
+}
+
 func TestCollectMutationReadSurface_AlterSentinelAdapters(t *testing.T) {
 	e := newTestEngine(t)
 	cases := []struct {
@@ -147,8 +170,8 @@ func TestMutationProbeRoundTripsExactly_DetectsDroppedSuffix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOne: %v", err)
 	}
-	if err := mutationProbeRoundTripsExactly(e, probe, ast); err == nil {
-		t.Fatal("mutationProbeRoundTripsExactly error = nil, want dropped-suffix detection")
+	if err := mutationRoundTripsExactly(e, probe, ast); err == nil {
+		t.Fatal("mutationRoundTripsExactly error = nil, want dropped-suffix detection")
 	}
 }
 
@@ -160,9 +183,25 @@ func TestMutationProbeRoundTripsExactly_DetectsIdentifierCaseDrift(t *testing.T)
 		t.Fatalf("ParseOne: %v", err)
 	}
 	changed := strings.Replace(probe, "mixedCase", "mixedcase", 1)
-	if err := mutationProbeRoundTripsExactly(
+	if err := mutationRoundTripsExactly(
 		mutationGenerateOverrideEngine{Engine: e, generated: changed}, probe, ast,
 	); err == nil {
-		t.Fatal("mutationProbeRoundTripsExactly error = nil, want identifier-case drift detection")
+		t.Fatal("mutationRoundTripsExactly error = nil, want identifier-case drift detection")
+	}
+}
+
+func TestCollectMutationReadSurface_StructuredRejectsDroppedClauses(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		"DELETE FROM other.u IN PARTITION 'p1' WHERE 1",
+		"UPDATE other.u SET x=1 ON CLUSTER c IN PARTITION 'p1' WHERE id=1",
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("ParseOne(%q): %v", sql, err)
+		}
+		if _, err := CollectMutationReadSurface(e, ast, sql); err == nil {
+			t.Fatalf("CollectMutationReadSurface(%q) error = nil, want incomplete-round-trip rejection", sql)
+		}
 	}
 }

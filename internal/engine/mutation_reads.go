@@ -8,11 +8,28 @@ import (
 
 const mutationProbeTable = "__hg_si_probe"
 
-// MutationReadSet is one grammar-ordered mutation expression subtree. Tables
-// and namespace-bearing sources are kept separate because storage-integrity
-// applies its ordinary-table policy before the indirect namespace policy, just
-// like the C++ engine's embedded-read preflight.
+// MutationReadKind distinguishes ordinary table reads from indirect namespace
+// surfaces without losing their common source order.
+type MutationReadKind uint8
+
+const (
+	MutationReadTable MutationReadKind = iota + 1
+	MutationReadNamespace
+)
+
+// MutationRead is one source-ordered read event in a mutation expression.
+type MutationRead struct {
+	Kind      MutationReadKind
+	Table     TableTarget
+	Namespace NamespaceRef
+}
+
+// MutationReadSet is one grammar-ordered mutation expression subtree. Ordered
+// is the policy authority: the first SI object wins even when an indirect
+// namespace precedes an ordinary table. Tables/Namespaces remain convenient
+// typed projections for collector callers and tests.
 type MutationReadSet struct {
+	Ordered    []MutationRead
 	Tables     []TableTarget
 	Namespaces []NamespaceRef
 }
@@ -46,8 +63,20 @@ func CollectMutationReadSurface(e Engine, ast AST, sql string) (MutationReadSurf
 
 	switch kind {
 	case NodeUpdate:
+		if strings.TrimSpace(sql) == "" {
+			return MutationReadSurface{}, fmt.Errorf("engine: UPDATE mutation source SQL is required")
+		}
+		if err := mutationRoundTripsExactly(e, sql, ast); err != nil {
+			return MutationReadSurface{}, err
+		}
 		return collectStructuredMutationSurface(NodeUpdate, body)
 	case NodeDelete:
+		if strings.TrimSpace(sql) == "" {
+			return MutationReadSurface{}, fmt.Errorf("engine: DELETE mutation source SQL is required")
+		}
+		if err := mutationRoundTripsExactly(e, sql, ast); err != nil {
+			return MutationReadSurface{}, err
+		}
 		return collectStructuredMutationSurface(NodeDelete, body)
 	case NodeCommand:
 		raw, _ := body["this"].(string)
@@ -120,9 +149,11 @@ func collectMutationExpression(node any) (MutationReadSet, error) {
 	var reads MutationReadSet
 	err := walkExpression(node, readSourceScope{}, readSourceVisitor{
 		table: func(_, _ map[string]any, target TableTarget) {
+			reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadTable, Table: target})
 			reads.Tables = append(reads.Tables, target)
 		},
 		namespace: func(_ map[string]any, detail namespaceRefDetail) {
+			reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadNamespace, Namespace: detail.ref})
 			reads.Namespaces = append(reads.Namespaces, detail.ref)
 		},
 	})
@@ -130,6 +161,7 @@ func collectMutationExpression(node any) (MutationReadSet, error) {
 }
 
 func appendMutationReads(dst *MutationReadSet, src MutationReadSet) {
+	dst.Ordered = append(dst.Ordered, src.Ordered...)
 	dst.Tables = append(dst.Tables, src.Tables...)
 	dst.Namespaces = append(dst.Namespaces, src.Namespaces...)
 }
@@ -181,7 +213,7 @@ func collectAlterMutationSurface(e Engine, sql string) (MutationReadSurface, boo
 	if kind == alterMutationDelete && body["where_clause"] == nil {
 		return MutationReadSurface{}, true, fmt.Errorf("engine: ALTER DELETE probe lost its predicate")
 	}
-	if err := mutationProbeRoundTripsExactly(e, probe, probeAST); err != nil {
+	if err := mutationRoundTripsExactly(e, probe, probeAST); err != nil {
 		return MutationReadSurface{}, true, err
 	}
 	surface, err := collectStructuredMutationSurface(wantKind, body)
@@ -247,29 +279,29 @@ func mutationClusterToken(tok rawToken) bool {
 
 func tokenTextIs(tok rawToken, want string) bool { return strings.EqualFold(tok.Text, want) }
 
-func mutationProbeRoundTripsExactly(e Engine, probe string, ast AST) error {
+func mutationRoundTripsExactly(e Engine, probe string, ast AST) error {
 	generated, err := e.Generate(ast)
 	if err != nil {
-		return fmt.Errorf("engine: generate ALTER mutation probe: %w", err)
+		return fmt.Errorf("engine: generate mutation completeness probe: %w", err)
 	}
 	want, err := tokenizeRaw(e, probe)
 	if err != nil {
-		return fmt.Errorf("engine: retokenize ALTER mutation probe input: %w", err)
+		return fmt.Errorf("engine: retokenize mutation completeness input: %w", err)
 	}
 	got, err := tokenizeRaw(e, generated)
 	if err != nil {
-		return fmt.Errorf("engine: tokenize generated ALTER mutation probe: %w", err)
+		return fmt.Errorf("engine: tokenize generated mutation completeness probe: %w", err)
 	}
 	trimmedEnd := len(strings.TrimRightFunc(probe, unicode.IsSpace))
 	if len(want) == 0 || want[len(want)-1].Span.End != trimmedEnd {
-		return fmt.Errorf("engine: ALTER mutation probe tokenizer did not consume the complete input")
+		return fmt.Errorf("engine: mutation completeness tokenizer did not consume the complete input")
 	}
 	if len(want) != len(got) {
-		return fmt.Errorf("engine: ALTER mutation probe lost tokens: input=%d generated=%d", len(want), len(got))
+		return fmt.Errorf("engine: mutation completeness probe lost tokens: input=%d generated=%d", len(want), len(got))
 	}
 	for i := range want {
 		if !mutationProbeTokensEqual(want[i], got[i]) {
-			return fmt.Errorf("engine: ALTER mutation probe token %d changed from %s:%q to %s:%q",
+			return fmt.Errorf("engine: mutation completeness token %d changed from %s:%q to %s:%q",
 				i, want[i].TokenType, want[i].Text, got[i].TokenType, got[i].Text)
 		}
 	}

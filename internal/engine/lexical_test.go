@@ -958,6 +958,26 @@ func TestNameRefs_LiveViewVerifierRegressions(t *testing.T) {
 			append(tableRef("other", "v"), tableRef("hg_safe", "t")...),
 		},
 		{
+			"implicit parameterized table alias before PARALLEL WITH keeps sources",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} PARALLEL WITH SELECT * FROM other.u",
+			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
+		},
+		{
+			"implicit parameterized table alias before ONLY JOIN keeps sources",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} ONLY JOIN other.u ON 1",
+			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
+		},
+		{
+			"legacy ONLY JOIN keeps sources without an opaque alias",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t ONLY JOIN other.u ON 1",
+			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
+		},
+		{
+			"implicit parameterized table alias before WITH TOTALS keeps source",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} WITH TOTALS",
+			append(tableRef("other", "v"), tableRef("hg_safe", "t")...),
+		},
+		{
 			"implicit parameterized table alias before GLOBAL join keeps sources",
 			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} GLOBAL LEFT JOIN other.u ON 1",
 			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
