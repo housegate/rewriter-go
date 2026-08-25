@@ -18,8 +18,12 @@ const (
 type DBLevelInfo struct {
 	Kind                DBLevelKind
 	ShowWhat            string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
+	ShowExtended        bool   // SHOW carries the optional EXTENDED prefix (SHOW [EXTENDED] [FULL] COLUMNS ...)
 	ShowFull            bool   // SHOW carries the optional FULL prefix
 	ShowTemporary       bool   // SHOW carries the optional TEMPORARY prefix
+	ShowTable           string // COLUMNS/INDEX family: the table named by the FIRST FROM/IN clause; "" otherwise
+	ShowTableResolved   bool   // the COLUMNS/INDEX family table target reduced to a static identifier
+	HasTableClause      bool   // the COLUMNS/INDEX family carries an explicit table clause, resolvable or not
 	DB                  string // semantic USE db, or SHOW's FROM/IN db; "" when absent
 	HasDBClause         bool   // SHOW carries an explicit FROM/IN clause, even when its target is not a static name
 	DBResolved          bool   // the explicit SHOW FROM/IN target was resolved to DB
@@ -62,6 +66,10 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 		// ClickHouse permits these SHOW prefixes only in this order. Keep their
 		// presence so policy can identify the real kind/target while exact
 		// pass-through paths preserve their server-side presentation semantics.
+		if i < len(toks) && isUnquotedDBKeyword(toks[i], "EXTENDED") {
+			info.ShowExtended = true
+			i++
+		}
 		if i < len(toks) && isUnquotedDBKeyword(toks[i], "FULL") {
 			info.ShowFull = true
 			i++
@@ -85,7 +93,15 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 		// immediately after the SHOW kind. Never keep scanning for IN: later IN
 		// tokens can belong to a WHERE predicate and must not overwrite the real
 		// execution database.
-		if i < len(toks) && (toks[i].TokenType == "FROM" || toks[i].TokenType == "IN") {
+		if isShowTableTargetKind(info.ShowWhat) {
+			// ClickHouse: SHOW [EXTENDED] [FULL] COLUMNS {FROM|IN} <table>
+			// [{FROM|IN} <database>], and the same shape for INDEX / INDEXES /
+			// KEYS. The FIRST clause is the table; the database is either the
+			// optional SECOND clause or the qualifier of a `<database>.<table>`
+			// first clause. Binding the table into DB -- what this parser did for
+			// every SHOW kind -- is what let this family address hg_safe.
+			i = parseShowTableThenDatabase(e, sql, toks, i, &info)
+		} else if i < len(toks) && (toks[i].TokenType == "FROM" || toks[i].TokenType == "IN") {
 			info.HasDBClause = true
 			i++
 			if i < len(toks) {
@@ -124,6 +140,88 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 	default:
 		return DBLevelInfo{Kind: DBNone}, nil
 	}
+}
+
+// isShowTableTargetKind reports the ClickHouse SHOW variants whose first
+// FROM/IN clause names a TABLE, with the database carried by an optional
+// second clause. Every other SHOW kind's single clause names a database.
+func isShowTableTargetKind(kind string) bool {
+	switch kind {
+	case "COLUMNS", "INDEX", "INDEXES", "KEYS":
+		return true
+	default:
+		return false
+	}
+}
+
+// isShowTailToken reports the keywords that end the SHOW target grammar. The
+// set mirrors ParseDBLevel's shared tail loop so a database clause is never
+// searched for past the point where ClickHouse stops accepting one.
+func isShowTailToken(tokenType string) bool {
+	switch tokenType {
+	case "NOT", "LIKE", "I_LIKE", "WHERE", "LIMIT", "SETTINGS", "FORMAT", "INTO", "PARALLEL":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseShowTableThenDatabase consumes `{FROM|IN} <table> [{FROM|IN} <database>]`
+// for the COLUMNS/INDEX family and returns the index at which the shared
+// LIKE/WHERE/LIMIT tail resumes. Identifier authority stays with the parser:
+// every name goes through parsedIdentifierAt, so keyword-spelled and
+// leading-digit names behave exactly as they do in the database-only families.
+func parseShowTableThenDatabase(e Engine, sql string, toks []rawToken, i int, info *DBLevelInfo) int {
+	if i >= len(toks) || (toks[i].TokenType != "FROM" && toks[i].TokenType != "IN") {
+		return i
+	}
+	info.HasTableClause = true
+	i++
+	tableConsumed := false
+	if i < len(toks) {
+		if name, ok := parsedIdentifierAt(e, sql, toks[i]); ok && name != "" {
+			if i+2 < len(toks) && toks[i+1].TokenType == "DOT" {
+				if table, ok := parsedIdentifierAt(e, sql, toks[i+2]); ok && table != "" {
+					info.DB, info.DBResolved, info.HasDBClause = name, true, true
+					info.ShowTable, info.ShowTableResolved = table, true
+					i += 3
+					tableConsumed = true
+				}
+			} else {
+				info.ShowTable, info.ShowTableResolved = name, true
+				i++
+				tableConsumed = true
+			}
+		}
+	}
+	if !tableConsumed {
+		// A target the parser cannot reduce to a name can still span several
+		// tokens (a query parameter lexes as `{ name : Type }`). Skip them to
+		// find the optional database clause, but never past the tail keywords,
+		// so an IN inside a predicate can never be mistaken for that clause.
+		for i < len(toks) && !isShowTailToken(toks[i].TokenType) &&
+			toks[i].TokenType != "FROM" && toks[i].TokenType != "IN" {
+			i++
+		}
+	}
+	if i >= len(toks) || (toks[i].TokenType != "FROM" && toks[i].TokenType != "IN") {
+		return i
+	}
+	// An explicit database clause is authoritative over a qualifier carried by
+	// the table clause, and an explicit-but-unresolvable one must not leave that
+	// qualifier standing: ClickHouse executes against the clause, so policy has
+	// to see an unresolved target rather than a stale resolved one.
+	info.HasDBClause = true
+	info.DB, info.DBResolved = "", false
+	i++
+	if i < len(toks) {
+		if name, ok := parsedIdentifierAt(e, sql, toks[i]); ok && name != "" {
+			info.DB = name
+			info.DBResolved = true
+			i++
+		}
+	}
+	return i
 }
 
 func isUnquotedDBKeyword(tok rawToken, keyword string) bool {
