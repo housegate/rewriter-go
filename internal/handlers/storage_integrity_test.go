@@ -1314,3 +1314,17 @@ func TestStorageIntegrityClickHouseDictionaryOpaqueSettingsFailClosed(t *testing
 		})
 	}
 }
+
+func TestEscapeSQLLiteral_EscapesBackslashBeforeQuote(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"plain_1_1_0", "plain_1_1_0"},
+		{"o'brien", "o''brien"},
+		{`back\slash`, `back\\slash`},
+		{`evil\`, `evil\\`},
+		{`mix\'ed`, `mix\\''ed`},
+	} {
+		if got := escapeSQLLiteral(tc.in); got != tc.want {
+			t.Errorf("escapeSQLLiteral(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
