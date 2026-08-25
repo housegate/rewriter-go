@@ -168,7 +168,10 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			return ast, resp, nil
 		}
 		rid := nameresolve.ReservedRowIDColumn(sel.Dynamic)
-		hit, herr := engine.ReferencesIdentifier(ast, rid)
+		hit, herr := engine.ReferencesIdentifierInScope(ast, rid, func(tt engine.TableTarget) bool {
+			_, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic)
+			return ok
+		})
 		if herr != nil {
 			return nil, nil, herr
 		}

@@ -7376,5 +7376,45 @@
     "want_sql_contains": ["'evil_1_1_0\\\\', 'all_2_2_0'"],
     "want_table_rewrites": {"db1.t": "hg_safe.db1__t"},
     "allow_sql_divergence": true
+  },
+  {
+    "name": "si_reserved_column_on_ordinary_table_in_subquery_allowed",
+    "sql": "SELECT a FROM db1.t WHERE a IN (SELECT _hg_row_id FROM other.u)",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql_go": "SELECT a FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\" WHERE a IN (SELECT _hg_row_id FROM phys.\"other.u\" \"other.u\")",
+    "want_sql_cpp": "SELECT a FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\" WHERE a IN (SELECT _hg_row_id FROM phys.\"other.u\" AS \"other.u\")",
+    "want_sql_contains": ["hg_safe.db1__t", "phys.\"other.u\""],
+    "want_table_rewrites": {"db1.t": "hg_safe.db1__t", "other.u": "phys.other.u"},
+    "want_accessed": [
+      {"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true},
+      {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys", "is_storage_integrity": false}
+    ],
+    "allow_sql_divergence": true
+  },
+  {
+    "name": "si_reserved_column_qualified_by_si_alias_rejected",
+    "sql": "SELECT a FROM db1.t AS s WHERE a IN (SELECT k FROM other.u WHERE k = s._hg_row_id)",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "reserved column _hg_row_id is not addressable"
   }
 ]
