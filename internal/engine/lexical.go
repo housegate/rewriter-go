@@ -87,6 +87,51 @@ func NameRefsFromAST(e Engine, ast AST, sql string) ([]NameRef, error) {
 	return dedupeNameRefs(refs), nil
 }
 
+// PrewhereTargets binds each real PREWHERE keyword to the FIRST table of the
+// FROM clause of the query block that owns it. PREWHERE is a query-level
+// clause evaluated against the main table, so a JOINed table does not own it —
+// the same rule collectSelectLevelSampleTargets applies to SELECT-level SAMPLE.
+//
+// The keyword is matched by text rather than token type because the dialect
+// tokenizer does not necessarily give PREWHERE its own type. keywordAt excludes
+// string literals and quoted identifiers so those spellings cannot trigger
+// policy.
+func PrewhereTargets(e Engine, sql string) ([]TableTarget, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, err
+	}
+	var out []TableTarget
+	for i := range toks {
+		if !keywordAt(toks, i, "PREWHERE") {
+			continue
+		}
+		from := -1
+		nesting := 0
+		for j := i - 1; j >= 0; j-- {
+			if toks[j].Text == ")" {
+				nesting++
+				continue
+			}
+			if toks[j].Text == "(" && nesting > 0 {
+				nesting--
+				continue
+			}
+			if nesting == 0 && toks[j].TokenType == "FROM" {
+				from = j
+				break
+			}
+		}
+		if from < 0 {
+			continue
+		}
+		if target, ok := rawTokenTableTarget(toks, from+1); ok {
+			out = append(out, target)
+		}
+	}
+	return out, nil
+}
+
 type systemTargetMode uint8
 
 const (

@@ -485,7 +485,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -521,7 +521,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -980,7 +980,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -1016,7 +1016,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -1052,7 +1052,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -1129,7 +1129,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -4319,7 +4319,7 @@
       }
     ],
     "want_code": "RewriteError",
-    "want_message_contains": "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported",
     "want_stmt": ""
   },
   {
@@ -7482,5 +7482,59 @@
     "want_accessed": [
       {"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}
     ]
+  },
+  {
+    "name": "si_prewhere_rejected",
+    "sql": "SELECT a FROM db1.t PREWHERE a > 1",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "RewriteError", "want_stmt": "", "reject": true,
+    "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported"
+  },
+  {
+    "name": "si_mixed_ordinary_prewhere_allowed",
+    "sql": "SELECT * FROM other.u AS x JOIN db1.t AS s ON 1 PREWHERE x.a > 1",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql_go": "SELECT * FROM phys.\"other.u\" AS x JOIN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS s ON 1 PREWHERE x.a > 1",
+    "want_sql_cpp": "SELECT * FROM phys.\"other.u\" AS x INNER JOIN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS s ON 1 PREWHERE x.a > 1",
+    "want_sql_contains": ["hg_safe.db1__t", "phys.\"other.u\""],
+    "want_table_rewrites": {"db1.t": "hg_safe.db1__t", "other.u": "phys.other.u"},
+    "allow_sql_divergence": true
+  },
+  {
+    "name": "si_prewhere_literal_allowed",
+    "sql": "SELECT 'PREWHERE' FROM db1.t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT 'PREWHERE' FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"",
+    "want_sql_contains": ["hg_safe.db1__t"],
+    "want_table_rewrites": {"db1.t": "hg_safe.db1__t"}
   }
 ]

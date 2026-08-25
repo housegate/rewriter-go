@@ -150,6 +150,7 @@ func TestRewriteSelect_storageIntegrityModifiersRejected(t *testing.T) {
 		"SELECT * FROM db1.t WITH\nOFFSET AS off",
 		"SELECT * FROM db1.t WITH\tOFFSET AS off",
 		"SELECT * FROM db1.t AS x(a)",
+		"SELECT a FROM db1.t PREWHERE a > 1",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			ast, err := e.ParseOne(sql)
@@ -161,7 +162,7 @@ func TestRewriteSelect_storageIntegrityModifiersRejected(t *testing.T) {
 				t.Fatal(err)
 			}
 			if resp.GetCode() != pb.RewriteCode_RewriteError ||
-				resp.GetMessage() != "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported" {
+				resp.GetMessage() != "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported" {
 				t.Fatalf("code=%v msg=%q ast=%s", resp.GetCode(), resp.GetMessage(), ast)
 			}
 			if len(resp.GetOriginalAccessedTables()) != 1 ||

@@ -155,7 +155,11 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			if oerr != nil {
 				return nil, nil, oerr
 			}
-			for _, tt := range withOffsetTargets {
+			prewhereTargets, perr := engine.PrewhereTargets(e, sourceSQL[0])
+			if perr != nil {
+				return nil, nil, perr
+			}
+			for _, tt := range append(withOffsetTargets, prewhereTargets...) {
 				if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 					modified = true
 					break
@@ -164,7 +168,7 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		}
 		if modified {
 			resp.Code = pb.RewriteCode_RewriteError
-			resp.Message = "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported"
+			resp.Message = "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported"
 			return ast, resp, nil
 		}
 		rid := nameresolve.ReservedRowIDColumn(sel.Dynamic)

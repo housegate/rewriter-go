@@ -1189,6 +1189,35 @@ func TestNameRefs_TableFunctionIdentifierAndLiteralOriginsStayDistinct(t *testin
 	)
 }
 
+func TestPrewhereTargets(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []TableTarget
+	}{
+		{"main table", "SELECT a FROM db1.t PREWHERE a > 1", []TableTarget{{DB: "db1", Table: "t"}}},
+		{"binds to the FROM table, not the JOIN", "SELECT * FROM other.u AS x JOIN db1.t AS s ON 1 PREWHERE x.a > 1", []TableTarget{{DB: "other", Table: "u"}}},
+		{"literal is not a keyword", "SELECT 'PREWHERE' FROM db1.t", nil},
+		{"absent", "SELECT a FROM db1.t WHERE a > 1", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := PrewhereTargets(e, tc.sql)
+			if err != nil {
+				t.Fatalf("PrewhereTargets: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i].DB != tc.want[i].DB || got[i].Table != tc.want[i].Table {
+					t.Fatalf("got %+v, want %+v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func tableRef(db, table string) []NameRef {
 	return []NameRef{{Kind: NameRefTable, DB: db, Table: table}}
 }
