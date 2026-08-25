@@ -9,6 +9,7 @@ import (
 
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-proto/gen/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // newNative builds a NativeRewriter over the real polyglot engine (needs FFI).
@@ -1364,9 +1365,9 @@ func TestDoRewrite_StorageIntegritySealsCollectorErrors(t *testing.T) {
 		t.Fatalf("resp = %+v, want acknowledged UnsupportedStatement echoing the original SQL", resp)
 	}
 
-	legacy := *dyn
+	legacy := proto.Clone(dyn).(*pb.RewriteTableDynamicArgs)
 	legacy.StorageIntegrity = nil
-	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(&legacy)}); err == nil {
+	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(legacy)}); err == nil {
 		t.Fatal("empty-SI collector failure must retain the legacy Go error channel")
 	}
 }
