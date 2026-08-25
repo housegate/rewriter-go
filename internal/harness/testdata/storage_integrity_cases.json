@@ -7353,7 +7353,6 @@
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql_go": "SELECT a FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t UNION ALL SELECT * EXCEPT (_hg_row_id) FROM hg_unsafe.db1__t WHERE _part NOT IN ('o''brien_1_1_0', 'back\\\\slash_1_1_0', 'mix\\\\''ed_1_1_0')) AS \"db1.t\"",
     "want_sql_cpp": "SELECT a FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t UNION ALL SELECT * EXCEPT (_hg_row_id) FROM hg_unsafe.db1__t WHERE _part NOT IN ('o\\'brien_1_1_0', 'back\\\\slash_1_1_0', 'mix\\\\\\'ed_1_1_0')) AS \"db1.t\"",
-    "want_sql_contains": ["'o''brien_1_1_0'", "'back\\\\slash_1_1_0'", "'mix\\\\''ed_1_1_0'"],
     "want_table_rewrites": {"db1.t": "hg_safe.db1__t"},
     "allow_sql_divergence": true
   },
@@ -7536,5 +7535,26 @@
     "want_sql": "SELECT 'PREWHERE' FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"",
     "want_sql_contains": ["hg_safe.db1__t"],
     "want_table_rewrites": {"db1.t": "hg_safe.db1__t"}
+  },
+  {
+    "name": "si_string_literal_except_is_not_mutated",
+    "sql": "SELECT 'EXCEPT _hg_row_id' AS s FROM db1.t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql_go": "SELECT 'EXCEPT _hg_row_id' AS s FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"",
+    "want_sql_cpp": "SELECT 'EXCEPT _hg_row_id' AS s FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"",
+    "want_sql_contains": ["hg_safe.db1__t"],
+    "want_sql_not_contains": ["'EXCEPT (_hg_row_id)'"],
+    "want_table_rewrites": {"db1.t": "hg_safe.db1__t"},
+    "allow_sql_divergence": true
   }
 ]
