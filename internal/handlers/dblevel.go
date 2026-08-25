@@ -201,6 +201,12 @@ func passthroughDB(e engine.Engine, ast engine.AST, sql string, resp *pb.Rewrite
 	return resp, true, nil
 }
 
+// passthroughOriginalDB preserves syntax that the formatter may normalize away.
+func passthroughOriginalDB(sql string, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+	resp.SqlAfterRewrite = sql
+	return resp, true, nil
+}
+
 // dispatchUse ports use.cc handleUseQuery. No dynamic_args → passthrough.
 // Unresolvable physical → InvalidRewriteRequest. Logical mapped to a remote
 // upstream → UnsupportedStatement (USE has no remote analog). physical != origin
@@ -250,6 +256,9 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_SHOW_TABLES)
 	if dyn == nil {
+		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
+			return passthroughOriginalDB(sql, resp)
+		}
 		return passthroughDB(e, ast, sql, resp)
 	}
 	// Only SHOW TABLES proper is rewritten. SHOW DICTIONARIES still carries a
@@ -257,12 +266,17 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	// historical pass-through behavior. The remaining SHOW variants have no
 	// database target and must not inherit the current SI context accidentally.
 	if info.ShowWhat != "TABLES" {
-		if info.ShowWhat == "DICTIONARIES" && rejectShowDictionariesStorageIntegrityNamespace(e, resp, sql, info, dyn) {
-			return resp, true, nil
+		if info.ShowWhat == "DICTIONARIES" {
+			if rejectShowDictionariesStorageIntegrityNamespace(resp, sql, info, dyn) {
+				return resp, true, nil
+			}
+			if info.ShowFull || info.ShowTemporary {
+				return passthroughOriginalDB(sql, resp)
+			}
 		}
 		return passthroughDB(e, ast, sql, resp)
 	}
-	logical, present, resolved := showDatabaseTarget(e, info, dyn.GetUpstreamLogicalDatabaseInContext())
+	logical, present, resolved := showDatabaseTarget(info, dyn.GetUpstreamLogicalDatabaseInContext())
 	if !resolved && info.HasDBClause {
 		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
 			rejectUnresolvedShowDatabase(resp, sql, info.ShowWhat)
@@ -314,7 +328,7 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 // are rejected with one database-shaped SI access event. Logical authorization
 // is checked before the supported-but-forbidden response, matching all other
 // indirect SI namespace surfaces.
-func rejectShowDictionariesStorageIntegrityNamespace(e engine.Engine, resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
+func rejectShowDictionariesStorageIntegrityNamespace(resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
 	if len(dyn.GetStorageIntegrity().GetTables()) == 0 {
 		return false
 	}
@@ -331,7 +345,7 @@ func rejectShowDictionariesStorageIntegrityNamespace(e engine.Engine, resp *pb.R
 			return true
 		}
 	}
-	target, present, resolved := showDatabaseTarget(e, info, dyn.GetUpstreamLogicalDatabaseInContext())
+	target, present, resolved := showDatabaseTarget(info, dyn.GetUpstreamLogicalDatabaseInContext())
 	if !present {
 		return false
 	}
@@ -362,16 +376,15 @@ func rejectShowDictionariesStorageIntegrityNamespace(e engine.Engine, resp *pb.R
 }
 
 // showDatabaseTarget distinguishes an absent FROM/IN clause from an explicit
-// target that the tokenizer cannot reduce to a static identifier. Explicit AST
-// names still need ClickHouse identifier escape decoding; the upstream logical
-// context is already a semantic database name and must never be decoded again.
-func showDatabaseTarget(e engine.Engine, info engine.DBLevelInfo, logicalContext string) (target string, present, resolved bool) {
+// target that the parser cannot reduce to a static identifier. ParseDBLevel and
+// the upstream context both supply semantic database names, so neither is
+// decoded again here.
+func showDatabaseTarget(info engine.DBLevelInfo, logicalContext string) (target string, present, resolved bool) {
 	if info.HasDBClause {
 		if !info.DBResolved || info.DB == "" {
 			return "", true, false
 		}
-		target, ok := engine.SemanticIdentifier(e, info.DB)
-		return target, true, ok && target != ""
+		return info.DB, true, true
 	}
 	if logicalContext == "" {
 		return "", false, false

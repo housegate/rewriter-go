@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -19,18 +18,15 @@ const (
 type DBLevelInfo struct {
 	Kind                DBLevelKind
 	ShowWhat            string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
-	DB                  string // USE db, or SHOW's FROM/IN db; "" when absent
+	ShowFull            bool   // SHOW carries the optional FULL prefix
+	ShowTemporary       bool   // SHOW carries the optional TEMPORARY prefix
+	DB                  string // semantic USE db, or SHOW's FROM/IN db; "" when absent
 	HasDBClause         bool   // SHOW carries an explicit FROM/IN clause, even when its target is not a static name
 	DBResolved          bool   // the explicit SHOW FROM/IN target was resolved to DB
 	HasLike             bool
 	Like                string // LIKE pattern (logical/unescaped: 'O''Brien%' → O'Brien%)
 	LikeNot             bool   // NOT (I)LIKE
 	LikeCaseInsensitive bool   // ILIKE
-}
-
-type dbToken struct {
-	TokenType string `json:"token_type"`
-	Text      string `json:"text"`
 }
 
 // ParseDBLevel extracts USE/SHOW structure from the clickhouse Tokenize stream.
@@ -44,13 +40,9 @@ type dbToken struct {
 // engine). We therefore store the LIKE pattern as-is (logical value); the
 // handlers re-escape it when emitting synthetic SQL.
 func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
-	toksAST, err := e.Tokenize(sql)
+	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
 		return DBLevelInfo{}, err
-	}
-	var toks []dbToken
-	if err := json.Unmarshal(toksAST, &toks); err != nil {
-		return DBLevelInfo{}, fmt.Errorf("engine: decode tokens: %w", err)
 	}
 	if len(toks) == 0 {
 		return DBLevelInfo{}, nil
@@ -67,10 +59,22 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 	case "SHOW":
 		info := DBLevelInfo{Kind: DBShow}
 		i := 1
+		// ClickHouse permits these SHOW prefixes only in this order. Keep their
+		// presence so policy can identify the real kind/target while exact
+		// pass-through paths preserve their server-side presentation semantics.
+		if i < len(toks) && isUnquotedDBKeyword(toks[i], "FULL") {
+			info.ShowFull = true
+			i++
+		}
+		if i < len(toks) && isUnquotedDBKeyword(toks[i], "TEMPORARY") {
+			info.ShowTemporary = true
+			i++
+		}
 		if i < len(toks) {
-			// The word right after SHOW is the kind discriminator. Depending on the
-			// word it lexes as a dedicated keyword (CREATE/CLUSTER/SETTINGS/TABLE) or
-			// as VAR (TABLES/DATABASES/GRANTS/DICTIONARIES/...), so capture it
+			// The word after the optional prefixes is the kind discriminator.
+			// Depending on the word it lexes as a dedicated keyword
+			// (CREATE/CLUSTER/SETTINGS/TABLE) or as VAR
+			// (TABLES/DATABASES/GRANTS/DICTIONARIES/...), so capture it
 			// regardless of token type. This lets the handler distinguish SHOW CREATE
 			// (a separate ClickHouse AST → not SHOW_TABLES) from the
 			// ASTShowTablesQuery family (TABLES/CLUSTER/SETTINGS/...).
@@ -84,10 +88,18 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 		if i < len(toks) && (toks[i].TokenType == "FROM" || toks[i].TokenType == "IN") {
 			info.HasDBClause = true
 			i++
-			if i < len(toks) && isNameToken(toks[i].TokenType) {
-				info.DB = toks[i].Text
-				info.DBResolved = true
-				i++
+			if i < len(toks) {
+				// The SHOW grammar proves that this token is in database-object
+				// position. Let the parser decide whether its exact source span is
+				// an identifier: ClickHouse admits dedicated keyword tokens and
+				// leading-digit bare names here, while an Identifier parameter must
+				// remain explicitly unresolved for SI fail-closed policy.
+				name, ok := parsedIdentifierAt(e, sql, toks[i])
+				if ok && name != "" {
+					info.DB = name
+					info.DBResolved = true
+					i++
+				}
 			}
 		}
 		for i < len(toks) {
@@ -112,6 +124,11 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 	default:
 		return DBLevelInfo{Kind: DBNone}, nil
 	}
+}
+
+func isUnquotedDBKeyword(tok rawToken, keyword string) bool {
+	return tok.TokenType != "QUOTED_IDENTIFIER" && tok.TokenType != "STRING" &&
+		strings.EqualFold(tok.Text, keyword)
 }
 
 // isNameToken reports whether a token type names an identifier (a db/table/
