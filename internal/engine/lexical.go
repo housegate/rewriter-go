@@ -322,8 +322,8 @@ func systemTargetTailValid(e Engine, sql string, spec systemTargetSpec, toks []r
 	case equalWords(spec.words, "FLUSH", "DISTRIBUTED"):
 		return onlyStatementEnd(toks, i) ||
 			(keywordAt(toks, i, "SETTINGS") && systemSettingsTailValid(e, sql, toks, i+1))
-	case equalWords(spec.words, "SCHEDULE", "MERGE") && keywordAt(toks, i, "PARTS"):
-		return systemPartsTailValid(toks, i+1)
+	case equalWords(spec.words, "SCHEDULE", "MERGE"):
+		return keywordAt(toks, i, "PARTS") && systemPartsTailValid(toks, i+1)
 	case equalWords(spec.words, "SYNC", "REPLICA"):
 		return systemSyncReplicaTailValid(toks, i)
 	case equalWords(spec.words, "SYNC", "DATABASE", "REPLICA"):
@@ -804,9 +804,24 @@ func checkTableTailValid(e Engine, sql string, toks []rawToken, i int) bool {
 		return true
 	}
 	switch {
+	case keywordAt(toks, i, "SETTINGS"):
+		return systemSettingsTailValid(e, sql, toks, i+1)
 	case keywordAt(toks, i, "PART"):
-		return i+1 < end && isStringLiteralToken(toks[i+1]) && i+2 == end
+		if i+1 >= end || !isStringLiteralToken(toks[i+1]) {
+			return false
+		}
+		i += 2
+		return i == end || (keywordAt(toks, i, "SETTINGS") && systemSettingsTailValid(e, sql, toks, i+1))
 	case keywordAt(toks, i, "PARTITION"):
+		for settings := i + 2; settings < end; settings++ {
+			if !keywordAt(toks, settings, "SETTINGS") {
+				continue
+			}
+			valueEnd, ok := checkPartitionValueEnd(e, sql, toks, i+1, settings)
+			if ok && valueEnd == settings && systemSettingsTailValid(e, sql, toks, settings+1) {
+				return true
+			}
+		}
 		valueEnd, ok := checkPartitionValueEnd(e, sql, toks, i+1, end)
 		return ok && valueEnd == end
 	default:
@@ -833,6 +848,9 @@ func checkPartitionValueEnd(e Engine, sql string, toks []rawToken, i, end int) (
 	if substitutionEnd, ok := systemSettingSubstitutionEnd(e, sql, toks, i, end); ok {
 		return substitutionEnd, true
 	}
+	if arrayEnd, ok := checkPartitionLiteralArrayEnd(toks, i, end); ok {
+		return arrayEnd, true
+	}
 	if scalarEnd, ok := systemSettingScalarEnd(toks, i, end); ok {
 		return scalarEnd, true
 	}
@@ -840,6 +858,42 @@ func checkPartitionValueEnd(e Engine, sql string, toks []rawToken, i, end int) (
 		return end, true
 	}
 	return i, false
+}
+
+// checkPartitionLiteralArrayEnd mirrors ParserLiteral's square-array branch:
+// elements may be scalar literals or nested literal arrays, but never general
+// expressions, tuple expressions, functions, or trailing commas.
+func checkPartitionLiteralArrayEnd(toks []rawToken, i, end int) (int, bool) {
+	if i >= end || toks[i].TokenType != "L_BRACKET" {
+		return i, false
+	}
+	i++
+	if i < end && toks[i].TokenType == "R_BRACKET" {
+		return i + 1, true
+	}
+	for {
+		var next int
+		var ok bool
+		if i < end && toks[i].TokenType == "L_BRACKET" {
+			next, ok = checkPartitionLiteralArrayEnd(toks, i, end)
+		} else {
+			next, ok = systemSettingScalarEnd(toks, i, end)
+		}
+		if !ok {
+			return i, false
+		}
+		i = next
+		if i >= end {
+			return i, false
+		}
+		if toks[i].TokenType == "R_BRACKET" {
+			return i + 1, true
+		}
+		if toks[i].TokenType != "COMMA" || i+1 >= end || toks[i+1].TokenType == "R_BRACKET" {
+			return i, false
+		}
+		i++
+	}
 }
 
 func checkPartitionExpressionProbe(e Engine, sql string, toks []rawToken, start, end int) bool {
