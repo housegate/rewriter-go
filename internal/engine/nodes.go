@@ -310,7 +310,55 @@ func decodeNamespaceFunctionRefDetail(fn map[string]any) (namespaceRefDetail, bo
 	if strings.HasPrefix(lower, "mergetree") {
 		return decodeNamespacePairDetail(NamespaceRefTableFunction, name, args, 0), true
 	}
+	// Foreign-connector table functions whose signature carries a
+	// (database|schema, table) pair reachable by a ClickHouse loopback:
+	// ClickHouse ships its own MySQL (9004) and PostgreSQL (9005) wire
+	// listeners, and a JDBC/ODBC datasource can point back at ClickHouse
+	// itself (Spec N D4). Signatures read from the ClickHouse documentation on
+	// 2026-08-25; the decode is by ARITY because several of them have a short
+	// form whose index 1 is the table rather than the database, and all five
+	// also accept a named-collection form that names nothing statically.
+	//
+	// sqlite() and redis() are deliberately absent: sqlite's second argument is
+	// a table inside a SQLite FILE and redis's is a COLUMN name, so neither
+	// names a ClickHouse namespace and gating them would only manufacture false
+	// positives (plan deviation D-2). Object-storage and file connectors (s3,
+	// url, hdfs, azureBlobStorage, file, iceberg, deltaLake) address paths, not
+	// (database, table) pairs, and are out of scope for the same reason.
+	switch lower {
+	case "mysql", "postgresql":
+		// mysql(host:port, database, table, user, password[, ...])
+		// postgresql(host:port, database, table, user, password[, schema[, on_conflict]])
+		return decodeNamespacePairDetail(NamespaceRefTableFunction, name, args, 1), true
+	case "mongodb":
+		// mongodb(host:port, database, collection, user, password, structure[, options[, oid_columns]])
+		// versus the URI form mongodb(uri, collection, structure[, oid_columns]),
+		// which carries its database inside the connection string and so names
+		// no ClickHouse namespace at index 1.
+		if len(args) >= 6 {
+			return decodeNamespacePairDetail(NamespaceRefTableFunction, name, args, 1), true
+		}
+		return decodeNamespaceSingleDetail(NamespaceRefTableFunction, name, argAt(args, 1)), true
+	case "jdbc", "odbc":
+		// f(datasource, external_database, external_table) versus the short
+		// f(datasource, external_table).
+		if len(args) == 3 {
+			return decodeNamespacePairDetail(NamespaceRefTableFunction, name, args, 1), true
+		}
+		return decodeNamespaceSingleDetail(NamespaceRefTableFunction, name, argAt(args, 1)), true
+	}
 	return namespaceRefDetail{}, false
+}
+
+// argAt returns the argument at index i, or nil when the call is shorter. A nil
+// argument is neither a current-database marker nor a resolvable value, so the
+// namespace decoders treat it as unresolved rather than panicking on a short
+// call.
+func argAt(args []any, i int) any {
+	if i < 0 || i >= len(args) {
+		return nil
+	}
+	return args[i]
 }
 
 func canonicalCallableInName(name string) (string, bool) {

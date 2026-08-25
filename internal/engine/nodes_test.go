@@ -1607,3 +1607,72 @@ func plainClickHouseStringLiteral(emitted string) (string, bool) {
 	}
 	return b.String(), true
 }
+
+// TestCollectNamespaceRefs_foreignConnectorFamily pins the Spec N D4 decode.
+// ClickHouse ships its own MySQL (9004) and PostgreSQL (9005) wire listeners
+// and a JDBC/ODBC datasource can point back at ClickHouse, so these signatures
+// carry a (database|schema, table) pair into the protected namespace. Decoding
+// is by ARITY, not a flat "pair at index 1": mongodb and jdbc/odbc each have a
+// short form whose index 1 is the table, and every one of the five also accepts
+// a named-collection form that names nothing statically.
+func TestCollectNamespaceRefs_foreignConnectorFamily(t *testing.T) {
+	e := newTestEngine(t)
+	fn := func(name string, target TableTarget, resolved, current bool) []NamespaceRef {
+		return []NamespaceRef{{Source: NamespaceRefTableFunction, Name: name, Target: target, Resolved: resolved, UsesCurrentDatabase: current}}
+	}
+	for _, tc := range []struct {
+		sql  string
+		want []NamespaceRef
+	}{
+		{`SELECT * FROM mysql('127.0.0.1:9004', 'hg_safe', 'db1__t', 'u', 'p')`,
+			fn("mysql", TableTarget{DB: "hg_safe", Table: "db1__t"}, true, false)},
+		{`SELECT * FROM postgresql('127.0.0.1:9005', 'hg_unsafe', 'db1__t', 'u', 'p')`,
+			fn("postgresql", TableTarget{DB: "hg_unsafe", Table: "db1__t"}, true, false)},
+		// mongodb(host:port, database, collection, user, password, structure, ...)
+		{`SELECT * FROM mongodb('127.0.0.1:27017', 'hg_safe', 'db1__t', 'u', 'p', 'a String')`,
+			fn("mongodb", TableTarget{DB: "hg_safe", Table: "db1__t"}, true, false)},
+		// mongodb(uri, collection, structure, ...) -- index 1 is the collection.
+		{`SELECT * FROM mongodb('mongodb://h:27017/hg_safe', 'db1__t', 'a String')`,
+			fn("mongodb", TableTarget{Table: "db1__t"}, false, true)},
+		{`SELECT * FROM jdbc('jdbc:clickhouse://127.0.0.1:8123', 'hg_safe', 'db1__t')`,
+			fn("jdbc", TableTarget{DB: "hg_safe", Table: "db1__t"}, true, false)},
+		{`SELECT * FROM jdbc('jdbc:clickhouse://127.0.0.1:8123', 'db1__t')`,
+			fn("jdbc", TableTarget{Table: "db1__t"}, false, true)},
+		{`SELECT * FROM odbc('DSN=ch', 'hg_unsafe', 'db1__t')`,
+			fn("odbc", TableTarget{DB: "hg_unsafe", Table: "db1__t"}, true, false)},
+		{`SELECT * FROM odbc('DSN=ch', 'db1__t')`,
+			fn("odbc", TableTarget{Table: "db1__t"}, false, true)},
+		// Named-collection forms name no namespace statically. They stay
+		// recognized and unresolved so policy refuses them, rather than being
+		// invisible the way they were before this decode existed.
+		{`SELECT * FROM mysql(creds)`, fn("mysql", TableTarget{}, false, false)},
+		{`SELECT * FROM mysql(creds, database = 'hg_safe', table = 'db1__t')`,
+			fn("mysql", TableTarget{}, false, false)},
+		{`SELECT * FROM postgresql(creds, database = 'hg_safe', table = 'db1__t')`,
+			fn("postgresql", TableTarget{}, false, false)},
+		{`SELECT * FROM mongodb(creds, database = 'hg_safe', collection = 'db1__t')`,
+			fn("mongodb", TableTarget{}, false, true)},
+		{`SELECT * FROM jdbc(creds)`, fn("jdbc", TableTarget{}, false, true)},
+		{`SELECT * FROM odbc(creds)`, fn("odbc", TableTarget{}, false, true)},
+		// Deliberately NOT decoded (Spec N D4, plan deviation D-2): sqlite's
+		// second argument is a table inside a SQLite FILE and redis's is a
+		// COLUMN name, so neither names a ClickHouse namespace and gating them
+		// would only manufacture false positives.
+		{`SELECT * FROM sqlite('/tmp/x.db', 'db1__t')`, nil},
+		{`SELECT * FROM redis('127.0.0.1:6379', 'hg_safe', 'k String')`, nil},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(withoutNamespaceOrigins(got), tc.want) {
+				t.Fatalf("refs = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
