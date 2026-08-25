@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -1400,5 +1401,278 @@ func TestWithOffsetTargets(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%q: got %+v want %+v", tc.sql, got, tc.want)
 		}
+	}
+}
+
+// TestTableFunctionArgValue_DecodesHeredocLiterals pins that the value the
+// namespace policy sees equals the value the generator emits. Polyglot encodes
+// a tagged ClickHouse heredoc as "<tag>\x00<body>", so reading lit["value"] raw
+// made merge($t$hg_safe$t$, 'db1__t') invisible to the storage-integrity gate
+// while Generate re-emitted it as merge('hg_safe', 'db1__t').
+func TestTableFunctionArgValue_DecodesHeredocLiterals(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct{ sql, wantDB string }{
+		{"SELECT * FROM merge('hg_safe', 'db1__t')", "hg_safe"},
+		{"SELECT * FROM merge($$hg_safe$$, 'db1__t')", "hg_safe"},
+		{"SELECT * FROM merge($tag$hg_safe$tag$, 'db1__t')", "hg_safe"},
+		{"SELECT * FROM merge($x$hg_safe$x$, 'db1__t')", "hg_safe"},
+		{"SELECT * FROM remote('h', $tag$hg_unsafe$tag$, 'db1__t')", "hg_unsafe"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			refs, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatalf("collect: %v", err)
+			}
+			if len(refs) != 1 || refs[0].Target.DB != tc.wantDB || refs[0].Target.Table != "db1__t" || !refs[0].Resolved {
+				t.Fatalf("refs = %+v, want a single resolved ref naming %q.db1__t", refs, tc.wantDB)
+			}
+		})
+	}
+}
+
+// polyglotLiteralTypes mirrors polyglot's Literal enum
+// (third_party/polyglot-src/crates/polyglot-sql/src/expressions.rs, the
+// #[serde(tag = "literal_type", ...)] variants). Spec N D6 requires the class
+// of "policy reads a raw AST field the generator interprets differently" to be
+// closed, not just its dollar_string instance, so the invariant test below has
+// to be driven by the complete tag set rather than by the shapes someone
+// happened to think of.
+var polyglotLiteralTypes = []string{
+	"string", "number", "hex_string", "hex_number", "bit_string", "byte_string",
+	"national_string", "date", "time", "timestamp", "datetime",
+	"triple_quoted_string", "escape_string", "dollar_string", "raw_string",
+}
+
+// literalTypesUnreachableInClickHouseArgs are the polyglot literal variants no
+// ClickHouse-dialect spelling produces in a table-function argument position.
+// b"..." is BigQuery-only and the ClickHouse lexer splits it into an identifier
+// plus a quoted identifier. Keep this list as a tripwire: a variant that
+// becomes reachable must gain a probe below, not silently skip the invariant.
+var literalTypesUnreachableInClickHouseArgs = map[string]string{
+	"byte_string": `b"hg_safe"`,
+}
+
+// TestTableFunctionArgValue_PolicyValueMatchesGeneratedValueOrRefuses is Spec N
+// D6's closure proof. For every literal kind polyglot can emit in a
+// table-function namespace argument, either the value storage-integrity policy
+// inspects is exactly the value the generator emits for ClickHouse to execute,
+// or policy refuses to resolve the argument at all. The tagged heredoc broke
+// the first half (policy saw "tag\x00hg_safe", ClickHouse got 'hg_safe') and
+// nothing enforced the second, so an unmodelled encoding silently became an
+// opaque, harmless-looking value.
+func TestTableFunctionArgValue_PolicyValueMatchesGeneratedValueOrRefuses(t *testing.T) {
+	e := newTestEngine(t)
+	probes := []string{
+		`'hg_safe'`,
+		`'''hg_safe'''`,
+		`123`,
+		`x'6867'`,
+		`X'6867'`,
+		`0x68675f73616665`,
+		`b'0110'`,
+		`N'hg_safe'`,
+		`DATE '2024-01-15'`,
+		`TIME '10:30:00'`,
+		`TIMESTAMP '2024-01-15 10:30:00'`,
+		`DATETIME '2024-01-15 10:30:00'`,
+		`"""hg_safe"""`,
+		`e'hg_safe'`,
+		`E'hg_safe'`,
+		`$$hg_safe$$`,
+		`$$$$`,
+		`$tag$hg_safe$tag$`,
+		`r'hg_safe'`,
+		`R'hg_safe'`,
+	}
+	observed := map[string]bool{}
+	for _, probe := range probes {
+		t.Run(probe, func(t *testing.T) {
+			sql := "SELECT * FROM merge(" + probe + ", 'db1__t')"
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			for _, kind := range literalTypesInAST(t, ast) {
+				observed[kind] = true
+			}
+			refs, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatalf("collect: %v", err)
+			}
+			if len(refs) != 1 {
+				t.Fatalf("refs = %+v, want exactly one merge() namespace reference", refs)
+			}
+			policyValue := refs[0].Target.DB
+			if policyValue == "" && !refs[0].Resolved {
+				return // policy refuses this encoding: fail-closed, nothing to compare
+			}
+			gen, err := e.Generate(ast)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			emitted, ok := firstMergeArgument(gen)
+			if !ok {
+				t.Fatalf("generated %q does not have the canonical merge(<arg>, 'db1__t') shape", gen)
+			}
+			executed, plain := plainClickHouseStringLiteral(emitted)
+			if !plain {
+				t.Fatalf("policy resolved %q but ClickHouse executes the non-string argument %s in %q; "+
+					"an encoding whose emitted form is not a plain string literal must refuse", policyValue, emitted, gen)
+			}
+			if executed != policyValue {
+				t.Fatalf("policy sees %q but ClickHouse executes %q (emitted %s)", policyValue, executed, emitted)
+			}
+		})
+	}
+	for _, kind := range polyglotLiteralTypes {
+		spelling, unreachable := literalTypesUnreachableInClickHouseArgs[kind]
+		switch {
+		case unreachable && observed[kind]:
+			t.Errorf("literal_type %q is listed as unreachable (%s) but a probe produced it; give it a probe instead", kind, spelling)
+		case !unreachable && !observed[kind]:
+			t.Errorf("literal_type %q is not exercised by any probe; add one or record why it is unreachable", kind)
+		}
+	}
+}
+
+// literalTypesInAST returns every literal_type tag present in the AST.
+func literalTypesInAST(t *testing.T, ast AST) []string {
+	t.Helper()
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		t.Fatalf("decode ast: %v", err)
+	}
+	var out []string
+	var walk func(any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		case map[string]any:
+			if lit, ok := n["literal"].(map[string]any); ok {
+				if kind, ok := lit["literal_type"].(string); ok {
+					out = append(out, kind)
+				}
+			}
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	return out
+}
+
+// firstMergeArgument extracts the first argument of the canonical
+// merge(<arg>, 'db1__t') form the generator emits for the probes above.
+func firstMergeArgument(generated string) (string, bool) {
+	const prefix = "SELECT * FROM merge("
+	const suffix = ", 'db1__t')"
+	if !strings.HasPrefix(generated, prefix) || !strings.HasSuffix(generated, suffix) {
+		return "", false
+	}
+	return generated[len(prefix) : len(generated)-len(suffix)], true
+}
+
+// plainClickHouseStringLiteral decodes an ordinary single-quoted ClickHouse
+// string literal. It deliberately does NOT reuse the AST decode under test, and
+// it refuses backslash-bearing bodies rather than guessing ClickHouse's escape
+// rules: anything it cannot decode exactly is reported as not plain, which the
+// invariant treats as "policy must refuse".
+func plainClickHouseStringLiteral(emitted string) (string, bool) {
+	if len(emitted) < 2 || emitted[0] != '\'' || emitted[len(emitted)-1] != '\'' {
+		return "", false
+	}
+	body := emitted[1 : len(emitted)-1]
+	if strings.Contains(body, `\`) {
+		return "", false
+	}
+	var b strings.Builder
+	for i := 0; i < len(body); i++ {
+		if body[i] != '\'' {
+			b.WriteByte(body[i])
+			continue
+		}
+		if i+1 >= len(body) || body[i+1] != '\'' {
+			return "", false // an unpaired quote is not a well-formed single literal
+		}
+		b.WriteByte('\'')
+		i++
+	}
+	return b.String(), true
+}
+
+// TestCollectNamespaceRefs_foreignConnectorFamily pins the Spec N D4 decode.
+// ClickHouse ships its own MySQL (9004) and PostgreSQL (9005) wire listeners
+// and a JDBC/ODBC datasource can point back at ClickHouse, so these signatures
+// carry a (database|schema, table) pair into the protected namespace. Decoding
+// is by ARITY, not a flat "pair at index 1": mongodb and jdbc/odbc each have a
+// short form whose index 1 is the table, and every one of the five also accepts
+// a named-collection form that names nothing statically.
+func TestCollectNamespaceRefs_foreignConnectorFamily(t *testing.T) {
+	e := newTestEngine(t)
+	fn := func(name string, target TableTarget, resolved, current bool) []NamespaceRef {
+		return []NamespaceRef{{Source: NamespaceRefTableFunction, Name: name, Target: target, Resolved: resolved, UsesCurrentDatabase: current}}
+	}
+	for _, tc := range []struct {
+		sql  string
+		want []NamespaceRef
+	}{
+		{`SELECT * FROM mysql('127.0.0.1:9004', 'hg_safe', 'db1__t', 'u', 'p')`,
+			fn("mysql", TableTarget{DB: "hg_safe", Table: "db1__t"}, true, false)},
+		{`SELECT * FROM postgresql('127.0.0.1:9005', 'hg_unsafe', 'db1__t', 'u', 'p')`,
+			fn("postgresql", TableTarget{DB: "hg_unsafe", Table: "db1__t"}, true, false)},
+		// mongodb(host:port, database, collection, user, password, structure, ...)
+		{`SELECT * FROM mongodb('127.0.0.1:27017', 'hg_safe', 'db1__t', 'u', 'p', 'a String')`,
+			fn("mongodb", TableTarget{DB: "hg_safe", Table: "db1__t"}, true, false)},
+		// mongodb(uri, collection, structure, ...) -- index 1 is the collection.
+		{`SELECT * FROM mongodb('mongodb://h:27017/hg_safe', 'db1__t', 'a String')`,
+			fn("mongodb", TableTarget{Table: "db1__t"}, false, true)},
+		{`SELECT * FROM jdbc('jdbc:clickhouse://127.0.0.1:8123', 'hg_safe', 'db1__t')`,
+			fn("jdbc", TableTarget{DB: "hg_safe", Table: "db1__t"}, true, false)},
+		{`SELECT * FROM jdbc('jdbc:clickhouse://127.0.0.1:8123', 'db1__t')`,
+			fn("jdbc", TableTarget{Table: "db1__t"}, false, true)},
+		{`SELECT * FROM odbc('DSN=ch', 'hg_unsafe', 'db1__t')`,
+			fn("odbc", TableTarget{DB: "hg_unsafe", Table: "db1__t"}, true, false)},
+		{`SELECT * FROM odbc('DSN=ch', 'db1__t')`,
+			fn("odbc", TableTarget{Table: "db1__t"}, false, true)},
+		// Named-collection forms name no namespace statically. They stay
+		// recognized and unresolved so policy refuses them, rather than being
+		// invisible the way they were before this decode existed.
+		{`SELECT * FROM mysql(creds)`, fn("mysql", TableTarget{}, false, false)},
+		{`SELECT * FROM mysql(creds, database = 'hg_safe', table = 'db1__t')`,
+			fn("mysql", TableTarget{}, false, false)},
+		{`SELECT * FROM postgresql(creds, database = 'hg_safe', table = 'db1__t')`,
+			fn("postgresql", TableTarget{}, false, false)},
+		{`SELECT * FROM mongodb(creds, database = 'hg_safe', collection = 'db1__t')`,
+			fn("mongodb", TableTarget{}, false, true)},
+		{`SELECT * FROM jdbc(creds)`, fn("jdbc", TableTarget{}, false, true)},
+		{`SELECT * FROM odbc(creds)`, fn("odbc", TableTarget{}, false, true)},
+		// Deliberately NOT decoded (Spec N D4, plan deviation D-2): sqlite's
+		// second argument is a table inside a SQLite FILE and redis's is a
+		// COLUMN name, so neither names a ClickHouse namespace and gating them
+		// would only manufacture false positives.
+		{`SELECT * FROM sqlite('/tmp/x.db', 'db1__t')`, nil},
+		{`SELECT * FROM redis('127.0.0.1:6379', 'hg_safe', 'k String')`, nil},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(withoutNamespaceOrigins(got), tc.want) {
+				t.Fatalf("refs = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }

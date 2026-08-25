@@ -179,3 +179,92 @@ func TestDatabaseTarget_nonDBNode(t *testing.T) {
 		}
 	}
 }
+
+// TestParseDBLevel_columnsFamilyBindsTableThenDatabase pins ClickHouse's
+// SHOW [EXTENDED] [FULL] COLUMNS {FROM|IN} <table> [{FROM|IN} <database>]
+// grammar (and the INDEX/INDEXES/KEYS spelling of the same shape), whose
+// clause order is the reverse of the SHOW TABLES family's.
+func TestParseDBLevel_columnsFamilyBindsTableThenDatabase(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql             string
+		wantShow        string
+		wantExtended    bool
+		wantFull        bool
+		wantTableClause bool
+		wantTable       string
+		wantDBClause    bool
+		wantDBResolved  bool
+		wantDB          string
+	}{
+		{sql: "SHOW COLUMNS FROM db1__t FROM hg_safe", wantShow: "COLUMNS",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW COLUMNS FROM hg_safe.db1__t", wantShow: "COLUMNS",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW COLUMNS FROM db1__t", wantShow: "COLUMNS",
+			wantTableClause: true, wantTable: "db1__t"},
+		{sql: "SHOW EXTENDED COLUMNS FROM db1__t FROM hg_safe", wantShow: "COLUMNS", wantExtended: true,
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW EXTENDED FULL COLUMNS FROM db1__t IN hg_unsafe", wantShow: "COLUMNS", wantExtended: true, wantFull: true,
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_unsafe"},
+		{sql: "SHOW FULL COLUMNS FROM db1__t IN hg_unsafe", wantShow: "COLUMNS", wantFull: true,
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_unsafe"},
+		{sql: "SHOW INDEX FROM hg_safe.db1__t", wantShow: "INDEX",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW INDEXES FROM db1__t FROM hg_safe", wantShow: "INDEXES",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW KEYS FROM db1__t FROM hg_safe", wantShow: "KEYS",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW EXTENDED INDEX FROM db1__t FROM hg_safe", wantShow: "INDEX", wantExtended: true,
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		// ClickHouse's own precedence: an explicit database clause wins over the
+		// qualifier of the table clause.
+		{sql: "SHOW COLUMNS FROM hg_unsafe.db1__t FROM hg_safe", wantShow: "COLUMNS",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		// The LIKE/WHERE tail still resumes after both clauses.
+		{sql: "SHOW COLUMNS FROM db1__t FROM hg_safe LIKE 'a%'", wantShow: "COLUMNS",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+		// An explicit but unresolvable database target stays explicit-and-unresolved,
+		// exactly as the TABLES/DICTIONARIES family already does.
+		{sql: "SHOW COLUMNS FROM db1__t FROM {db:Identifier}", wantShow: "COLUMNS",
+			wantTableClause: true, wantTable: "db1__t", wantDBClause: true},
+		// An unresolvable table target keeps the clause explicit without a name.
+		{sql: "SHOW COLUMNS FROM {tbl:Identifier} FROM hg_safe", wantShow: "COLUMNS",
+			wantTableClause: true, wantDBClause: true, wantDBResolved: true, wantDB: "hg_safe"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			got, err := ParseDBLevel(e, tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShowWhat != tc.wantShow || got.ShowExtended != tc.wantExtended || got.ShowFull != tc.wantFull ||
+				got.HasTableClause != tc.wantTableClause || got.ShowTable != tc.wantTable ||
+				got.HasDBClause != tc.wantDBClause || got.DBResolved != tc.wantDBResolved || got.DB != tc.wantDB {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+// TestParseDBLevel_nonColumnsFamilyGrammarIsUnchanged is the regression half:
+// the reversed grammar must not leak into the families whose single FROM/IN
+// really does name a database.
+func TestParseDBLevel_nonColumnsFamilyGrammarIsUnchanged(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct{ sql, want string }{
+		{"SHOW TABLES FROM hg_safe", "hg_safe"},
+		{"SHOW DICTIONARIES FROM hg_safe", "hg_safe"},
+		{"SHOW FULL DICTIONARIES IN db1", "db1"},
+		{"SHOW SOMETHINGNEW FROM hg_safe", "hg_safe"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			got, err := ParseDBLevel(e, tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.HasDBClause || !got.DBResolved || got.DB != tc.want || got.HasTableClause {
+				t.Fatalf("got %+v, want database-only clause %q", got, tc.want)
+			}
+		})
+	}
+}

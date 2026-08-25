@@ -243,6 +243,54 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 	return passthroughDB(e, ast, sql, resp)
 }
 
+// showClass is the Spec N D2 positive classification of a SHOW kind.
+type showClass int
+
+const (
+	showUnknown       showClass = iota // in no list -> fall through to the Spec I D1 catch-all under SI
+	showRewritten                      // TABLES: the synthetic system.tables enumeration
+	showTargetBearing                  // names a database and/or a table: gate before passing through
+	showTargetLess                     // names no database and no table (Spec N section 2 allowlist)
+)
+
+// showKindClass classifies a SHOW kind positively. The previous rule was
+// negative ("anything that is not TABLES has no target"), so every SHOW variant
+// ClickHouse adds landed in the target-less bucket by default and
+// SHOW COLUMNS / INDEX / INDEXES / KEYS reached ClickHouse addressing the
+// protocol-owned namespaces. The target-less list is an explicit allowlist:
+// adding to it requires proving in review that the kind names no database and
+// no table. An unrecognized kind is showUnknown, which fails closed under an
+// active storage-integrity contract.
+//
+// DATABASES and CREATE never reach here: RewriteDBLevel routes them to
+// dispatchShowDatabases and to the SHOW CREATE handler before this point.
+func showKindClass(kind string) showClass {
+	switch kind {
+	case "TABLES":
+		return showRewritten
+	case "DICTIONARIES", "COLUMNS", "FIELDS", "INDEX", "INDEXES", "INDICES", "KEYS":
+		return showTargetBearing
+	case "CLUSTER", "CLUSTERS", "SETTINGS", "MERGES", "CACHES", "PROCESSLIST",
+		"FUNCTIONS", "GRANTS", "USERS", "ROLES", "ROW", "QUOTA", "QUOTAS",
+		"PROFILES", "POLICIES", "ACCESS", "ENGINES", "FILESYSTEM":
+		return showTargetLess
+	default:
+		return showUnknown
+	}
+}
+
+// recordAccessedStorageIntegrityPhysicalTable records one reserved-namespace
+// table access. It mirrors recordAccessedDatabase's storage-integrity branch
+// (physical = the reserved database itself, no logical name) with the table
+// filled in, so the reserved (database, table) pair surfaces exactly as it does
+// for the table-function namespace surfaces.
+func recordAccessedStorageIntegrityPhysicalTable(resp *pb.RewriteSQLResponse, db, table string) {
+	resp.OriginalAccessedTables = append(resp.OriginalAccessedTables, &pb.AccessedTable{
+		OriginalDatabase: db, OriginalTable: table,
+		PhysicalDatabase: db, IsStorageIntegrity: true,
+	})
+}
+
 // dispatchShowTables ports show_tables.cc handleShowTablesQuery. Only SHOW TABLES
 // proper is rewritten into a synthetic system.tables enumeration; SHOW CLUSTERS/
 // DICTIONARIES/SETTINGS/MERGES/CACHES (and a no-dynamic request) pass through.
@@ -261,21 +309,37 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		}
 		return passthroughDB(e, ast, sql, resp)
 	}
-	// Only SHOW TABLES proper is rewritten. SHOW DICTIONARIES still carries a
-	// database namespace, so prove that namespace ordinary before preserving the
-	// historical pass-through behavior. The remaining SHOW variants have no
-	// database target and must not inherit the current SI context accidentally.
-	if info.ShowWhat != "TABLES" {
-		if info.ShowWhat == "DICTIONARIES" {
-			if rejectShowDictionariesStorageIntegrityNamespace(resp, sql, info, dyn) {
-				return resp, true, nil
-			}
-			if info.ShowFull || info.ShowTemporary {
-				return passthroughOriginalDB(sql, resp)
-			}
+	switch showKindClass(info.ShowWhat) {
+	case showTargetBearing:
+		if rejectShowTargetStorageIntegrityNamespace(resp, sql, info, dyn) {
+			return resp, true, nil
+		}
+		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
+			return passthroughOriginalDB(sql, resp)
+		}
+		if info.HasTableClause {
+			// Echo the original text once the namespace is proved ordinary, as
+			// SHOW FULL DICTIONARIES already does. Polyglot's Generate happens to
+			// round-trip this family byte-for-byte today, but ClickHouse's own
+			// ASTShowColumnsQuery / ASTShowIndexesQuery formatter does not, so
+			// echoing is what keeps the two engines equal on every spelling
+			// rather than only on the canonical ones the corpus pins.
+			return passthroughOriginalDB(sql, resp)
+		}
+		return passthroughDB(e, ast, sql, resp)
+	case showTargetLess:
+		return passthroughDB(e, ast, sql, resp)
+	case showUnknown:
+		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
+			// Fall through unhandled: native.go's pass-through tail is the Spec I
+			// D1 catch-all and answers with the generic unmodelled-statement
+			// refusal. Re-stating that message here would duplicate the single
+			// source of it.
+			return nil, false, nil
 		}
 		return passthroughDB(e, ast, sql, resp)
 	}
+	// showRewritten (SHOW TABLES) falls through to the synthetic enumeration.
 	logical, present, resolved := showDatabaseTarget(info, dyn.GetUpstreamLogicalDatabaseInContext())
 	if !resolved && info.HasDBClause {
 		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
@@ -321,14 +385,20 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	return resp, true, nil
 }
 
-// rejectShowDictionariesStorageIntegrityNamespace closes the non-TABLES
-// pass-through hole for SHOW DICTIONARIES. An explicit FROM/IN target wins over
-// the logical session context. Physical safe/unsafe databases and logical
-// databases owning an SI table are protocol-owned at database scope, so both
-// are rejected with one database-shaped SI access event. Logical authorization
-// is checked before the supported-but-forbidden response, matching all other
-// indirect SI namespace surfaces.
-func rejectShowDictionariesStorageIntegrityNamespace(resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
+// rejectShowTargetStorageIntegrityNamespace closes the pass-through hole for
+// every target-bearing SHOW variant. An explicit FROM/IN target wins over the
+// logical session context. Physical safe/unsafe databases and logical databases
+// owning an SI table are protocol-owned at database scope, so both are rejected
+// with one database-shaped SI access event. Logical authorization is checked
+// before the supported-but-forbidden response, matching all other indirect SI
+// namespace surfaces.
+//
+// The COLUMNS/INDEX family additionally names a table, so a resolved table
+// under a reserved physical database is rejected as the pair -- HouseGate's
+// SI-flag path then sees the object rather than only its database. DICTIONARIES
+// has no table clause, so that branch is inert for it and its existing corpus
+// cases do not move.
+func rejectShowTargetStorageIntegrityNamespace(resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
 	if len(dyn.GetStorageIntegrity().GetTables()) == 0 {
 		return false
 	}
@@ -354,9 +424,14 @@ func rejectShowDictionariesStorageIntegrityNamespace(resp *pb.RewriteSQLResponse
 		return true
 	}
 	if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
-		recordAccessedDatabase(resp, target, dyn)
 		resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 		resp.SqlAfterRewrite = sql
+		if info.HasTableClause && info.ShowTableResolved {
+			recordAccessedStorageIntegrityPhysicalTable(resp, target, info.ShowTable)
+			rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(target, info.ShowTable)))
+			return true
+		}
+		recordAccessedDatabase(resp, target, dyn)
 		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(target))
 		return true
 	}
