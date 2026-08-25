@@ -55,7 +55,12 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 // classify() stamps it, so clear it here) and echoes the original SQL so
 // RewriteResult.SQL stays runnable (design §8). NOTE: unlike statement_type,
 // existence_clause is NOT cleared on a reject.
-func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause, siVersion pb.StorageIntegrityContractVersion) {
+//
+// When storage integrity is active, this is also the shared final rejection
+// annotation point: every non-Success response is checked for an SI object so
+// opaque and otherwise unmodelled statement classes still name what they
+// addressed (Spec I D2).
+func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.ExistenceClause, siVersion pb.StorageIntegrityContractVersion, e engine.Engine, sel nameresolve.Selection) {
 	resp.ExistenceClause = ec
 	resp.StorageIntegrityContractVersion = siVersion
 	if resp.GetCode() == pb.RewriteCode_Success {
@@ -65,6 +70,34 @@ func finalize(resp *pb.RewriteSQLResponse, sql string, ec pb.ExistenceClause, si
 	if resp.GetSqlAfterRewrite() == "" {
 		resp.SqlAfterRewrite = sql
 	}
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		handlers.AnnotateStorageIntegrityRejectAST(e, resp, ast, sql, sel)
+	}
+}
+
+// sealStorageIntegrityHandlerError closes the last fail-open escape hatch in
+// the active SI pipeline. A handler/collector error means the engine could not
+// prove the complete statement surface; exposing that as a Go error would make
+// legacy callers forward the original SQL. Empty-SI requests retain that legacy
+// error channel, while active SI converts it to an ordinary, acknowledged
+// UnsupportedStatement response that HouseGate must reject (Spec I D1/D2).
+func sealStorageIntegrityHandlerError(
+	resp *pb.RewriteSQLResponse,
+	ast engine.AST,
+	sql string,
+	ec pb.ExistenceClause,
+	siVersion pb.StorageIntegrityContractVersion,
+	e engine.Engine,
+	sel nameresolve.Selection,
+	handlerErr error,
+) (*pb.RewriteSQLResponse, error) {
+	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		return nil, handlerErr
+	}
+	resp.Code = pb.RewriteCode_UnsupportedStatement
+	resp.Message = StorageIntegrityUnmodelledMessage
+	finalize(resp, ast, sql, ec, siVersion, e, sel)
+	return resp, nil
 }
 
 // Option configures a NativeRewriter.
@@ -84,6 +117,14 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 	}
 	return r
 }
+
+// StorageIntegrityUnmodelledMessage is returned when a request carries a
+// non-empty storage_integrity.tables map and execution reaches the
+// unmodelled-statement pass-through. The rewriter cannot prove such a
+// statement is harmless to the protocol-owned namespaces, so it refuses to
+// forward it (Spec I D1). Enumerated classes replace this text with a more
+// specific one; see handlers.AnnotateStorageIntegrityReject.
+const StorageIntegrityUnmodelledMessage = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
 
 // doRewrite is the engine-level rewrite pipeline shared by NativeRewriter
 // (per-connection, options via callback) and Service (stateless, options
@@ -127,23 +168,39 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		ec = pb.ExistenceClause_EXISTENCE_CLAUSE_IF_EXISTS
 	}
 
+	// Polyglot exposes LIVE VIEW spellings (notably a DEFINER prefix) as an
+	// ordinary create_view node and sometimes as an opaque raw/command node.
+	// The total classifier cheaply excludes unrelated node kinds and opaque
+	// literal/comment decoys before it invokes the engine tokenizer. Exact
+	// grammar is eligible for D2 object attribution; malformed prefixes and
+	// classifier failures stay generic.
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		liveViewClass, classifyErr := engine.ClassifyLiveView(e, ast, sql)
+		if classifyErr != nil || liveViewClass != engine.NotLiveView {
+			resp.Code = pb.RewriteCode_UnsupportedStatement
+			resp.Message = StorageIntegrityUnmodelledMessage
+			finalize(resp, ast, sql, ec, siVersion, e, selection)
+			return resp, nil
+		}
+	}
+
 	// Phase 2: route writes (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME/EXCHANGE/
 	// views, + bare-rejects, + out-of-phase CREATE/DROP DATABASE) before SELECT.
 	if wresp, handled, werr := handlers.RewriteWrite(e, ast, sql, opts); werr != nil {
-		return nil, werr
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, werr)
 	} else if handled {
 		// Design §8 + oracle parity: stamp existence_clause; echo input + clear
 		// statement_type on reject.
-		finalize(wresp, sql, ec, siVersion)
+		finalize(wresp, ast, sql, ec, siVersion, e, selection)
 		return wresp, nil
 	}
 
 	// Phase 3: route db-level statements (USE / SHOW TABLES / SHOW DATABASES /
 	// CREATE DATABASE / DROP DATABASE) after writes, before SELECT.
 	if dresp, handled, derr := handlers.RewriteDBLevel(e, ast, sql, opts); derr != nil {
-		return nil, derr
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, derr)
 	} else if handled {
-		finalize(dresp, sql, ec, siVersion)
+		finalize(dresp, ast, sql, ec, siVersion, e, selection)
 		return dresp, nil
 	}
 
@@ -151,9 +208,9 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	// RewriteExistsShowCreate because both read the same tokenized command
 	// node; exists.go now ignores VerbDescribe explicitly.
 	if dresp, handled, derr := handlers.RewriteDescribe(e, ast, sql, opts); derr != nil {
-		return nil, derr
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, derr)
 	} else if handled {
-		finalize(dresp, sql, ec, siVersion)
+		finalize(dresp, ast, sql, ec, siVersion, e, selection)
 		return dresp, nil
 	}
 
@@ -162,15 +219,15 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	// `command` nodes and recognize disjoint verbs, so their relative order is
 	// irrelevant; this mirrors the C++ server order (exists → show_create → grant).
 	if xresp, handled, xerr := handlers.RewriteExistsShowCreate(e, ast, sql, opts); xerr != nil {
-		return nil, xerr
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, xerr)
 	} else if handled {
-		finalize(xresp, sql, ec, siVersion)
+		finalize(xresp, ast, sql, ec, siVersion, e, selection)
 		return xresp, nil
 	}
 	if gresp, handled, gerr := handlers.RewriteGrant(e, ast, sql, opts); gerr != nil {
-		return nil, gerr
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, gerr)
 	} else if handled {
-		finalize(gresp, sql, ec, siVersion)
+		finalize(gresp, ast, sql, ec, siVersion, e, selection)
 		return gresp, nil
 	}
 
@@ -179,19 +236,28 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		kind == engine.NodeIntersect || kind == engine.NodeExcept {
 		hresp, herr := handlers.RewriteSelect(e, ast, opts, sql)
 		if herr != nil {
-			return nil, herr
+			return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, herr)
 		}
-		finalize(hresp, sql, ec, siVersion) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
+		finalize(hresp, ast, sql, ec, siVersion, e, selection) // SELECT never carries IF [NOT] EXISTS → ec stays UNSPECIFIED
 		return hresp, nil
 	}
 
 	// Pass-through: regenerate (proves the engine round-trips); fall back to
-	// the input on any generate hiccup so SQL is always runnable.
+	// the input on any generate hiccup so SQL is always runnable. With an
+	// active storage-integrity contract this branch is a refusal instead:
+	// reaching it means no handler modelled the statement, so no handler
+	// checked it against the protocol-owned namespaces (Spec I D1).
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = StorageIntegrityUnmodelledMessage
+		finalize(resp, ast, sql, ec, siVersion, e, selection)
+		return resp, nil
+	}
 	if gen, gerr := e.Generate(ast); gerr == nil && gen != "" {
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
-	finalize(resp, sql, ec, siVersion)
+	finalize(resp, ast, sql, ec, siVersion, e, selection)
 	return resp, nil
 }
 

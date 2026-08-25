@@ -348,8 +348,11 @@ func buildLikeClause(info engine.DBLevelInfo) string {
 	return " WHERE name " + op + " '" + escapeSQLLiteral(info.Like) + "'"
 }
 
-// escapeSQLLiteral doubles every single quote for embedding inside a single-quoted
-// ClickHouse string literal. Mirrors C++ escapeSqlLiteral (common.h).
+// escapeSQLLiteral makes s safe to embed inside a single-quoted ClickHouse
+// string literal. ClickHouse honours BOTH '' and \' as an escaped quote inside
+// a single-quoted literal, so a value ending in a backslash would otherwise
+// escape the closing quote and swallow whatever follows. Backslashes are
+// therefore doubled BEFORE quotes are doubled (Spec I D4).
 func escapeSQLLiteral(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
+	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
 }

@@ -1,11 +1,10 @@
 package engine
 
 import (
-	"fmt"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"testing"
 )
 
@@ -48,9 +47,6 @@ func TestCollectSelectTables_cteAliasSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []TableTarget{{DB: "db", Table: "t"}, {DB: "db", Table: "u"}}
-	// order: set-compare; map iteration is non-deterministic
-	sortTargets(got)
-	sortTargets(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v want %+v", got, want)
 	}
@@ -65,8 +61,6 @@ func TestCollectSelectTables_columnQualifierNotATable(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []TableTarget{{Table: "a"}, {Table: "b"}, {Table: "c"}}
-	sortTargets(got)
-	sortTargets(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v want %+v", got, want)
 	}
@@ -239,15 +233,6 @@ func TestInjectCTEs(t *testing.T) {
 	}
 }
 
-// sortTargets sorts a TableTarget slice by DB+Table+Alias for stable comparison.
-func sortTargets(s []TableTarget) {
-	sort.Slice(s, func(i, j int) bool {
-		ki := fmt.Sprintf("%s\x00%s\x00%s", s[i].DB, s[i].Table, s[i].Alias)
-		kj := fmt.Sprintf("%s\x00%s\x00%s", s[j].DB, s[j].Table, s[j].Alias)
-		return ki < kj
-	})
-}
-
 func TestRewriteSelectTables_subquerySubstitution(t *testing.T) {
 	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
 		t.Skip("needs engine")
@@ -396,6 +381,7 @@ func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
 		{`SELECT * FROM cluster('c', 'hg_unsafe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
 		{`SELECT * FROM merge('hg_safe', concat('db1', '__t'))`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe"}}}},
 		{`SELECT * FROM merge('db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}}},
+		{`SELECT merge('db1__t')`, nil},
 		{`SELECT * FROM remote('h', concat('hg_', 'safe'), 'db1__t')`, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}}}},
 		{`SELECT * FROM remote('h', 'hg_safe', 'db1__t')`, []TableFunctionRef{{Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}}},
 		{`SELECT * FROM numbers(10)`, nil},
@@ -589,6 +575,51 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 	}
 }
 
+func TestCollectNamespaceRefs_RespectsCTEAndCSEScopes(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []NamespaceRef
+	}{
+		{
+			name: "named CTE suppresses infix IN table interpretation",
+			sql:  `WITH c AS (SELECT * FROM other.body) SELECT id IN c FROM other.u`,
+		},
+		{
+			name: "named CTE suppresses callable IN table interpretation",
+			sql:  `WITH c AS (SELECT * FROM other.body) SELECT in(id, c) FROM other.u`,
+		},
+		{
+			name: "recursive named CTE scope includes self",
+			sql:  `WITH RECURSIVE c AS (SELECT id IN c) SELECT id IN c`,
+		},
+		{
+			name: "expression-first CSE suppresses IN but not table sources",
+			sql:  `WITH 1 AS t SELECT id IN t FROM other.u`,
+		},
+		{
+			name: "real IN table remains a namespace reference",
+			sql:  `WITH c AS (SELECT * FROM other.body) SELECT id IN db1.t FROM other.u`,
+			want: []NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "db1", Table: "t"}, Resolved: true}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("refs = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCollectEmbeddedSelectSources(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
@@ -600,6 +631,7 @@ func TestCollectEmbeddedSelectSources(t *testing.T) {
 		{`INSERT INTO other.u SELECT * FROM db1.t`, []TableTarget{{DB: "db1", Table: "t"}}, nil},
 		{`INSERT INTO other.u SELECT * FROM remote('h', 'hg_unsafe', concat('db1', '__t'))`, nil, []TableFunctionRef{{Target: TableTarget{DB: "hg_unsafe"}}}},
 		{`CREATE TABLE other.x AS SELECT * FROM merge('db1__t')`, nil, []TableFunctionRef{{Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}}},
+		{`CREATE TABLE other.x AS SELECT merge('db1__t')`, nil, nil},
 		{`CREATE TABLE other.x (a UInt64) ENGINE = MergeTree ORDER BY a`, nil, nil},
 	} {
 		ast, err := e.ParseOne(tc.sql)
@@ -613,6 +645,631 @@ func TestCollectEmbeddedSelectSources(t *testing.T) {
 		if !reflect.DeepEqual(gotTables, tc.wantTable) || !reflect.DeepEqual(gotFns, tc.wantFn) {
 			t.Errorf("%q: tables=%+v functions=%+v, want tables=%+v functions=%+v ast=%s", tc.sql, gotTables, gotFns, tc.wantTable, tc.wantFn, ast)
 		}
+	}
+}
+
+func TestCollectSelectTables_CSEAliasesDoNotHideRealTableSources(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		`WITH 1 AS t SELECT * FROM t`,
+		`WITH RECURSIVE 1 AS t SELECT * FROM t`,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("ParseOne(%q): %v", sql, err)
+		}
+		got, err := CollectSelectTables(ast)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []TableTarget{{Table: "t"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("CollectSelectTables(%q) = %#v, want %#v", sql, got, want)
+		}
+	}
+}
+
+type readSourceView struct {
+	kind                ReadSourceKind
+	target              TableTarget
+	resolved            bool
+	usesCurrentDatabase bool
+}
+
+func collectReadSourceViews(t *testing.T, e Engine, sql string) []readSourceView {
+	t.Helper()
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatalf("parse %q: %v", sql, err)
+	}
+	refs, err := CollectEmbeddedReadSources(ast)
+	if err != nil {
+		t.Fatalf("collect %q: %v", sql, err)
+	}
+	out := make([]readSourceView, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, readSourceView{
+			kind: ref.Kind, target: ref.Target, resolved: ref.Resolved,
+			usesCurrentDatabase: ref.UsesCurrentDatabase,
+		})
+	}
+	return out
+}
+
+func TestCollectEmbeddedReadSources_PreservesSQLOrderAndRoles(t *testing.T) {
+	e := newTestEngine(t)
+	sql := `WITH c AS (SELECT * FROM db.cte)
+		SELECT (SELECT x FROM db.projection)
+		FROM c, db.base
+		JOIN remote('h', 'db', 'join_fn') AS r
+			ON EXISTS (SELECT 1 FROM db.join_on)
+		JOIN db.tail ON 1
+		WHERE EXISTS (SELECT 1 FROM db.where_late)`
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "cte"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "projection"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "base"}, resolved: true},
+		{kind: ReadSourceTableFunction, target: TableTarget{DB: "db", Table: "join_fn"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "join_on"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "tail"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "where_late"}, resolved: true},
+	}
+	for i := 0; i < 100; i++ {
+		if got := collectReadSourceViews(t, e, sql); !reflect.DeepEqual(got, want) {
+			t.Fatalf("iteration %d sources = %#v, want %#v", i, got, want)
+		}
+	}
+}
+
+func TestCollectEmbeddedReadSources_TableFunctionsRequireSourceRole(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []readSourceView
+	}{
+		{
+			name: "scalar projection predicate and nested scalar",
+			sql: `SELECT remote('h', 'decoy', 'projection'), merge('scalar'),
+				(SELECT merge('nested'))
+				FROM db.base
+				WHERE remote('h', 'decoy', 'predicate') = 1`,
+			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "base"}, resolved: true}},
+		},
+		{
+			name: "from and alias wrapped join sources",
+			sql:  `SELECT 1 FROM remote('h', 'db', 'from_fn') AS r JOIN merge('db', 'join_fn') AS m ON 1`,
+			want: []readSourceView{
+				{kind: ReadSourceTableFunction, target: TableTarget{DB: "db", Table: "from_fn"}, resolved: true},
+				{kind: ReadSourceTableFunction, target: TableTarget{DB: "db", Table: "join_fn"}, resolved: true},
+			},
+		},
+		{
+			name: "scalar and aggregate arguments retain nested queries",
+			sql: `SELECT
+				coalesce((SELECT 1 FROM db.scalar_arg), 0),
+				sum((SELECT 1 FROM db.aggregate_arg))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "scalar_arg"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "aggregate_arg"}, resolved: true},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := collectReadSourceViews(t, e, tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sources = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedReadSources_SetOperationsAreLeftToRight(t *testing.T) {
+	e := newTestEngine(t)
+	got := collectReadSourceViews(t, e, `SELECT * FROM db.left_source UNION ALL SELECT * FROM merge('db', 'right_source')`)
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "left_source"}, resolved: true},
+		{kind: ReadSourceTableFunction, target: TableTarget{DB: "db", Table: "right_source"}, resolved: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectEmbeddedReadSources_ConditionalExpressionsUseSQLOrder(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []readSourceView
+	}{
+		{
+			name: "CASE condition then result then ELSE",
+			sql: `SELECT CASE
+				WHEN EXISTS(SELECT 1 FROM hg_unsafe.x) THEN (SELECT 1 FROM db1.t)
+				ELSE (SELECT 1 FROM hg_safe.y)
+			END`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "x"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "db1", Table: "t"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "hg_safe", Table: "y"}, resolved: true},
+			},
+		},
+		{
+			name: "IF condition then true then false",
+			sql: `SELECT if(
+				EXISTS(SELECT 1 FROM hg_unsafe.x),
+				(SELECT 1 FROM db1.t),
+				(SELECT 1 FROM hg_safe.y))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "x"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "db1", Table: "t"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "hg_safe", Table: "y"}, resolved: true},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := collectReadSourceViews(t, e, tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sources = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedReadSources_WindowClausesUseGrammarOrder(t *testing.T) {
+	e := newTestEngine(t)
+	got := collectReadSourceViews(t, e, `SELECT sum(x) OVER (
+		PARTITION BY (SELECT 1 FROM hg_unsafe.db1__x)
+		ORDER BY (SELECT 1 FROM db1.t))`)
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "db1__x"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "db1", Table: "t"}, resolved: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectEmbeddedReadSources_WindowAndQualifyFollowSurfaceOrder(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []readSourceView
+	}{
+		{
+			name: "WINDOW before QUALIFY",
+			sql: `SELECT row_number() OVER w AS rn
+				WINDOW w AS (PARTITION BY (SELECT 1 FROM hg_unsafe.x))
+				QUALIFY EXISTS(SELECT 1 FROM db1.t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "x"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "db1", Table: "t"}, resolved: true},
+			},
+		},
+		{
+			name: "QUALIFY before WINDOW",
+			sql: `SELECT row_number() OVER w AS rn
+				QUALIFY EXISTS(SELECT 1 FROM hg_unsafe.x)
+				WINDOW w AS (PARTITION BY (SELECT 1 FROM db1.t))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "x"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "db1", Table: "t"}, resolved: true},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := collectReadSourceViews(t, e, tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sources = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedReadSources_WithFillUsesGrammarFieldOrder(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne(`SELECT 1 ORDER BY 1 WITH FILL`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		t.Fatal(err)
+	}
+	selectNode := root[NodeSelect].(map[string]any)
+	orderBy := selectNode["order_by"].(map[string]any)
+	ordered := orderBy["expressions"].([]any)[0].(map[string]any)
+	withFill := ordered["with_fill"].(map[string]any)
+	query := func(table string) any {
+		t.Helper()
+		parsed, err := e.ParseOne(`(SELECT 1 FROM db.` + table + `)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var node any
+		if err := json.Unmarshal(parsed, &node); err != nil {
+			t.Fatal(err)
+		}
+		return node
+	}
+	ordered["this"] = query("this_expr")
+	for _, field := range []string{"from_", "to", "step", "staleness", "interpolate"} {
+		withFill[field] = query(field)
+	}
+	mutated, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := CollectEmbeddedReadSources(AST(mutated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []TableTarget
+	for _, ref := range refs {
+		got = append(got, ref.Target)
+	}
+	want := []TableTarget{
+		{DB: "db", Table: "this_expr"},
+		{DB: "db", Table: "from_"},
+		{DB: "db", Table: "to"},
+		{DB: "db", Table: "step"},
+		{DB: "db", Table: "staleness"},
+		{DB: "db", Table: "interpolate"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectEmbeddedReadSources_ParenthesizedQueryIsTransparent(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql   string
+		table string
+	}{
+		{`(SELECT * FROM db.top_level)`, "top_level"},
+		{`SELECT * FROM ((SELECT * FROM db.from_level))`, "from_level"},
+	} {
+		got := collectReadSourceViews(t, e, tc.sql)
+		want := []readSourceView{{
+			kind: ReadSourceTable, target: TableTarget{DB: "db", Table: tc.table}, resolved: true,
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q sources = %#v, want %#v", tc.sql, got, want)
+		}
+	}
+}
+
+func TestObjectWalker_UnknownReadBearingCarrierFailsClosedForEveryProjection(t *testing.T) {
+	e := newTestEngine(t)
+	outer, err := e.ParseOne(`SELECT 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := e.ParseOne(`SELECT * FROM db.hidden`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	var hiddenNode any
+	if err := json.Unmarshal(outer, &root); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(hidden, &hiddenNode); err != nil {
+		t.Fatal(err)
+	}
+	root[NodeSelect].(map[string]any)["future_read_carrier"] = map[string]any{"payload": hiddenNode}
+	mutated, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast := AST(mutated)
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{"tables", func() error { _, err := CollectSelectTables(ast); return err }},
+		{"read sources", func() error { _, err := CollectEmbeddedReadSources(ast); return err }},
+		{"split read sources", func() error {
+			_, _, err := CollectEmbeddedSelectSources(ast)
+			return err
+		}},
+		{"namespaces", func() error { _, err := CollectNamespaceRefs(ast); return err }},
+		{"table functions", func() error { _, err := CollectTableFunctionRefs(ast); return err }},
+		{"rewrite", func() error {
+			_, err := RewriteSelectTables(ast, func(TableTarget) TableDecision {
+				return TableDecision{Action: ActionSkip}
+			})
+			return err
+		}},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.run(); err == nil {
+				t.Fatal("unmodeled read-bearing carrier was accepted")
+			}
+		})
+	}
+}
+
+func TestCollectNamespaceRefs_InsertFunctionTargetIsExplicitButNotAReadSource(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne(`INSERT INTO FUNCTION remote('h', 'db1', 'target') SELECT * FROM other.u`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := CollectNamespaceRefs(ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRefs := []NamespaceRef{{
+		Source: NamespaceRefTableFunction, Name: "remote",
+		Target: TableTarget{DB: "db1", Table: "target"}, Resolved: true,
+	}}
+	if !reflect.DeepEqual(refs, wantRefs) {
+		t.Fatalf("namespace refs = %#v, want %#v", refs, wantRefs)
+	}
+	reads, err := CollectEmbeddedReadSources(ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReads := []ReadSourceRef{{
+		Kind: ReadSourceTable, Target: TableTarget{DB: "other", Table: "u"},
+		Resolved: true, databaseIdentifier: true, tableIdentifier: true,
+	}}
+	if !reflect.DeepEqual(reads, wantReads) {
+		t.Fatalf("read sources = %#v, want %#v", reads, wantReads)
+	}
+}
+
+func TestCollectNamespaceRefs_CreateAsTableFunctionUsesExactSourceRole(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []NamespaceRef
+	}{
+		{
+			name: "clone source table function is a namespace",
+			sql:  `CREATE TABLE other.x AS merge('hg_safe', 'db1__t')`,
+			want: []NamespaceRef{{
+				Source: NamespaceRefTableFunction, Name: "merge",
+				Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true,
+			}},
+		},
+		{
+			name: "scalar lookalike in select projection is not a namespace",
+			sql:  `CREATE TABLE other.x AS SELECT merge('hg_safe', 'db1__t')`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("namespace refs = %#v, want %#v; ast=%s", got, tc.want, ast)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedReadSources_InTableOperandsAreOrderedReadEvents(t *testing.T) {
+	e := newTestEngine(t)
+	got := collectReadSourceViews(t, e, `SELECT
+		(SELECT 1 FROM other.before),
+		id IN db1.t,
+		id GLOBAL IN hg_safe.x,
+		in(id, hg_unsafe.y),
+		equals(id, hg_safe.scalar_decoy)
+	FROM other.base`)
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "before"}, resolved: true},
+		{kind: ReadSourceInTable, target: TableTarget{DB: "db1", Table: "t"}, resolved: true},
+		{kind: ReadSourceInTable, target: TableTarget{DB: "hg_safe", Table: "x"}, resolved: true},
+		{kind: ReadSourceInTable, target: TableTarget{DB: "hg_unsafe", Table: "y"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "base"}, resolved: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectEmbeddedReadSources_InSubqueryAndScalarArgumentsStayRoleAware(t *testing.T) {
+	e := newTestEngine(t)
+	got := collectReadSourceViews(t, e, `SELECT
+		id IN (SELECT id FROM db.subquery),
+		equals(id, hg_safe.not_a_table_operand)
+	FROM other.base`)
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "db", Table: "subquery"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "base"}, resolved: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectEmbeddedReadSources_InTableOperandsRespectCTEScopeAndOpacity(t *testing.T) {
+	e := newTestEngine(t)
+	got := collectReadSourceViews(t, e, `WITH t AS (SELECT * FROM other.cte_body)
+		SELECT
+			id IN t,
+			id IN hg_safe.{target:Identifier},
+			in(id, {other_target:Identifier})
+		FROM other.base`)
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "cte_body"}, resolved: true},
+		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "base"}, resolved: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectEmbeddedReadSources_InTableOperandsRespectOutputAndTableAliases(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []readSourceView
+	}{
+		{
+			name: "output alias hides infix table interpretation",
+			sql:  `SELECT tuple(1, 2) AS t, 1 IN t`,
+			want: []readSourceView{},
+		},
+		{
+			name: "output alias hides callable table interpretation",
+			sql:  `SELECT tuple(1, 2) AS t, in(1, t)`,
+			want: []readSourceView{},
+		},
+		{
+			name: "FROM alias is scoped before projection infix IN",
+			sql:  `SELECT id IN t FROM other.u AS t`,
+			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true}},
+		},
+		{
+			name: "FROM alias is scoped before projection callable IN",
+			sql:  `SELECT in(id, t) FROM other.u AS t`,
+			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := collectReadSourceViews(t, e, tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sources = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedReadSources_CTEDefinitionsUseIncrementalNonrecursiveScope(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []readSourceView
+	}{
+		{
+			name: "self reference is physical only inside its own definition",
+			sql:  `WITH t AS (SELECT * FROM t) SELECT * FROM t`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{Table: "t"}, resolved: true},
+			},
+		},
+		{
+			name: "later definition sees earlier aliases but not itself",
+			sql: `WITH
+				a AS (SELECT * FROM other.first),
+				b AS (SELECT * FROM a JOIN b ON 1)
+			SELECT * FROM b JOIN other.tail ON 1`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "first"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{Table: "b"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "tail"}, resolved: true},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := collectReadSourceViews(t, e, tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sources = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmbeddedReadSources_RecursiveCTEsPredeclareTheirCompleteScope(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []readSourceView
+	}{
+		{
+			name: "self reference is recursive scope",
+			sql:  `WITH RECURSIVE t AS (SELECT * FROM t) SELECT * FROM t`,
+			want: []readSourceView{},
+		},
+		{
+			name: "all recursive aliases are visible to every body",
+			sql: `WITH RECURSIVE
+				a AS (SELECT * FROM b),
+				b AS (SELECT * FROM a)
+			SELECT * FROM a JOIN b ON 1`,
+			want: []readSourceView{},
+		},
+		{
+			name: "recursive bodies retain real sources",
+			sql: `WITH RECURSIVE
+				a AS (SELECT * FROM b JOIN other.real ON 1),
+				b AS (SELECT * FROM a)
+			SELECT * FROM a`,
+			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "real"}, resolved: true}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := collectReadSourceViews(t, e, tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("sources = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRewriteSelectTables_RecursiveCTESelfReferencesStayScoped(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne(`WITH RECURSIVE t AS (SELECT * FROM t) SELECT * FROM t`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var visited []TableTarget
+	if _, err := RewriteSelectTables(ast, func(target TableTarget) TableDecision {
+		visited = append(visited, target)
+		return TableDecision{Action: ActionSkip}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(visited) != 0 {
+		t.Fatalf("recursive CTE references visited as physical tables: %+v", visited)
+	}
+}
+
+func TestCollectEmbeddedReadSources_QualifiedOpaqueTableTargetIsNotFabricated(t *testing.T) {
+	e := newTestEngine(t)
+	got := collectReadSourceViews(t, e,
+		`SELECT * FROM hg_safe.{target:Identifier} JOIN hg_unsafe.db1__x ON 1`)
+	want := []readSourceView{
+		{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "db1__x"}, resolved: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestRewriteSelectTables_UsesOrderedReadSourceVisitor(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne(`WITH c AS (SELECT * FROM db.cte) SELECT (SELECT x FROM db.projection) FROM c, db.base JOIN db.tail ON EXISTS (SELECT 1 FROM db.join_on)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []TableTarget
+	if _, err := RewriteSelectTables(ast, func(target TableTarget) TableDecision {
+		got = append(got, target)
+		return TableDecision{Action: ActionSkip}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []TableTarget{
+		{DB: "db", Table: "cte"},
+		{DB: "db", Table: "projection"},
+		{DB: "db", Table: "base"},
+		{DB: "db", Table: "tail"},
+		{DB: "db", Table: "join_on"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rewrite visit order = %+v, want %+v", got, want)
 	}
 }
 

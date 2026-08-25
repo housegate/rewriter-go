@@ -9,6 +9,7 @@ import (
 
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-proto/gen/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // newNative builds a NativeRewriter over the real polyglot engine (needs FFI).
@@ -63,12 +64,18 @@ func TestPassThroughClassifiesAndEchoes(t *testing.T) {
 // fakeEngine is a deterministic Engine for contract tests that must not depend
 // on polyglot's (lenient) parser behavior or the native FFI lib.
 type fakeEngine struct {
-	parseErr error
+	parseErr      error
+	parseAST      engine.AST
+	tokenizeErr   error
+	tokenizeCalls int
 }
 
 func (f *fakeEngine) ParseOne(sql string) (engine.AST, error) {
 	if f.parseErr != nil {
 		return nil, f.parseErr
+	}
+	if f.parseAST != nil {
+		return f.parseAST, nil
 	}
 	return engine.AST(`{"select":{}}`), nil
 }
@@ -83,9 +90,15 @@ func (f *fakeEngine) RenameTables(a engine.AST, m map[string]string) (engine.AST
 	return a, nil
 }
 func (f *fakeEngine) QualifyTables(a engine.AST, db string) (engine.AST, error) { return a, nil }
-func (f *fakeEngine) Tokenize(string) (engine.AST, error)                       { return engine.AST("[]"), nil }
-func (f *fakeEngine) DiffSQL(string, string) (engine.AST, error)                { return engine.AST("{}"), nil }
-func (f *fakeEngine) Close() error                                              { return nil }
+func (f *fakeEngine) Tokenize(string) (engine.AST, error) {
+	f.tokenizeCalls++
+	if f.tokenizeErr != nil {
+		return nil, f.tokenizeErr
+	}
+	return engine.AST("[]"), nil
+}
+func (f *fakeEngine) DiffSQL(string, string) (engine.AST, error) { return engine.AST("{}"), nil }
+func (f *fakeEngine) Close() error                               { return nil }
 
 func TestNativeRewrite_selectDynamic(t *testing.T) {
 	if os.Getenv("POLYGLOT_SQL_FFI_PATH") == "" {
@@ -123,6 +136,179 @@ func TestSyntaxErrorIsCodeNotGoError(t *testing.T) {
 	}
 	if res.SQL != "SELECT FROM" {
 		t.Fatalf("on non-Success, SQL must echo input; got %q", res.SQL)
+	}
+}
+
+func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCreateView(t *testing.T) {
+	tokenErr := errors.New("tokenize boom")
+	dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+	opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
+
+	t.Run("create view", func(t *testing.T) {
+		e := &fakeEngine{
+			parseAST:    engine.AST(`{"create_view":{}}`),
+			tokenizeErr: tokenErr,
+		}
+		resp, err := doRewrite(e, "CREATE LIVE VIEW other.v AS SELECT 1", opts)
+		if err != nil {
+			t.Fatalf("classifier failure must use the response channel: %v", err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != StorageIntegrityUnmodelledMessage {
+			t.Fatalf("resp = %+v, want generic fail-closed rejection", resp)
+		}
+	})
+
+	t.Run("unrelated select", func(t *testing.T) {
+		e := &fakeEngine{
+			parseAST:    engine.AST(`{"select":{}}`),
+			tokenizeErr: tokenErr,
+		}
+		resp, err := doRewrite(e, "SELECT 1", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetCode() != pb.RewriteCode_Success {
+			t.Fatalf("resp = %+v, unrelated SELECT must not be rejected because Tokenize is unavailable", resp)
+		}
+	})
+
+	t.Run("raw live view with folded whitespace", func(t *testing.T) {
+		e := &fakeEngine{
+			parseAST:    engine.AST(`{"raw":{"sql":"CREATE LIVE\nVIEW other.v AS SELECT 1"}}`),
+			tokenizeErr: tokenErr,
+		}
+		resp, err := doRewrite(e, "CREATE LIVE\nVIEW other.v AS SELECT 1", opts)
+		if err != nil {
+			t.Fatalf("classifier failure must use the response channel: %v", err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != StorageIntegrityUnmodelledMessage {
+			t.Fatalf("resp = %+v, want generic fail-closed rejection", resp)
+		}
+		if e.tokenizeCalls != 2 {
+			t.Fatalf("Tokenize calls = %d, want classifier plus final annotation", e.tokenizeCalls)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "raw string literal decoy",
+			sql:  "CREATE WINDOW VIEW other.v AS SELECT 'LIVE VIEW'",
+		},
+		{
+			name: "raw block comment decoy",
+			sql:  "CREATE WINDOW VIEW other.v AS SELECT 1 /* LIVE VIEW */",
+		},
+		{
+			name: "raw line comment decoy",
+			sql:  "CREATE WINDOW VIEW other.v AS SELECT 1 -- LIVE VIEW\n",
+		},
+		{
+			name: "raw nested block comment decoy",
+			sql:  "CREATE /* outer /* inner */ LIVE VIEW */ WINDOW VIEW other.v AS SELECT 1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &fakeEngine{
+				parseAST:    engine.AST(`{"raw":{"sql":"opaque"}}`),
+				tokenizeErr: tokenErr,
+			}
+			resp, err := doRewrite(e, tc.sql, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != StorageIntegrityUnmodelledMessage {
+				t.Fatalf("resp = %+v, active-SI catch-all must reject the unrelated raw statement", resp)
+			}
+			if e.tokenizeCalls != 1 {
+				t.Fatalf("Tokenize calls = %d, want final annotation only", e.tokenizeCalls)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "raw live view split by block comment",
+			sql:  "CREATE LIVE /* comment */ VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view split by line comment",
+			sql:  "ATTACH LIVE -- comment\n VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after BOM",
+			sql:  "\uFEFFCREATE LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after no-break space",
+			sql:  "\u00A0CREATE LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after em space",
+			sql:  "\u2003CREATE LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view separated by Unicode whitespace",
+			sql:  "CREATE\u00A0LIVE\u2003VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view separated by Unicode line separator and BOM",
+			sql:  "CREATE\u2028LIVE\uFEFFVIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after AS definer user",
+			sql:  "CREATE DEFINER=AS LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after VIEW definer user",
+			sql:  "CREATE DEFINER=VIEW LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after SELECT definer user",
+			sql:  "CREATE DEFINER=SELECT LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after WITH definer user",
+			sql:  "CREATE DEFINER=WITH LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after AS definer host",
+			sql:  "CREATE DEFINER=user@AS LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after SQL security definer mode",
+			sql:  "CREATE SQL SECURITY DEFINER LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after DEFINER-named definer user",
+			sql:  "CREATE DEFINER=DEFINER LIVE VIEW other.v AS SELECT 1",
+		},
+		{
+			name: "raw live view after DEFINER-named definer host",
+			sql:  "CREATE DEFINER=user@DEFINER LIVE VIEW other.v AS SELECT 1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &fakeEngine{
+				parseAST:    engine.AST(`{"raw":{"sql":"opaque"}}`),
+				tokenizeErr: tokenErr,
+			}
+			resp, err := doRewrite(e, tc.sql, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != StorageIntegrityUnmodelledMessage {
+				t.Fatalf("resp = %+v, want generic fail-closed rejection", resp)
+			}
+			if e.tokenizeCalls != 2 {
+				t.Fatalf("Tokenize calls = %d, want classifier plus final annotation", e.tokenizeCalls)
+			}
+		})
 	}
 }
 
@@ -846,5 +1032,342 @@ func TestStorageIntegrityContract_DescribeRetainsAcknowledgement(t *testing.T) {
 	if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_DESCRIBE ||
 		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
 		t.Fatalf("res = %+v, want Success/DESCRIBE/V1", res)
+	}
+}
+
+func TestStorageIntegrityContract_LiveViewVariantsFailClosedBeforeWriteDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		message string
+	}{
+		{
+			name:    "structured definer prefix cannot bypass D1",
+			sql:     "CREATE DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u",
+			message: StorageIntegrityUnmodelledMessage,
+		},
+		{
+			name:    "quoted definer may contain multiple at signs",
+			sql:     "CREATE DEFINER=`a@b@c` LIVE VIEW other.v AS SELECT * FROM other.u",
+			message: StorageIntegrityUnmodelledMessage,
+		},
+		{
+			name:    "physical primary is annotated",
+			sql:     "CREATE DEFINER=user@host SQL SECURITY DEFINER LIVE VIEW hg_safe.v AS SELECT * FROM other.u",
+			message: "storage-integrity physical table hg_safe.v is not directly addressable",
+		},
+		{
+			name:    "UUID and suffix security remain live view grammar",
+			sql:     "CREATE LIVE VIEW other.v UUID '01234567-89ab-cdef-0123-456789abcdef' DEFINER=AS@TO SQL SECURITY INVOKER AS SELECT * FROM db1.t",
+			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+		},
+		{
+			name:    "ATTACH destination UUID and trailing comment remain live view grammar",
+			sql:     "ATTACH LIVE VIEW other.v TO hg_safe.sink UUID '11111111-2222-3333-4444-555555555555' AS SELECT * FROM other.u COMMENT 'live'",
+			message: "storage-integrity physical table hg_safe.sink is not directly addressable",
+		},
+		{
+			name:    "heredoc UUID remains a pinned string literal",
+			sql:     "CREATE LIVE VIEW other.v UUID $uuid$01234567-89ab-cdef-0123-456789abcdef$uuid$ AS SELECT * FROM db1.t",
+			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEngine(t)
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			dyn.DatabaseMap["other"] = "phys"
+			r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+
+			res, err := r.Rewrite(context.Background(), tc.sql, "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_UnsupportedStatement || res.SQL != tc.sql ||
+				res.StatementType != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 ||
+				res.Message != tc.message {
+				t.Fatalf("res = %+v, want Unsupported/original/UNSPECIFIED/V1/message %q", res, tc.message)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_LiveViewOrderedSourceAndAliasRegressions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		message string
+	}{
+		{
+			name:    "recursive CTE self reference stays scoped",
+			sql:     "CREATE LIVE VIEW other.v AS WITH RECURSIVE t AS (SELECT * FROM t) SELECT * FROM t",
+			message: StorageIntegrityUnmodelledMessage,
+		},
+		{
+			name:    "output alias is not an IN table",
+			sql:     "CREATE LIVE VIEW other.v AS SELECT tuple(1,2) AS t, 1 IN t",
+			message: StorageIntegrityUnmodelledMessage,
+		},
+		{
+			name:    "FROM alias is known before projection IN",
+			sql:     "CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
+			message: StorageIntegrityUnmodelledMessage,
+		},
+		{
+			name:    "window PARTITION source precedes ORDER source",
+			sql:     "CREATE LIVE VIEW other.v AS SELECT sum(x) OVER (PARTITION BY (SELECT 1 FROM hg_unsafe.db1__x) ORDER BY (SELECT 1 FROM db1.t))",
+			message: "storage-integrity physical table hg_unsafe.db1__x is not directly addressable",
+		},
+		{
+			name:    "qualified opaque source does not fabricate its prefix",
+			sql:     "CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.{target:Identifier} JOIN hg_unsafe.db1__x ON 1",
+			message: "storage-integrity physical table hg_unsafe.db1__x is not directly addressable",
+		},
+		{
+			name:    "parameterized alias does not suppress later proven source",
+			sql:     "CREATE LIVE VIEW other.v AS SELECT * FROM other.u AS {alias:Identifier} JOIN db1.t ON 1",
+			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEngine(t)
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			dyn.DatabaseMap["other"] = "phys"
+			dyn.UpstreamLogicalDatabaseInContext = "db1"
+			r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+
+			res, err := r.Rewrite(context.Background(), tc.sql, "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_UnsupportedStatement || res.SQL != tc.sql ||
+				res.StatementType != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 ||
+				res.Message != tc.message {
+				t.Fatalf("res = %+v, want Unsupported/original/UNSPECIFIED/V1/message %q", res, tc.message)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_InvalidLiveViewShapesNeverBypassFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		sql     string
+		message string
+	}{
+		{"CREATE LIVE VIEW other.v ON CLUSTER {cluster:Identifier} AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE LIVE VIEW other.v UUID 'not-a-uuid' AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE LIVE VIEW other.v TO other.s UUID {uuid:Identifier} AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE LIVE VIEW other.v (nonsense) AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE LIVE VIEW other.v AS SELECT * FROM other.u SQL SECURITY DEFINER", StorageIntegrityUnmodelledMessage},
+		{"CREATE LIVE VIEW other.v AS SELECT * FROM other.u COMMENT 'live' DEFINER", StorageIntegrityUnmodelledMessage},
+		// The DEFINER prefix makes Polyglot structure these as create_view. The
+		// broad prefix guard must prevent Success without promoting invalid
+		// grammar into D2, even when apparent SI objects are present.
+		{"CREATE DEFINER=alice LIVE VIEW other.v UUID 'not-a-uuid' AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=alice LIVE VIEW hg_safe.v TO hg_unsafe.sink UUID {uuid:Identifier} AS SELECT * FROM db1.t", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER={user:Identifier} LIVE VIEW other.v UUID 'not-a-uuid' AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER='user'@'host' LIVE VIEW other.v UUID 'not-a-uuid' AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=alice DEFINER=bob LIVE VIEW other.v UUID 'not-a-uuid' AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=@host LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=() LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=alice@@host LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER={user:String} LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=alice@{host:String} LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE DEFINER=1 LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE OR REPLACE DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE OR ALTER DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE TEMPORARY DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE MATERIALIZED DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			e := newEngine(t)
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			dyn.DatabaseMap["other"] = "phys"
+			r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+
+			res, err := r.Rewrite(context.Background(), tc.sql, "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_UnsupportedStatement || res.SQL != tc.sql ||
+				res.StatementType != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 ||
+				res.Message != tc.message {
+				t.Fatalf("res = %+v, want fail-closed rejection without a fabricated D2 object", res)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_CTEAndCSEScopesRemainDistinct(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "named CTE is not an IN table namespace",
+			sql:  "WITH c AS (SELECT id FROM db1.t) SELECT id IN c FROM other.u",
+		},
+		{
+			name: "expression-first CSE does not hide a real table",
+			sql:  "WITH 1 AS t SELECT * FROM t",
+		},
+		{
+			name: "recursive expression-first CSE does not hide a real table",
+			sql:  "WITH RECURSIVE 1 AS t SELECT * FROM t",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEngine(t)
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			dyn.DatabaseMap["other"] = "phys"
+			dyn.UpstreamLogicalDatabaseInContext = "db1"
+			r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+
+			res, err := r.Rewrite(context.Background(), tc.sql, "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_Success ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 ||
+				!strings.Contains(res.SQL, "hg_safe") {
+				t.Fatalf("res = %+v, want Success/V1 with SI safe-table rewrite", res)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_LiveViewPrefixGuardPreservesOrdinaryViews(t *testing.T) {
+	for _, sql := range []string{
+		"CREATE DEFINER=live VIEW other.v AS SELECT 1",
+		"CREATE DEFINER=alice@live VIEW other.v AS SELECT 1",
+		"CREATE DEFINER=@live VIEW other.v AS SELECT 1",
+		"CREATE DEFINER=() VIEW other.v AS SELECT 1",
+		"CREATE DEFINER='live' VIEW other.v AS SELECT 1",
+		"CREATE SQL SECURITY DEFINER VIEW other.v AS SELECT 1",
+		"CREATE SQL SECURITY DEFINER DEFINER=live VIEW other.v AS SELECT 1",
+		"CREATE OR REPLACE DEFINER=live VIEW other.v AS SELECT 1",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			e := newEngine(t)
+			dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+			dyn.DatabaseMap["other"] = "phys"
+			r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+			defer r.Close()
+
+			res, err := r.Rewrite(context.Background(), sql, "acct")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Code != pb.RewriteCode_Success || res.StatementType != pb.StatementType_STATEMENT_TYPE_CREATE_VIEW ||
+				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+				t.Fatalf("res = %+v, want ordinary CREATE VIEW Success/CREATE_VIEW/V1", res)
+			}
+		})
+	}
+}
+
+func TestStorageIntegrityContract_EmptySILiveViewKeepsLegacyDispatch(t *testing.T) {
+	e := newEngine(t)
+	dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+	dyn.DatabaseMap["other"] = "phys"
+	dyn.StorageIntegrity.Tables = nil
+	r := nativeWithExactOptions(t, e, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	defer r.Close()
+
+	sql := "CREATE DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u"
+	res, err := r.Rewrite(context.Background(), sql, "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != pb.RewriteCode_Success ||
+		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+		t.Fatalf("res = %+v, want legacy Success/unspecified contract", res)
+	}
+}
+
+func TestDoRewrite_UnmodelledStatementPassesThroughWithoutStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			DynamicArgs: &pb.RewriteTableDynamicArgs{
+				DatabaseMap:            map[string]string{"db1": "phys"},
+				KnownPhysicalDatabases: []string{"phys"},
+				Delim:                  "_",
+			}}}}}
+	resp, err := doRewrite(e, "SYSTEM RELOAD CONFIG", opts)
+	if err != nil {
+		t.Fatalf("doRewrite: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %v (%s), want Success — empty-SI requests keep the legacy pass-through",
+			resp.GetCode(), resp.GetMessage())
+	}
+	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+		t.Fatalf("contract ack = %v, want UNSPECIFIED", resp.GetStorageIntegrityContractVersion())
+	}
+}
+
+func TestDoRewrite_UnmodelledStatementFailsClosedWithStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			DynamicArgs: &pb.RewriteTableDynamicArgs{
+				DatabaseMap:            map[string]string{"db1": "phys"},
+				KnownPhysicalDatabases: []string{"phys"},
+				Delim:                  "_",
+				StorageIntegrity: &pb.StorageIntegrityArgs{
+					Tables: map[string]*pb.StorageIntegrityArgs_Table{
+						"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"}},
+					ReadMode:            pb.StorageIntegrityArgs_READ_MODE_SAFE,
+					ReservedRowIdColumn: "_hg_row_id",
+					ContractVersion:     pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+				},
+			}}}}}
+	resp, err := doRewrite(e, "SYSTEM RELOAD CONFIG", opts)
+	if err != nil {
+		t.Fatalf("doRewrite: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+		t.Fatalf("code = %v, want UnsupportedStatement", resp.GetCode())
+	}
+	if resp.GetMessage() != StorageIntegrityUnmodelledMessage {
+		t.Fatalf("message = %q, want %q", resp.GetMessage(), StorageIntegrityUnmodelledMessage)
+	}
+	if resp.GetSqlAfterRewrite() != "SYSTEM RELOAD CONFIG" {
+		t.Fatalf("reject must echo the original SQL, got %q", resp.GetSqlAfterRewrite())
+	}
+	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED {
+		t.Fatalf("statement_type = %v, want UNSPECIFIED on a reject", resp.GetStatementType())
+	}
+	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+		t.Fatalf("contract ack = %v, want V1 on every SI response path", resp.GetStorageIntegrityContractVersion())
+	}
+}
+
+func TestDoRewrite_StorageIntegritySealsCollectorErrors(t *testing.T) {
+	e := newEngine(t)
+	sql := "SELECT arrayMap(x -> x IN hg_safe.db1__t, [1])"
+	dyn := siContractDynamic(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1)
+
+	resp, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatalf("active SI collector failure escaped through the Go error channel: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+		resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 ||
+		resp.GetSqlAfterRewrite() != sql {
+		t.Fatalf("resp = %+v, want acknowledged UnsupportedStatement echoing the original SQL", resp)
+	}
+
+	legacy := proto.Clone(dyn).(*pb.RewriteTableDynamicArgs)
+	legacy.StorageIntegrity = nil
+	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(legacy)}); err == nil {
+		t.Fatal("empty-SI collector failure must retain the legacy Go error channel")
 	}
 }

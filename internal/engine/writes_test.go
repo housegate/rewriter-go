@@ -693,6 +693,18 @@ func TestInsertFormatTail_noFormatNoSplice(t *testing.T) {
 	}
 }
 
+func TestTokenStream_ZeroWidthEOFSpan(t *testing.T) {
+	stream := newTokenStream("SELECT '中'")
+	end := stream.characters()
+	startByte, endByte, ok := stream.byteRange(end, end)
+	if !ok {
+		t.Fatal("zero-width EOF span rejected")
+	}
+	if startByte != len(stream.sql) || endByte != len(stream.sql) {
+		t.Fatalf("EOF byte range = [%d,%d), want [%d,%d)", startByte, endByte, len(stream.sql), len(stream.sql))
+	}
+}
+
 // TestGenerateInsert_formatAsIdentifierNotSpliced guards the parity bug found in
 // review: `FORMAT` used as a column identifier (here a column named FORMAT in the
 // embedded SELECT) tokenizes as token_type=="FORMAT", but it is NOT a FORMAT data
