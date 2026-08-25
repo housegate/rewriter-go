@@ -943,3 +943,31 @@ func TestRewriteDBLevel_unknownShowKindStillPassesThroughWithoutStorageIntegrity
 		}
 	}
 }
+
+// TestRewriteDBLevel_unresolvedShowColumnsDatabaseRejected pins the Spec N D2
+// unresolvable-database refusal for the COLUMNS/INDEX family. It is engine-local
+// rather than a shared corpus case because ClickHouse's ParserShowColumnsQuery
+// parses both clauses without allow_query_parameter, so the C++ engine answers
+// SyntaxError where this engine answers UnsupportedStatement. Both fail closed;
+// the corpus schema carries exactly one want_code, so the divergence cannot be
+// expressed there. Measured on rewriter-grpc 8b1b5f8 during the Spec N D3
+// differential.
+func TestRewriteDBLevel_unresolvedShowColumnsDatabaseRejected(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, sql := range []string{
+		"SHOW COLUMNS FROM db1__t FROM {db:Identifier}",
+		"SHOW INDEX FROM db1__t FROM {db:Identifier}",
+		"SHOW FIELDS FROM db1__t FROM {db:Identifier}",
+	} {
+		ast := mustParse(t, e, sql)
+		resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+		if err != nil {
+			t.Fatalf("%q: %v", sql, err)
+		}
+		if !handled || resp.GetCode() == pb.RewriteCode_Success {
+			t.Errorf("%q: handled=%v code=%v, want a refusal — an unresolvable database must never pass the namespace gate",
+				sql, handled, resp.GetCode())
+		}
+	}
+}

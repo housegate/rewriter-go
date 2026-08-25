@@ -268,7 +268,7 @@ func showKindClass(kind string) showClass {
 	switch kind {
 	case "TABLES":
 		return showRewritten
-	case "DICTIONARIES", "COLUMNS", "INDEX", "INDEXES", "KEYS":
+	case "DICTIONARIES", "COLUMNS", "FIELDS", "INDEX", "INDEXES", "INDICES", "KEYS":
 		return showTargetBearing
 	case "CLUSTER", "CLUSTERS", "SETTINGS", "MERGES", "CACHES", "PROCESSLIST",
 		"FUNCTIONS", "GRANTS", "USERS", "ROLES", "ROW", "QUOTA", "QUOTAS",

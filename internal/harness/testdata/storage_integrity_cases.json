@@ -7709,6 +7709,44 @@
     ]
   },
   {
+    "name": "si_show_fields_two_from_safe_rejected",
+    "sql": "SHOW FIELDS FROM db1__t FROM hg_safe",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [
+      {"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}
+    ]
+  },
+  {
+    "name": "si_show_indices_two_from_safe_rejected",
+    "sql": "SHOW INDICES FROM db1__t FROM hg_safe",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [
+      {"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}
+    ]
+  },
+  {
     "name": "si_show_columns_qualified_safe_rejected",
     "sql": "SHOW COLUMNS FROM hg_safe.db1__t",
     "dynamic": {
@@ -7860,22 +7898,6 @@
     "want_accessed": [
       {"original_database": "db1", "original_table": "", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}
     ]
-  },
-  {
-    "name": "si_show_columns_unresolved_database_rejected",
-    "sql": "SHOW COLUMNS FROM db1__t FROM {db:Identifier}",
-    "dynamic": {
-      "database_map": {"db1": "phys", "other": "phys"},
-      "known_physical_databases": ["phys"],
-      "delim": "_",
-      "storage_integrity": {
-        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
-        "read_mode": "SAFE",
-        "reserved_row_id_column": "_hg_row_id"
-      }
-    },
-    "want_code": "UnsupportedStatement", "want_stmt": "", "reject": true,
-    "want_message_contains": "storage-integrity SHOW COLUMNS database is not statically resolvable"
   },
   {
     "name": "si_show_columns_ordinary_database_passthrough",

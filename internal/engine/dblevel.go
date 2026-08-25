@@ -145,9 +145,12 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 // isShowTableTargetKind reports the ClickHouse SHOW variants whose first
 // FROM/IN clause names a TABLE, with the database carried by an optional
 // second clause. Every other SHOW kind's single clause names a database.
+// FIELDS and INDICES are ClickHouse's synonyms for COLUMNS and INDEX; they
+// parse identically here, and omitting them left the table bound as the
+// database while the C++ engine gated them as the pair.
 func isShowTableTargetKind(kind string) bool {
 	switch kind {
-	case "COLUMNS", "INDEX", "INDEXES", "KEYS":
+	case "COLUMNS", "FIELDS", "INDEX", "INDEXES", "INDICES", "KEYS":
 		return true
 	default:
 		return false
