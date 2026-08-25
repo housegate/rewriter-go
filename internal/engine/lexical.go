@@ -1423,6 +1423,11 @@ func opaqueSQLPrefixTokens(sql string) []string {
 				i += size
 				continue
 			}
+			if end, ok := opaqueUnicodeQuoteEnd(sql, i); ok {
+				i = end
+				toks = append(toks, "<QUOTED>")
+				continue
+			}
 			toks = append(toks, "<NONASCII>")
 			i += size
 		case i+1 < len(sql) && sql[i] == '-' && sql[i+1] == '-':
@@ -1491,6 +1496,45 @@ func opaqueSQLPrefixTokens(sql string) []string {
 		}
 	}
 	return toks
+}
+
+// opaqueUnicodeQuoteEnd consumes ClickHouse's paired Unicode quote forms:
+// curly single quotes for strings and curly double quotes for identifiers.
+// As with the ASCII scanner above, backslash escapes and doubled closing
+// delimiters remain inside the one opaque token; an unterminated quote consumes
+// the rest of the prefix conservatively.
+func opaqueUnicodeQuoteEnd(sql string, start int) (int, bool) {
+	opener, openerSize := utf8.DecodeRuneInString(sql[start:])
+	var closer rune
+	switch opener {
+	case '\u2018':
+		closer = '\u2019'
+	case '\u201c':
+		closer = '\u201d'
+	default:
+		return start, false
+	}
+	for i := start + openerSize; i < len(sql); {
+		if sql[i] == '\\' && i+1 < len(sql) {
+			_, escapedSize := utf8.DecodeRuneInString(sql[i+1:])
+			i += 1 + escapedSize
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(sql[i:])
+		if r != closer {
+			i += size
+			continue
+		}
+		if next := i + size; next < len(sql) {
+			nextRune, nextSize := utf8.DecodeRuneInString(sql[next:])
+			if nextRune == closer {
+				i = next + nextSize
+				continue
+			}
+		}
+		return i + size, true
+	}
+	return len(sql), true
 }
 
 func opaqueDollarStringEnd(sql string, start int) (int, bool) {
@@ -1797,16 +1841,38 @@ func liveViewSecurityUserEnd(toks []rawToken, i int) (int, bool) {
 		return i, false
 	}
 	if isStringLiteralToken(toks[i]) {
-		return i + 1, nonEmptyStringLiteral(toks[i])
+		value, ok := liveViewStringLiteralValue(toks[i])
+		return i + 1, ok && value != "" && !startsIdentifierQueryParameter(value)
+	}
+	// ParserSQLSecurity handles bare CURRENT_USER before the general
+	// ParserUserNameWithHost path. It is therefore the whole user and cannot
+	// take @host; leaving any following @ token unconsumed makes the surrounding
+	// LIVE VIEW grammar fail exactly as ClickHouse does.
+	if keywordAt(toks, i, "CURRENT_USER") {
+		return i + 1, true
 	}
 	// A quoted identifier is one semantic username regardless of punctuation
-	// inside it. In particular, ParserUserNameWithHost must not reinterpret an
-	// @ preserved in the tokenizer value as a user/host separator.
+	// inside it. An @ preserved in the tokenizer value is content, while a
+	// syntactically separate @ token still introduces a host.
 	if toks[i].TokenType == "QUOTED_IDENTIFIER" {
-		return i + 1, toks[i].Text != ""
+		if toks[i].Text == "" {
+			return i, false
+		}
+		end := i + 1
+		if end < len(toks) && (toks[end].TokenType == "D_AT" || toks[end].Text == "@") {
+			return liveViewSecurityHostEnd(toks, end+1)
+		}
+		if end < len(toks) && strings.HasPrefix(toks[end].Text, "@") {
+			host := strings.TrimPrefix(toks[end].Text, "@")
+			return end + 1, host != "" && !strings.Contains(host, "@") && isIdentifierText(host)
+		}
+		return end, true
 	}
 	text := toks[i].Text
 	if at := strings.IndexByte(text, '@'); at >= 0 {
+		if strings.EqualFold(text[:at], "CURRENT_USER") {
+			return i, false
+		}
 		if strings.Count(text, "@") != 1 || at == 0 || !isIdentifierText(text[:at]) {
 			return i, false
 		}
@@ -1823,6 +1889,23 @@ func liveViewSecurityUserEnd(toks []rawToken, i int) (int, bool) {
 		return liveViewSecurityHostEnd(toks, end+1)
 	}
 	return end, true
+}
+
+// startsIdentifierQueryParameter mirrors ParserUserNameWithHost's special
+// mistake guard for a quoted username. ClickHouse tokenizes the decoded string
+// and rejects when ParserIdentifier(true) can consume an Identifier query
+// parameter at byte zero; it deliberately does not require end-of-input, so a
+// suffix remains a rejection while leading space or a spaced/lowercase type is
+// ordinary string content.
+func startsIdentifierQueryParameter(value string) bool {
+	if len(value) < len("{x:Identifier}") || value[0] != '{' {
+		return false
+	}
+	colon := strings.IndexByte(value, ':')
+	if colon <= 1 || !strings.HasPrefix(value[colon:], ":Identifier}") {
+		return false
+	}
+	return isIdentifierText(value[1:colon])
 }
 
 func liveViewSecurityHostEnd(toks []rawToken, i int) (int, bool) {
@@ -2019,7 +2102,9 @@ func liveViewParallelQueryRanges(toks []rawToken, start, end int) ([][2]int, boo
 			closers = closers[:len(closers)-1]
 			continue
 		}
-		if len(closers) == 0 && keywordsAt(toks, i, "PARALLEL", "WITH") {
+		if len(closers) == 0 &&
+			liveViewKeywordPairIsDelimiter(toks, start, i, "PARALLEL", "WITH") &&
+			liveViewQueryMemberStartsAt(toks, i+2, end) {
 			if segmentStart == i || i+2 >= end {
 				return nil, true, false
 			}
@@ -2038,6 +2123,13 @@ func liveViewParallelQueryRanges(toks []rawToken, start, end int) ([][2]int, boo
 	return ranges, true, true
 }
 
+func liveViewQueryMemberStartsAt(toks []rawToken, i, end int) bool {
+	if i < 0 || i >= end {
+		return false
+	}
+	return keywordAt(toks, i, "SELECT") || keywordAt(toks, i, "WITH") || keywordAt(toks, i, "FROM")
+}
+
 func parseLiveViewSingleQueryExact(e Engine, sql string, toks []rawToken, start, end int) (AST, bool) {
 	if start < 0 || end <= start || end > len(toks) {
 		return nil, false
@@ -2049,6 +2141,11 @@ func parseLiveViewSingleQueryExact(e Engine, sql string, toks []rawToken, start,
 	query := sql[startByte:endByte]
 	if ast, _, ok := parseLiveViewQueryCandidate(e, query); ok {
 		return ast, true
+	}
+	if adapted, ok := adaptLiveViewFromFirstQuery(sql, toks, start, end); ok {
+		if ast, _, parsed := parseLiveViewQueryCandidate(e, adapted); parsed {
+			return ast, true
+		}
 	}
 
 	// Polyglot's pinned SELECT parser rejects an Identifier parameter in explicit
@@ -2087,6 +2184,101 @@ func parseLiveViewSingleQueryExact(e Engine, sql string, toks []rawToken, start,
 		return nil, false
 	}
 	return ast, true
+}
+
+// adaptLiveViewFromFirstQuery translates ClickHouse's FROM-first SELECT
+// spelling into the canonical SELECT-first order understood by the pinned
+// Polyglot parser. The token ranges partition the original query exactly; the
+// ordinary exact wrapper still has to consume the complete translated query.
+func adaptLiveViewFromFirstQuery(sql string, toks []rawToken, start, end int) (string, bool) {
+	if start < 0 || end <= start || end > len(toks) || !keywordAt(toks, start, "FROM") {
+		return "", false
+	}
+	selectAt := -1
+	closers := make([]string, 0, 2)
+	for i := start + 1; i < end; i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			closers = append(closers, "R_PAREN")
+			continue
+		case "L_BRACKET":
+			closers = append(closers, "R_BRACKET")
+			continue
+		case "L_BRACE":
+			closers = append(closers, "R_BRACE")
+			continue
+		case "R_PAREN", "R_BRACKET", "R_BRACE":
+			if len(closers) == 0 || closers[len(closers)-1] != toks[i].TokenType {
+				return "", false
+			}
+			closers = closers[:len(closers)-1]
+			continue
+		}
+		if len(closers) == 0 && keywordAt(toks, i, "SELECT") {
+			selectAt = i
+			break
+		}
+	}
+	if selectAt <= start+1 || selectAt+1 >= end {
+		return "", false
+	}
+
+	tailAt := end
+	closers = closers[:0]
+	for i := selectAt + 1; i < end; i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			closers = append(closers, "R_PAREN")
+			continue
+		case "L_BRACKET":
+			closers = append(closers, "R_BRACKET")
+			continue
+		case "L_BRACE":
+			closers = append(closers, "R_BRACE")
+			continue
+		case "R_PAREN", "R_BRACKET", "R_BRACE":
+			if len(closers) == 0 || closers[len(closers)-1] != toks[i].TokenType {
+				return "", false
+			}
+			closers = closers[:len(closers)-1]
+			continue
+		}
+		if len(closers) != 0 {
+			continue
+		}
+		if keywordsAt(toks, i, "WITH", "TOTALS") || keywordsAt(toks, i, "WITH", "ROLLUP") || keywordsAt(toks, i, "WITH", "CUBE") {
+			tailAt = i
+			break
+		}
+		for _, word := range []string{"PREWHERE", "WHERE", "GROUP", "HAVING", "WINDOW", "QUALIFY", "ORDER", "LIMIT", "OFFSET", "SETTINGS"} {
+			if keywordAt(toks, i, word) {
+				tailAt = i
+				break
+			}
+		}
+		if tailAt != end {
+			break
+		}
+	}
+	if len(closers) != 0 || tailAt == selectAt+1 {
+		return "", false
+	}
+
+	sourceStart, sourceEnd := toks[start].Span.Start, toks[selectAt-1].Span.End
+	projectionStart, projectionEnd := toks[selectAt+1].Span.Start, toks[tailAt-1].Span.End
+	queryEnd := toks[end-1].Span.End
+	if sourceStart < 0 || sourceEnd <= sourceStart || projectionStart < 0 || projectionEnd <= projectionStart || queryEnd > len(sql) {
+		return "", false
+	}
+	adapted := "SELECT " + sql[projectionStart:projectionEnd] + " " + sql[sourceStart:sourceEnd]
+	if tailAt < end {
+		tailStart := toks[tailAt].Span.Start
+		if tailStart < 0 || tailStart >= queryEnd {
+			return "", false
+		}
+		adapted += " " + sql[tailStart:queryEnd]
+	}
+	return adapted, true
 }
 
 func parseLiveViewQueryCandidate(e Engine, query string) (AST, AST, bool) {
@@ -2181,13 +2373,30 @@ func renderLiveViewOpaqueAliases(
 	// exactly that lexical pair inside the same source-span renderer used for
 	// opaque aliases; the exact wrapper then proves the full adapted query.
 	for i := start; i+1 < end; i++ {
-		if keywordsAt(toks, i, "ONLY", "JOIN") {
+		switch {
+		case liveViewLocalJoinModifierAt(toks, start, i, end):
+			replacements = append(replacements, replacement{
+				start: toks[i].Span.Start,
+				end:   toks[i].Span.End,
+				text:  "",
+			})
+		case liveViewKeywordPairIsDelimiter(toks, start, i, "ONLY", "JOIN"):
 			replacements = append(replacements, replacement{
 				start: toks[i].Span.Start,
 				end:   toks[i+1].Span.End,
 				text:  "ANTI LEFT JOIN",
 			})
 			i++
+		case keywordsAt(toks, i, "ONLY", "JOIN") && liveViewKeywordStartsBareTable(toks, start, i):
+			// The pinned Polyglot parser treats bare ONLY as the legacy join
+			// modifier even where ClickHouse's grammar first consumes a table
+			// name. Quote only the probe token so its semantic object name is
+			// retained without changing the original SQL.
+			replacements = append(replacements, replacement{
+				start: toks[i].Span.Start,
+				end:   toks[i].Span.End,
+				text:  "`" + sql[toks[i].Span.Start:toks[i].Span.End] + "`",
+			})
 		}
 	}
 	if len(replacements) == 0 {
@@ -2207,6 +2416,68 @@ func renderLiveViewOpaqueAliases(
 	}
 	out.WriteString(sql[cursor:endByte])
 	return out.String(), true
+}
+
+// liveViewKeywordPairIsDelimiter distinguishes compatibility syntax from an
+// unquoted identifier that happens to use the same keyword. ClickHouse accepts
+// ONLY and PARALLEL as table components after FROM/JOIN/DOT and as explicit
+// aliases after AS; a comma introduces the same table-name position. Rewriting
+// or splitting those pairs would fabricate a different object or query.
+func liveViewKeywordPairIsDelimiter(toks []rawToken, start, i int, words ...string) bool {
+	if !keywordsAt(toks, i, words...) || i <= start {
+		return false
+	}
+	previous := toks[i-1]
+	if previous.TokenType == "DOT" || previous.TokenType == "COMMA" {
+		return false
+	}
+	for _, word := range []string{"FROM", "JOIN", "AS"} {
+		if keywordAt(toks, i-1, word) {
+			return false
+		}
+	}
+	return true
+}
+
+func liveViewKeywordStartsBareTable(toks []rawToken, start, i int) bool {
+	if i <= start {
+		return false
+	}
+	if toks[i-1].TokenType == "COMMA" {
+		return true
+	}
+	return keywordAt(toks, i-1, "FROM") || keywordAt(toks, i-1, "JOIN")
+}
+
+func liveViewLocalJoinModifierAt(toks []rawToken, start, i, end int) bool {
+	if !keywordAt(toks, i, "LOCAL") || i <= start {
+		return false
+	}
+	previous := toks[i-1]
+	if previous.TokenType == "DOT" || previous.TokenType == "COMMA" {
+		return false
+	}
+	for _, word := range []string{"FROM", "JOIN", "AS"} {
+		if keywordAt(toks, i-1, word) {
+			return false
+		}
+	}
+	for j := i + 1; j < end && j <= i+3; j++ {
+		if keywordAt(toks, j, "JOIN") {
+			return true
+		}
+		allowed := false
+		for _, word := range []string{"ANY", "ALL", "ASOF", "SEMI", "ANTI", "PASTE", "INNER", "LEFT", "RIGHT", "FULL", "CROSS"} {
+			if keywordAt(toks, j, word) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return false
 }
 
 func liveViewAliasSentinels(ast AST, candidates []liveViewOpaqueAliasCandidate) map[string]bool {
@@ -2270,7 +2541,7 @@ func isImplicitAliasParameter(toks []rawToken, start, parameterStart, parameterE
 		return true
 	}
 	for _, boundary := range []string{
-		"FROM", "JOIN", "GLOBAL", "ANY", "ALL", "ASOF", "SEMI", "ANTI", "PASTE",
+		"FROM", "JOIN", "GLOBAL", "LOCAL", "ANY", "ALL", "ASOF", "SEMI", "ANTI", "PASTE",
 		"INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ARRAY", "ONLY", "ON", "USING", "WITH",
 		"FINAL", "SAMPLE", "PREWHERE", "WHERE", "GROUP", "HAVING", "WINDOW", "QUALIFY", "ORDER", "LIMIT", "OFFSET", "SETTINGS",
 		"UNION", "INTERSECT", "EXCEPT", "PARALLEL",

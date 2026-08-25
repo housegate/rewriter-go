@@ -523,7 +523,17 @@ func TestNameRefs_LiveViewSQLSecurityPreamble(t *testing.T) {
 		{"unquoted user and host before live view", "CREATE DEFINER=user@host SQL SECURITY DEFINER LIVE VIEW other.v AS SELECT * FROM db1.t"},
 		{"unquoted user and string host before live view", "CREATE DEFINER=user@'host' SQL SECURITY DEFINER LIVE VIEW other.v AS SELECT * FROM db1.t"},
 		{"quoted user may contain multiple at signs", "CREATE DEFINER=`a@b@c` LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"quoted user may have a separate host", "CREATE DEFINER=`user`@host LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"quoted user may have a separate string host", "CREATE DEFINER=`user`@'host' LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"quoted user may have a separate quoted host", "CREATE DEFINER=`user`@\"host\" LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"quoted user may have a spaced identifier host", "CREATE DEFINER=`user` @ host LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"quoted user may have a spaced string host", "CREATE DEFINER=`user` @ 'host' LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"quoted current user is an ordinary user with host", "CREATE DEFINER=`CURRENT_USER`@host LIVE VIEW other.v AS SELECT * FROM db1.t"},
 		{"string username may contain multiple at signs", "CREATE DEFINER='a@b@c' LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"string host may contain an identifier parameter spelling", "CREATE DEFINER=user@'{host:Identifier}' LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"string username may contain a non-leading identifier parameter spelling", "CREATE DEFINER='prefix{name:Identifier}' LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"string username lowercase parameter type is ordinary content", "CREATE DEFINER='{name:identifier}' LIVE VIEW other.v AS SELECT * FROM db1.t"},
+		{"string username spaced parameter spelling is ordinary content", "CREATE DEFINER='{name : Identifier}' LIVE VIEW other.v AS SELECT * FROM db1.t"},
 		{"role keywords as unquoted user and host", "CREATE DEFINER=AS@TO LIVE VIEW other.v AS SELECT * FROM db1.t"},
 		{"current user before live view", "CREATE DEFINER=CURRENT_USER LIVE VIEW other.v AS SELECT * FROM db1.t"},
 		{"security after target", "CREATE LIVE VIEW other.v SQL SECURITY INVOKER AS SELECT * FROM db1.t"},
@@ -648,6 +658,8 @@ func TestNameRefs_LiveViewExactPinnedGrammar(t *testing.T) {
 		},
 		{"security cannot appear both before and after", "CREATE SQL SECURITY DEFINER LIVE VIEW hg_safe.v SQL SECURITY INVOKER AS SELECT * FROM db1.t", nil},
 		{"definer identifier parameter is invalid", "CREATE DEFINER={user:Identifier} LIVE VIEW hg_safe.v AS SELECT * FROM db1.t", nil},
+		{"string username starting with identifier parameter spelling is invalid", "CREATE DEFINER='{name:Identifier}suffix' LIVE VIEW hg_safe.v AS SELECT * FROM db1.t", nil},
+		{"current user cannot have a host", "CREATE DEFINER=CURRENT_USER@host LIVE VIEW hg_safe.v AS SELECT * FROM db1.t", nil},
 		{"string username cannot have a host", "CREATE DEFINER='user'@'host' LIVE VIEW hg_safe.v AS SELECT * FROM db1.t", nil},
 		{"post-AS security is not SELECT tail", "CREATE LIVE VIEW hg_safe.v AS SELECT * FROM db1.t SQL SECURITY DEFINER", nil},
 		{"garbage after trailing COMMENT is invalid", "CREATE LIVE VIEW hg_safe.v AS SELECT * FROM db1.t COMMENT 'ok' DEFINER", nil},
@@ -752,6 +764,28 @@ func TestClassifyLiveView_EscapedTargetUsesOneTokenization(t *testing.T) {
 	}
 	if counted.tokenizeCalls != 1 {
 		t.Fatalf("Tokenize calls = %d, want exactly one", counted.tokenizeCalls)
+	}
+}
+
+func TestClassifyLiveView_OpaqueCurlyQuotedDefinerDoesNotTokenize(t *testing.T) {
+	base := newTestEngine(t)
+	for _, sql := range []string{
+		"CREATE DEFINER=‘LIVE VIEW’ VIEW other.v AS SELECT 1",
+		"CREATE DEFINER=“LIVE VIEW” VIEW other.v AS SELECT 1",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			counted := &tokenCountingEngine{Engine: base}
+			got, err := ClassifyLiveView(counted, AST(`{"raw":{}}`), sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != NotLiveView {
+				t.Fatalf("class = %v, want NotLiveView", got)
+			}
+			if counted.tokenizeCalls != 0 {
+				t.Fatalf("Tokenize calls = %d, want zero", counted.tokenizeCalls)
+			}
+		})
 	}
 }
 
@@ -973,6 +1007,56 @@ func TestNameRefs_LiveViewVerifierRegressions(t *testing.T) {
 			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
 		},
 		{
+			"qualified table component named only remains a table",
+			"CREATE LIVE VIEW other.v AS SELECT 1 {x:Identifier} FROM hg_safe.only JOIN other.u ON 1",
+			append(append(tableRef("other", "v"), tableRef("hg_safe", "only")...), tableRef("other", "u")...),
+		},
+		{
+			"bare table named only remains a table",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM only JOIN other.u ON 1",
+			append(append(tableRef("other", "v"), tableRef("", "only")...), tableRef("other", "u")...),
+		},
+		{
+			"explicit alias named only remains an alias",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t AS only JOIN other.u ON 1",
+			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
+		},
+		{
+			"qualified table component named parallel is not a query delimiter",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.parallel WITH TOTALS",
+			append(tableRef("other", "v"), tableRef("hg_safe", "parallel")...),
+		},
+		{
+			"bare table named parallel is not a query delimiter",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM parallel WITH TOTALS",
+			append(tableRef("other", "v"), tableRef("", "parallel")...),
+		},
+		{
+			"explicit alias named parallel is not a query delimiter",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t AS parallel WITH TOTALS",
+			append(tableRef("other", "v"), tableRef("hg_safe", "t")...),
+		},
+		{
+			"parallel select expression before WITH TOTALS is not a query delimiter",
+			"CREATE LIVE VIEW other.v AS SELECT parallel WITH TOTALS",
+			tableRef("other", "v"),
+		},
+		{
+			"from-first parallel expression before WITH TOTALS keeps source",
+			"CREATE LIVE VIEW other.v AS FROM hg_safe.t SELECT parallel WITH TOTALS",
+			append(tableRef("other", "v"), tableRef("hg_safe", "t")...),
+		},
+		{
+			"parallel select expression before WITH ROLLUP is not a query delimiter",
+			"CREATE LIVE VIEW other.v AS SELECT parallel WITH ROLLUP",
+			tableRef("other", "v"),
+		},
+		{
+			"parallel select expression before WITH CUBE is not a query delimiter",
+			"CREATE LIVE VIEW other.v AS SELECT parallel WITH CUBE",
+			tableRef("other", "v"),
+		},
+		{
 			"implicit parameterized table alias before WITH TOTALS keeps source",
 			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} WITH TOTALS",
 			append(tableRef("other", "v"), tableRef("hg_safe", "t")...),
@@ -980,6 +1064,11 @@ func TestNameRefs_LiveViewVerifierRegressions(t *testing.T) {
 		{
 			"implicit parameterized table alias before GLOBAL join keeps sources",
 			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} GLOBAL LEFT JOIN other.u ON 1",
+			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
+		},
+		{
+			"implicit parameterized table alias before LOCAL join keeps sources",
+			"CREATE LIVE VIEW other.v AS SELECT * FROM hg_safe.t {alias:Identifier} LOCAL LEFT JOIN other.u ON 1",
 			append(append(tableRef("other", "v"), tableRef("hg_safe", "t")...), tableRef("other", "u")...),
 		},
 		{
