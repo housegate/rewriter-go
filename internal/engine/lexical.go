@@ -2142,11 +2142,6 @@ func parseLiveViewSingleQueryExact(e Engine, sql string, toks []rawToken, start,
 	if ast, _, ok := parseLiveViewQueryCandidate(e, query); ok {
 		return ast, true
 	}
-	if adapted, ok := adaptLiveViewFromFirstQuery(sql, toks, start, end); ok {
-		if ast, _, parsed := parseLiveViewQueryCandidate(e, adapted); parsed {
-			return ast, true
-		}
-	}
 
 	// Polyglot's pinned SELECT parser rejects an Identifier parameter in explicit
 	// and implicit alias positions even though ClickHouse accepts those aliases.
@@ -2184,101 +2179,6 @@ func parseLiveViewSingleQueryExact(e Engine, sql string, toks []rawToken, start,
 		return nil, false
 	}
 	return ast, true
-}
-
-// adaptLiveViewFromFirstQuery translates ClickHouse's FROM-first SELECT
-// spelling into the canonical SELECT-first order understood by the pinned
-// Polyglot parser. The token ranges partition the original query exactly; the
-// ordinary exact wrapper still has to consume the complete translated query.
-func adaptLiveViewFromFirstQuery(sql string, toks []rawToken, start, end int) (string, bool) {
-	if start < 0 || end <= start || end > len(toks) || !keywordAt(toks, start, "FROM") {
-		return "", false
-	}
-	selectAt := -1
-	closers := make([]string, 0, 2)
-	for i := start + 1; i < end; i++ {
-		switch toks[i].TokenType {
-		case "L_PAREN":
-			closers = append(closers, "R_PAREN")
-			continue
-		case "L_BRACKET":
-			closers = append(closers, "R_BRACKET")
-			continue
-		case "L_BRACE":
-			closers = append(closers, "R_BRACE")
-			continue
-		case "R_PAREN", "R_BRACKET", "R_BRACE":
-			if len(closers) == 0 || closers[len(closers)-1] != toks[i].TokenType {
-				return "", false
-			}
-			closers = closers[:len(closers)-1]
-			continue
-		}
-		if len(closers) == 0 && keywordAt(toks, i, "SELECT") {
-			selectAt = i
-			break
-		}
-	}
-	if selectAt <= start+1 || selectAt+1 >= end {
-		return "", false
-	}
-
-	tailAt := end
-	closers = closers[:0]
-	for i := selectAt + 1; i < end; i++ {
-		switch toks[i].TokenType {
-		case "L_PAREN":
-			closers = append(closers, "R_PAREN")
-			continue
-		case "L_BRACKET":
-			closers = append(closers, "R_BRACKET")
-			continue
-		case "L_BRACE":
-			closers = append(closers, "R_BRACE")
-			continue
-		case "R_PAREN", "R_BRACKET", "R_BRACE":
-			if len(closers) == 0 || closers[len(closers)-1] != toks[i].TokenType {
-				return "", false
-			}
-			closers = closers[:len(closers)-1]
-			continue
-		}
-		if len(closers) != 0 {
-			continue
-		}
-		if keywordsAt(toks, i, "WITH", "TOTALS") || keywordsAt(toks, i, "WITH", "ROLLUP") || keywordsAt(toks, i, "WITH", "CUBE") {
-			tailAt = i
-			break
-		}
-		for _, word := range []string{"PREWHERE", "WHERE", "GROUP", "HAVING", "WINDOW", "QUALIFY", "ORDER", "LIMIT", "OFFSET", "SETTINGS"} {
-			if keywordAt(toks, i, word) {
-				tailAt = i
-				break
-			}
-		}
-		if tailAt != end {
-			break
-		}
-	}
-	if len(closers) != 0 || tailAt == selectAt+1 {
-		return "", false
-	}
-
-	sourceStart, sourceEnd := toks[start].Span.Start, toks[selectAt-1].Span.End
-	projectionStart, projectionEnd := toks[selectAt+1].Span.Start, toks[tailAt-1].Span.End
-	queryEnd := toks[end-1].Span.End
-	if sourceStart < 0 || sourceEnd <= sourceStart || projectionStart < 0 || projectionEnd <= projectionStart || queryEnd > len(sql) {
-		return "", false
-	}
-	adapted := "SELECT " + sql[projectionStart:projectionEnd] + " " + sql[sourceStart:sourceEnd]
-	if tailAt < end {
-		tailStart := toks[tailAt].Span.Start
-		if tailStart < 0 || tailStart >= queryEnd {
-			return "", false
-		}
-		adapted += " " + sql[tailStart:queryEnd]
-	}
-	return adapted, true
 }
 
 func parseLiveViewQueryCandidate(e Engine, query string) (AST, AST, bool) {

@@ -1042,11 +1042,6 @@ func TestNameRefs_LiveViewVerifierRegressions(t *testing.T) {
 			tableRef("other", "v"),
 		},
 		{
-			"from-first parallel expression before WITH TOTALS keeps source",
-			"CREATE LIVE VIEW other.v AS FROM hg_safe.t SELECT parallel WITH TOTALS",
-			append(tableRef("other", "v"), tableRef("hg_safe", "t")...),
-		},
-		{
 			"parallel select expression before WITH ROLLUP is not a query delimiter",
 			"CREATE LIVE VIEW other.v AS SELECT parallel WITH ROLLUP",
 			tableRef("other", "v"),
