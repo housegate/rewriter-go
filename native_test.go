@@ -1176,6 +1176,10 @@ func TestStorageIntegrityContract_InvalidLiveViewShapesNeverBypassFailClosed(t *
 		{"CREATE DEFINER={user:String} LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
 		{"CREATE DEFINER=alice@{host:String} LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
 		{"CREATE DEFINER=1 LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE OR REPLACE DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE OR ALTER DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE TEMPORARY DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
+		{"CREATE MATERIALIZED DEFINER=alice LIVE VIEW other.v AS SELECT * FROM other.u", StorageIntegrityUnmodelledMessage},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
 			e := newEngine(t)
@@ -1246,6 +1250,7 @@ func TestStorageIntegrityContract_LiveViewPrefixGuardPreservesOrdinaryViews(t *t
 		"CREATE DEFINER='live' VIEW other.v AS SELECT 1",
 		"CREATE SQL SECURITY DEFINER VIEW other.v AS SELECT 1",
 		"CREATE SQL SECURITY DEFINER DEFINER=live VIEW other.v AS SELECT 1",
+		"CREATE OR REPLACE DEFINER=live VIEW other.v AS SELECT 1",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			e := newEngine(t)

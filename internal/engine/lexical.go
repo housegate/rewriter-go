@@ -1303,10 +1303,7 @@ func ClassifyLiveView(e Engine, ast AST, sql string) (LiveViewClass, error) {
 		return NotLiveView, nil
 	}
 	after, present, trustworthy := liveViewSQLSecurityEnd(toks, 1)
-	if !present {
-		return NotLiveView, nil
-	}
-	if trustworthy {
+	if present && trustworthy {
 		switch {
 		case keywordsAt(toks, after, "LIVE", "VIEW"):
 			return MalformedLiveViewPrefix, nil
