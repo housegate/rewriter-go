@@ -900,3 +900,46 @@ func TestRewriteDBLevel_dropDatabaseNoDynamicUnsupported(t *testing.T) {
 		t.Errorf("accessed=%+v, want empty (no-dynamic guard precedes record)", resp.GetOriginalAccessedTables())
 	}
 }
+
+// TestRewriteDBLevel_unknownShowKindFallsThroughUnderStorageIntegrity pins the
+// Spec N D2 catch-all. A SHOW kind in none of the three classification lists
+// must not be assumed target-less: under an active storage-integrity contract
+// dispatchShowTables declines to handle it, so native.go's pass-through tail
+// answers with the Spec I D1 generic refusal instead of forwarding a statement
+// whose target was never inspected. This assertion is deliberately engine-local
+// (plan deviation D-4): ClickHouse's own ParserShowTablesQuery accepts a fixed
+// keyword set, so the C++ engine may answer SyntaxError and the shared corpus
+// schema has exactly one want_code per case.
+func TestRewriteDBLevel_unknownShowKindFallsThroughUnderStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	for _, sql := range []string{"SHOW SOMETHINGNEW FROM hg_safe", "SHOW SOMETHINGNEW FROM other", "SHOW SOMETHINGNEW"} {
+		ast := mustParse(t, e, sql)
+		resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+		if err != nil {
+			t.Fatalf("%q: %v", sql, err)
+		}
+		if handled {
+			t.Errorf("%q: handled=true (code=%v sql=%q), want false so the D1 catch-all answers",
+				sql, resp.GetCode(), resp.GetSqlAfterRewrite())
+		}
+	}
+}
+
+// TestRewriteDBLevel_unknownShowKindStillPassesThroughWithoutStorageIntegrity
+// is the other half: an empty-SI request keeps the legacy pass-through, so the
+// catch-all narrows nothing outside the storage-integrity surface.
+func TestRewriteDBLevel_unknownShowKindStillPassesThroughWithoutStorageIntegrity(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"other": "phys"}})
+	for _, sql := range []string{"SHOW SOMETHINGNEW FROM other", "SHOW SOMETHINGNEW"} {
+		ast := mustParse(t, e, sql)
+		resp, handled, err := RewriteDBLevel(e, ast, sql, opts)
+		if err != nil || !handled {
+			t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != sql {
+			t.Errorf("%q: code=%v sql=%q, want Success with the statement unchanged", sql, resp.GetCode(), resp.GetSqlAfterRewrite())
+		}
+	}
+}
