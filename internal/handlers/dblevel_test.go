@@ -162,6 +162,155 @@ func TestRewriteDBLevel_showClustersPassthrough(t *testing.T) {
 	}
 }
 
+func TestRewriteDBLevel_showDictionariesStorageIntegrityNamespaces(t *testing.T) {
+	e := newEngine(t)
+	tests := []struct {
+		name         string
+		sql          string
+		contextDB    string
+		unauthorized bool
+		wantCode     pb.RewriteCode
+		wantMessage  string
+		wantDB       string
+		wantLogical  string
+		wantPhysical string
+		wantSI       bool
+	}{
+		{
+			name:         "physical FROM namespace",
+			sql:          "SHOW DICTIONARIES FROM hg_safe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_safe is not directly addressable",
+			wantDB:       "hg_safe",
+			wantPhysical: "hg_safe",
+			wantSI:       true,
+		},
+		{
+			name:         "physical IN namespace",
+			sql:          "SHOW DICTIONARIES IN hg_unsafe",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_unsafe is not directly addressable",
+			wantDB:       "hg_unsafe",
+			wantPhysical: "hg_unsafe",
+			wantSI:       true,
+		},
+		{
+			name:         "escaped physical namespace",
+			sql:          "SHOW DICTIONARIES FROM `hg\\x5Fsafe`",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity physical database hg_safe is not directly addressable",
+			wantDB:       "hg_safe",
+			wantPhysical: "hg_safe",
+			wantSI:       true,
+		},
+		{
+			name:         "logical protected namespace",
+			sql:          "SHOW DICTIONARIES FROM db1",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "logical protected context",
+			sql:          "SHOW DICTIONARIES",
+			contextDB:    "db1",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "escaped logical protected namespace",
+			sql:          "SHOW DICTIONARIES FROM `\\x64b1`",
+			wantCode:     pb.RewriteCode_UnsupportedStatement,
+			wantMessage:  "storage-integrity logical database db1 is not directly addressable",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantPhysical: "phys",
+			wantSI:       true,
+		},
+		{
+			name:         "logical protected namespace requires authorization",
+			sql:          "SHOW DICTIONARIES FROM db1",
+			unauthorized: true,
+			wantCode:     pb.RewriteCode_InvalidRewriteRequest,
+			wantMessage:  "storage-integrity logical database db1 is not authorized by database_map",
+			wantDB:       "db1",
+			wantLogical:  "db1",
+			wantSI:       true,
+		},
+		{
+			name:        "ordinary namespace remains passthrough",
+			sql:         "SHOW DICTIONARIES FROM other",
+			wantCode:    pb.RewriteCode_Success,
+			wantMessage: "success",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+			dyn.UpstreamLogicalDatabaseInContext = tt.contextDB
+			if tt.unauthorized {
+				delete(dyn.DatabaseMap, "db1")
+			}
+			ast := mustParse(t, e, tt.sql)
+			resp, handled, err := RewriteDBLevel(e, ast, tt.sql, dynOpt(dyn))
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != tt.wantCode || resp.GetMessage() != tt.wantMessage {
+				t.Fatalf("code=%v message=%q, want code=%v message=%q", resp.GetCode(), resp.GetMessage(), tt.wantCode, tt.wantMessage)
+			}
+			if resp.GetSqlAfterRewrite() != tt.sql {
+				t.Fatalf("sql=%q, want exact original %q", resp.GetSqlAfterRewrite(), tt.sql)
+			}
+			if tt.wantCode == pb.RewriteCode_Success {
+				if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES {
+					t.Fatalf("statement_type=%v, want SHOW_TABLES", resp.GetStatementType())
+				}
+				if len(resp.GetOriginalAccessedTables()) != 0 || len(resp.GetDatabaseRewrites()) != 0 {
+					t.Fatalf("ordinary accessed=%+v rewrites=%v", resp.GetOriginalAccessedTables(), resp.GetDatabaseRewrites())
+				}
+				return
+			}
+			if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED {
+				t.Fatalf("statement_type=%v, want UNSPECIFIED", resp.GetStatementType())
+			}
+			if len(resp.GetOriginalAccessedTables()) != 1 {
+				t.Fatalf("accessed=%+v, want exactly one", resp.GetOriginalAccessedTables())
+			}
+			got := resp.GetOriginalAccessedTables()[0]
+			if got.GetOriginalDatabase() != tt.wantDB || got.GetOriginalTable() != "" ||
+				got.GetLogicalDatabase() != tt.wantLogical || got.GetPhysicalDatabase() != tt.wantPhysical ||
+				got.GetIsRemote() || got.GetIsStorageIntegrity() != tt.wantSI {
+				t.Fatalf("accessed=%+v", got)
+			}
+		})
+	}
+}
+
+func TestRewriteDBLevel_nonDatabaseShowIgnoresStorageIntegrityContext(t *testing.T) {
+	e := newEngine(t)
+	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	dyn.UpstreamLogicalDatabaseInContext = "hg_safe"
+	for _, sql := range []string{"SHOW CLUSTERS", "SHOW SETTINGS", "SHOW MERGES", "SHOW CACHES"} {
+		ast := mustParse(t, e, sql)
+		resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
+		if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
+			t.Fatalf("%q: handled=%v err=%v resp=%+v", sql, handled, err, resp)
+		}
+		if resp.GetSqlAfterRewrite() != sql || len(resp.GetOriginalAccessedTables()) != 0 {
+			t.Fatalf("%q: sql=%q accessed=%+v", sql, resp.GetSqlAfterRewrite(), resp.GetOriginalAccessedTables())
+		}
+	}
+}
+
 // TestRewriteDBLevel_showCreateDefers: SHOW CREATE TABLE is NOT an
 // ASTShowTablesQuery in ClickHouse (C++ routes it to a dedicated show_create
 // handler — Phase 4), so RewriteDBLevel must NOT claim it as SHOW_TABLES. It

@@ -1202,6 +1202,7 @@ func TestPrewhereTargets(t *testing.T) {
 		want []TableTarget
 	}{
 		{"main table", "SELECT a FROM db1.t PREWHERE a > 1", []TableTarget{{DB: "db1", Table: "t"}}},
+		{"parser-decoded quoted table", "SELECT a FROM `\\x64b1`.t PREWHERE a > 1", []TableTarget{{DB: "db1", Table: "t"}}},
 		{"binds to the FROM table, not the JOIN", "SELECT * FROM other.u AS x JOIN db1.t AS s ON 1 PREWHERE x.a > 1", []TableTarget{{DB: "other", Table: "u"}}},
 		{"literal is not a keyword", "SELECT 'PREWHERE' FROM db1.t", nil},
 		{"absent", "SELECT a FROM db1.t WHERE a > 1", nil},

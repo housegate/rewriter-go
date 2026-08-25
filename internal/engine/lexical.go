@@ -125,8 +125,13 @@ func PrewhereTargets(e Engine, sql string) ([]TableTarget, error) {
 		if from < 0 {
 			continue
 		}
-		if target, ok := rawTokenTableTarget(toks, from+1); ok {
-			out = append(out, target)
+		// PREWHERE is a grammar-proven table-source position. Parse that name run
+		// through the existing identifier authority instead of trusting token text:
+		// Polyglot preserves ClickHouse backslash escapes (for example `\x64b1`)
+		// in QUOTED_IDENTIFIER text, while tableRefAt resolves them to the semantic
+		// database name (db1). Raw token text would miss an SI target and fail open.
+		if ref, _, ok := tableRefAt(e, sql, toks, from+1, false); ok {
+			out = append(out, TableTarget{DB: ref.DB, Table: ref.Table})
 		}
 	}
 	return out, nil
@@ -2834,6 +2839,29 @@ func decodedASTIdentifier(e Engine, name string) (string, bool) {
 	}
 	decoded, _ := stringLiteral["value"].(string)
 	return decoded, decoded != ""
+}
+
+// SemanticIdentifier resolves parser-preserved ClickHouse identifier escapes
+// to the name ClickHouse executes. Polyglot already resolves ordinary quoting
+// but currently preserves backslash escapes in AST identifier fields.
+func SemanticIdentifier(e Engine, name string) (string, bool) {
+	return decodedASTIdentifier(e, name)
+}
+
+// SemanticTableTarget resolves parser-preserved ClickHouse identifier escapes
+// in a TableTarget collected from the AST. Polyglot already resolves ordinary
+// quoting but deliberately preserves backslash escapes in identifier names;
+// storage-integrity policy must compare the semantic names ClickHouse executes
+// (for example `\x64b1`.t is db1.t), not those preserved spellings.
+func SemanticTableTarget(e Engine, target TableTarget) (TableTarget, bool) {
+	db, dbOK := SemanticIdentifier(e, target.DB)
+	table, tableOK := SemanticIdentifier(e, target.Table)
+	if !dbOK || !tableOK || table == "" {
+		return TableTarget{}, false
+	}
+	target.DB = db
+	target.Table = table
+	return target, true
 }
 
 func nameRunEnd(toks []rawToken, i int) (int, bool) {

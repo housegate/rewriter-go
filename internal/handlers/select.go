@@ -102,6 +102,16 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if err != nil {
 		return nil, nil, err
 	}
+	storageIntegrityActive := sel.Mode == nameresolve.ModeDynamic && len(sel.Dynamic.GetStorageIntegrity().GetTables()) > 0
+	if storageIntegrityActive {
+		for i, target := range originals {
+			semantic, ok := engine.SemanticTableTarget(e, target)
+			if !ok {
+				return nil, nil, fmt.Errorf("decode storage-integrity table target %q", qualify(target.DB, target.Table))
+			}
+			originals[i] = semantic
+		}
+	}
 	var namespaceRefs []engine.NamespaceRef
 	if sel.Mode == nameresolve.ModeDynamic {
 		var ferr error
@@ -188,6 +198,14 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 
 	var siErr error
 	rewritten, err := engine.RewriteSelectTables(ast, func(tt engine.TableTarget) engine.TableDecision {
+		if storageIntegrityActive {
+			semantic, ok := engine.SemanticTableTarget(e, tt)
+			if !ok {
+				siErr = fmt.Errorf("decode storage-integrity table target %q", qualify(tt.DB, tt.Table))
+				return engine.TableDecision{Action: engine.ActionSkip}
+			}
+			tt = semantic
+		}
 		if sel.Mode == nameresolve.ModeDynamic {
 			if tbl, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 				d, derr := storageIntegrityDecision(e, tt, tbl, sel.Dynamic.GetStorageIntegrity(), resp.TableRewrites)

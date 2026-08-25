@@ -240,15 +240,26 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 // dispatchShowTables ports show_tables.cc handleShowTablesQuery. Only SHOW TABLES
 // proper is rewritten into a synthetic system.tables enumeration; SHOW CLUSTERS/
 // DICTIONARIES/SETTINGS/MERGES/CACHES (and a no-dynamic request) pass through.
+// Before that pass-through, SHOW DICTIONARIES' explicit or contextual database
+// is checked against protocol-owned SI namespaces: unlike the other variants,
+// ClickHouse evaluates this SHOW family inside a user-selected database.
 // The FROM clause (logical db) wins over upstream_logical_database_in_context; an
 // unresolvable physical or a dangling remote-upstream key is InvalidRewriteRequest.
 // A remote-mapped logical routes the enumeration through remote(...), but the
 // (database, prefix) filter still uses the database_map physical name.
 func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_SHOW_TABLES)
-	// Only SHOW TABLES proper is rewritten; SHOW CLUSTERS/DICTIONARIES/SETTINGS/
-	// MERGES/CACHES (and a no-dynamic request) pass through.
-	if info.ShowWhat != "TABLES" || dyn == nil {
+	if dyn == nil {
+		return passthroughDB(e, ast, sql, resp)
+	}
+	// Only SHOW TABLES proper is rewritten. SHOW DICTIONARIES still carries a
+	// database namespace, so prove that namespace ordinary before preserving the
+	// historical pass-through behavior. The remaining SHOW variants have no
+	// database target and must not inherit the current SI context accidentally.
+	if info.ShowWhat != "TABLES" {
+		if info.ShowWhat == "DICTIONARIES" && rejectShowDictionariesStorageIntegrityNamespace(e, resp, sql, info, dyn) {
+			return resp, true, nil
+		}
 		return passthroughDB(e, ast, sql, resp)
 	}
 	fromLogical := info.DB
@@ -288,6 +299,51 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	resp.SqlAfterRewrite = "SELECT multiIf(startsWith(name, '" + ep + "'), substring(name, length('" + ep + "') + 1), name) AS name FROM (SELECT name FROM " + source + " WHERE database = '" + ephys + "' AND startsWith(name, '" + ep + "'))"
 	recordDatabaseRewrite(resp, logical, physical)
 	return resp, true, nil
+}
+
+// rejectShowDictionariesStorageIntegrityNamespace closes the non-TABLES
+// pass-through hole for SHOW DICTIONARIES. An explicit FROM/IN target wins over
+// the logical session context. Physical safe/unsafe databases and logical
+// databases owning an SI table are protocol-owned at database scope, so both
+// are rejected with one database-shaped SI access event. Logical authorization
+// is checked before the supported-but-forbidden response, matching all other
+// indirect SI namespace surfaces.
+func rejectShowDictionariesStorageIntegrityNamespace(e engine.Engine, resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
+	target := info.DB
+	if target == "" {
+		target = dyn.GetUpstreamLogicalDatabaseInContext()
+	}
+	if target == "" {
+		return false
+	}
+	semanticTarget, ok := engine.SemanticIdentifier(e, target)
+	if !ok || semanticTarget == "" {
+		resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+		resp.SqlAfterRewrite = sql
+		rejectDBUnsupported(resp, "storage-integrity SHOW DICTIONARIES database is not statically resolvable")
+		return true
+	}
+	target = semanticTarget
+	if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
+		recordAccessedDatabase(resp, target, dyn)
+		resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+		resp.SqlAfterRewrite = sql
+		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(target))
+		return true
+	}
+	if !nameresolve.IsStorageIntegrityLogicalDatabase(target, dyn) {
+		return false
+	}
+	logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical(target, dyn)
+	recordAccessedStorageIntegrityLogicalDatabaseUnique(resp, target, dyn)
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	if !authorized {
+		rejectDBInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
+		return true
+	}
+	rejectDBUnsupported(resp, nameresolve.StorageIntegrityLogicalDatabaseRejectMessage(logical))
+	return true
 }
 
 // dispatchShowDatabases ports show_databases.cc handleShowDatabasesQuery. With no

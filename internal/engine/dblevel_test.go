@@ -28,6 +28,8 @@ func TestParseDBLevel(t *testing.T) {
 		{"SHOW DATABASES ILIKE 'z%'", DBShow, "DATABASES", "", true, "z%", false, true},
 		{"SHOW CLUSTERS", DBShow, "CLUSTERS", "", false, "", false, false},
 		{"SHOW DICTIONARIES", DBShow, "DICTIONARIES", "", false, "", false, false},
+		{"SHOW DICTIONARIES FROM hg_safe", DBShow, "DICTIONARIES", "hg_safe", false, "", false, false},
+		{"SHOW DICTIONARIES IN `db1`", DBShow, "DICTIONARIES", "db1", false, "", false, false},
 		// The kind word after SHOW lexes as a keyword (not VAR) for these; ShowWhat
 		// must still capture it so the handler can distinguish SHOW CREATE (a separate
 		// ClickHouse AST) from the ASTShowTablesQuery family (CLUSTER/SETTINGS/...).

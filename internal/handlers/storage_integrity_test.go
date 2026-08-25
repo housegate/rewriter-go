@@ -88,6 +88,30 @@ func TestRewriteSelect_storageIntegritySafe(t *testing.T) {
 	}
 }
 
+func TestRewriteSelect_storageIntegrityQuotedIdentifierEscapes(t *testing.T) {
+	e := newEngine(t)
+	sql := "SELECT a FROM `\\x64b1`.t"
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success || !strings.Contains(resp.GetSqlAfterRewrite(), "hg_safe.db1__t") {
+		t.Fatalf("code=%v sql=%q message=%q", resp.GetCode(), resp.GetSqlAfterRewrite(), resp.GetMessage())
+	}
+	if len(resp.GetOriginalAccessedTables()) != 1 {
+		t.Fatalf("accessed=%+v", resp.GetOriginalAccessedTables())
+	}
+	got := resp.GetOriginalAccessedTables()[0]
+	if got.GetOriginalDatabase() != "db1" || got.GetOriginalTable() != "t" ||
+		got.GetLogicalDatabase() != "db1" || got.GetPhysicalDatabase() != "phys" || !got.GetIsStorageIntegrity() {
+		t.Fatalf("accessed=%+v", got)
+	}
+}
+
 func TestRewriteSelect_storageIntegrityUnsafeLatest(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("SELECT a FROM db1.t")
