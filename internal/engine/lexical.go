@@ -2848,6 +2848,28 @@ func SemanticIdentifier(e Engine, name string) (string, bool) {
 	return decodedASTIdentifier(e, name)
 }
 
+// SemanticNamespaceRef decodes only parser identifier-origin namespace
+// components. String-literal arguments already carry ClickHouse's semantic
+// value and must remain byte-for-byte unchanged rather than being interpreted
+// as identifier escape syntax a second time.
+func SemanticNamespaceRef(e Engine, ref NamespaceRef) (NamespaceRef, bool) {
+	if ref.Target.DB != "" {
+		db, ok := readSourceName(e, ref.Target.DB, ref.databaseIdentifier)
+		if !ok || db == "" {
+			return NamespaceRef{}, false
+		}
+		ref.Target.DB = db
+	}
+	if ref.Target.Table != "" {
+		table, ok := readSourceName(e, ref.Target.Table, ref.tableIdentifier)
+		if !ok || table == "" {
+			return NamespaceRef{}, false
+		}
+		ref.Target.Table = table
+	}
+	return ref, true
+}
+
 // SemanticTableTarget resolves parser-preserved ClickHouse identifier escapes
 // in a TableTarget collected from the AST. Polyglot already resolves ordinary
 // quoting but deliberately preserves backslash escapes in identifier names;

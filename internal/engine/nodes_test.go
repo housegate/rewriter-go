@@ -568,7 +568,7 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
+			if !reflect.DeepEqual(withoutNamespaceOrigins(got), tc.want) {
 				t.Fatalf("refs = %#v, want %#v", got, tc.want)
 			}
 		})
@@ -613,8 +613,65 @@ func TestCollectNamespaceRefs_RespectsCTEAndCSEScopes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
+			if !reflect.DeepEqual(withoutNamespaceOrigins(got), tc.want) {
 				t.Fatalf("refs = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func withoutNamespaceOrigins(refs []NamespaceRef) []NamespaceRef {
+	out := append([]NamespaceRef(nil), refs...)
+	for i := range out {
+		out[i].databaseIdentifier = false
+		out[i].tableIdentifier = false
+	}
+	return out
+}
+
+func TestCollectNamespaceRefs_PreservesIdentifierOrigins(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name                string
+		sql                 string
+		wantDB              string
+		wantDBIdentifier    bool
+		wantTableIdentifier bool
+	}{
+		{
+			name:                "identifier arguments",
+			sql:                 "SELECT * FROM remote('h', `hg\\x5Fsafe`, db1__t)",
+			wantDB:              "hg_safe",
+			wantDBIdentifier:    true,
+			wantTableIdentifier: true,
+		},
+		{
+			name:                "string literal arguments",
+			sql:                 `SELECT * FROM remote('h', '\\x64b1', 'db1__t')`,
+			wantDB:              `\x64b1`,
+			wantDBIdentifier:    false,
+			wantTableIdentifier: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refs, err := CollectNamespaceRefs(ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(refs) != 1 {
+				t.Fatalf("refs=%#v, want one", refs)
+			}
+			ref := refs[0]
+			if ref.databaseIdentifier != tc.wantDBIdentifier || ref.tableIdentifier != tc.wantTableIdentifier {
+				t.Fatalf("origins db=%v table=%v", ref.databaseIdentifier, ref.tableIdentifier)
+			}
+			semantic, ok := SemanticNamespaceRef(e, ref)
+			if !ok || semantic.Target.DB != tc.wantDB || semantic.Target.Table != "db1__t" {
+				t.Fatalf("semantic=%#v ok=%v", semantic, ok)
 			}
 		})
 	}

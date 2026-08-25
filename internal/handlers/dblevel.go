@@ -262,17 +262,23 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		}
 		return passthroughDB(e, ast, sql, resp)
 	}
-	fromLogical := info.DB
-	if dot := strings.IndexByte(fromLogical, '.'); dot >= 0 {
-		fromLogical = fromLogical[:dot]
+	logical, present, resolved := showDatabaseTarget(e, info, dyn.GetUpstreamLogicalDatabaseInContext())
+	if !resolved && info.HasDBClause {
+		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
+			rejectUnresolvedShowDatabase(resp, sql, info.ShowWhat)
+		} else {
+			rejectDBInvalid(resp, "SHOW TABLES target database is not statically resolvable")
+		}
+		return resp, true, nil
 	}
-	logical := fromLogical
-	if logical == "" {
-		logical = dyn.GetUpstreamLogicalDatabaseInContext()
-	}
-	if logical == "" {
+	if !present {
 		rejectDBInvalid(resp, "SHOW TABLES has no FROM clause and no upstream_logical_database_in_context is set; caller must send `USE <db>` or use `SHOW TABLES FROM <db>`")
 		return resp, true, nil
+	}
+	if info.HasDBClause {
+		if dot := strings.IndexByte(logical, '.'); dot >= 0 {
+			logical = logical[:dot]
+		}
 	}
 	if nameresolve.IsStorageIntegrityPhysicalDatabase(logical, dyn) {
 		recordAccessedDatabase(resp, logical, dyn)
@@ -309,21 +315,30 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 // is checked before the supported-but-forbidden response, matching all other
 // indirect SI namespace surfaces.
 func rejectShowDictionariesStorageIntegrityNamespace(e engine.Engine, resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
-	target := info.DB
-	if target == "" {
-		target = dyn.GetUpstreamLogicalDatabaseInContext()
-	}
-	if target == "" {
+	if len(dyn.GetStorageIntegrity().GetTables()) == 0 {
 		return false
 	}
-	semanticTarget, ok := engine.SemanticIdentifier(e, target)
-	if !ok || semanticTarget == "" {
-		resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
-		resp.SqlAfterRewrite = sql
-		rejectDBUnsupported(resp, "storage-integrity SHOW DICTIONARIES database is not statically resolvable")
+	// A bare SHOW executes in the configured physical context. Guard reserved
+	// physical databases before consulting the logical context; an explicit
+	// FROM/IN target remains authoritative over both context fields.
+	if !info.HasDBClause {
+		physical := dyn.GetUpstreamPhysicalDatabaseInContext()
+		if nameresolve.IsStorageIntegrityPhysicalDatabase(physical, dyn) {
+			recordAccessedDatabase(resp, physical, dyn)
+			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+			resp.SqlAfterRewrite = sql
+			rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(physical))
+			return true
+		}
+	}
+	target, present, resolved := showDatabaseTarget(e, info, dyn.GetUpstreamLogicalDatabaseInContext())
+	if !present {
+		return false
+	}
+	if !resolved {
+		rejectUnresolvedShowDatabase(resp, sql, info.ShowWhat)
 		return true
 	}
-	target = semanticTarget
 	if nameresolve.IsStorageIntegrityPhysicalDatabase(target, dyn) {
 		recordAccessedDatabase(resp, target, dyn)
 		resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
@@ -344,6 +359,30 @@ func rejectShowDictionariesStorageIntegrityNamespace(e engine.Engine, resp *pb.R
 	}
 	rejectDBUnsupported(resp, nameresolve.StorageIntegrityLogicalDatabaseRejectMessage(logical))
 	return true
+}
+
+// showDatabaseTarget distinguishes an absent FROM/IN clause from an explicit
+// target that the tokenizer cannot reduce to a static identifier. Explicit AST
+// names still need ClickHouse identifier escape decoding; the upstream logical
+// context is already a semantic database name and must never be decoded again.
+func showDatabaseTarget(e engine.Engine, info engine.DBLevelInfo, logicalContext string) (target string, present, resolved bool) {
+	if info.HasDBClause {
+		if !info.DBResolved || info.DB == "" {
+			return "", true, false
+		}
+		target, ok := engine.SemanticIdentifier(e, info.DB)
+		return target, true, ok && target != ""
+	}
+	if logicalContext == "" {
+		return "", false, false
+	}
+	return logicalContext, true, true
+}
+
+func rejectUnresolvedShowDatabase(resp *pb.RewriteSQLResponse, sql, showWhat string) {
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	rejectDBUnsupported(resp, "storage-integrity SHOW "+showWhat+" database is not statically resolvable")
 }
 
 // dispatchShowDatabases ports show_databases.cc handleShowDatabasesQuery. With no

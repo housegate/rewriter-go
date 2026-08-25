@@ -54,6 +54,33 @@ func TestParseDBLevel(t *testing.T) {
 	}
 }
 
+func TestParseDBLevel_distinguishesUnresolvedDatabaseClause(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql          string
+		wantClause   bool
+		wantResolved bool
+		wantDB       string
+	}{
+		{sql: "SHOW DICTIONARIES", wantClause: false, wantResolved: false},
+		{sql: "SHOW DICTIONARIES FROM db1", wantClause: true, wantResolved: true, wantDB: "db1"},
+		{sql: "SHOW DICTIONARIES FROM {db:Identifier}", wantClause: true, wantResolved: false},
+		{sql: "SHOW DICTIONARIES IN {db:Identifier}", wantClause: true, wantResolved: false},
+		{sql: "SHOW DICTIONARIES FROM hg_safe WHERE name IN other", wantClause: true, wantResolved: true, wantDB: "hg_safe"},
+		{sql: "SHOW DICTIONARIES FROM other WHERE name IN hg_safe", wantClause: true, wantResolved: true, wantDB: "other"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			got, err := ParseDBLevel(e, tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.HasDBClause != tc.wantClause || got.DBResolved != tc.wantResolved || got.DB != tc.wantDB {
+				t.Fatalf("got %+v, want clause=%v resolved=%v db=%q", got, tc.wantClause, tc.wantResolved, tc.wantDB)
+			}
+		})
+	}
+}
+
 func TestDatabaseTarget(t *testing.T) {
 	e := newTestEngine(t)
 	cases := []struct {

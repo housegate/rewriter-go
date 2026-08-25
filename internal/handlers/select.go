@@ -123,7 +123,7 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	resp.OriginalAccessedTables = buildAccessed(originals, sel)
 
 	if sel.Mode == nameresolve.ModeDynamic {
-		if rejectStorageIntegrityNamespaces(resp, namespaceRefs, sel, pb.RewriteCode_RewriteError) {
+		if rejectStorageIntegrityNamespaces(e, resp, namespaceRefs, sel, pb.RewriteCode_RewriteError) {
 			return ast, resp, nil
 		}
 		for _, tt := range originals {
@@ -149,12 +149,23 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	// and SAMPLE are rejected at the same pre-rewrite boundary because a
 	// derived-table substitution cannot silently discard their semantics.
 	if sel.Mode == nameresolve.ModeDynamic && touchesStorageIntegrity(resp.OriginalAccessedTables) {
+		semanticSITarget := func(tt engine.TableTarget) (engine.TableTarget, error) {
+			semantic, ok := engine.SemanticTableTarget(e, tt)
+			if !ok {
+				return engine.TableTarget{}, fmt.Errorf("decode storage-integrity table target %q", qualify(tt.DB, tt.Table))
+			}
+			return semantic, nil
+		}
 		wrapperTargets, merr := engine.UnsupportedTableWrapperTargets(ast)
 		if merr != nil {
 			return nil, nil, merr
 		}
 		modified := false
 		for _, tt := range wrapperTargets {
+			tt, merr = semanticSITarget(tt)
+			if merr != nil {
+				return nil, nil, merr
+			}
 			if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 				modified = true
 				break
@@ -169,7 +180,17 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			if perr != nil {
 				return nil, nil, perr
 			}
-			for _, tt := range append(withOffsetTargets, prewhereTargets...) {
+			for _, tt := range withOffsetTargets {
+				tt, oerr = semanticSITarget(tt)
+				if oerr != nil {
+					return nil, nil, oerr
+				}
+				if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
+					modified = true
+					break
+				}
+			}
+			for _, tt := range prewhereTargets {
 				if _, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 					modified = true
 					break
@@ -182,12 +203,21 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			return ast, resp, nil
 		}
 		rid := nameresolve.ReservedRowIDColumn(sel.Dynamic)
+		var scopeTargetErr error
 		hit, herr := engine.ReferencesIdentifierInScope(ast, rid, func(tt engine.TableTarget) bool {
-			_, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic)
+			semantic, err := semanticSITarget(tt)
+			if err != nil {
+				scopeTargetErr = err
+				return false
+			}
+			_, _, ok := nameresolve.LookupStorageIntegrity(semantic.DB, semantic.Table, sel.Dynamic)
 			return ok
 		})
 		if herr != nil {
 			return nil, nil, herr
+		}
+		if scopeTargetErr != nil {
+			return nil, nil, scopeTargetErr
 		}
 		if hit {
 			resp.Code = pb.RewriteCode_RewriteError

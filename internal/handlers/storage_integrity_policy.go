@@ -12,11 +12,21 @@ import (
 // local CLICKHOUSE dictionary sources. Any unresolved recognized surface is
 // rejected conservatively and annotated with SI metadata so downstream legacy
 // fail-open gates cannot forward it.
-func rejectStorageIntegrityNamespaces(resp *pb.RewriteSQLResponse, refs []engine.NamespaceRef, sel nameresolve.Selection, code pb.RewriteCode) bool {
+func rejectStorageIntegrityNamespaces(e engine.Engine, resp *pb.RewriteSQLResponse, refs []engine.NamespaceRef, sel nameresolve.Selection, code pb.RewriteCode) bool {
 	if sel.Mode != nameresolve.ModeDynamic || len(sel.Dynamic.GetStorageIntegrity().GetTables()) == 0 {
 		return false
 	}
 	for _, ref := range refs {
+		semantic, ok := engine.SemanticNamespaceRef(e, ref)
+		if !ok {
+			// Preserve only the surface identity. A failed identifier decode proves
+			// no database/table and must take the generic unresolved path below.
+			ref.Target = engine.TableTarget{}
+			ref.Resolved = false
+			ref.UsesCurrentDatabase = false
+		} else {
+			ref = semantic
+		}
 		target := ref.Target
 		if ref.UsesCurrentDatabase {
 			// First retain logical-session semantics: an unqualified exact SI key

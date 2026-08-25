@@ -20,6 +20,8 @@ type DBLevelInfo struct {
 	Kind                DBLevelKind
 	ShowWhat            string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
 	DB                  string // USE db, or SHOW's FROM/IN db; "" when absent
+	HasDBClause         bool   // SHOW carries an explicit FROM/IN clause, even when its target is not a static name
+	DBResolved          bool   // the explicit SHOW FROM/IN target was resolved to DB
 	HasLike             bool
 	Like                string // LIKE pattern (logical/unescaped: 'O''Brien%' → O'Brien%)
 	LikeNot             bool   // NOT (I)LIKE
@@ -75,15 +77,22 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 			info.ShowWhat = strings.ToUpper(toks[i].Text)
 			i++
 		}
+		// FROM/IN is a database clause only in this bounded grammar prefix,
+		// immediately after the SHOW kind. Never keep scanning for IN: later IN
+		// tokens can belong to a WHERE predicate and must not overwrite the real
+		// execution database.
+		if i < len(toks) && (toks[i].TokenType == "FROM" || toks[i].TokenType == "IN") {
+			info.HasDBClause = true
+			i++
+			if i < len(toks) && isNameToken(toks[i].TokenType) {
+				info.DB = toks[i].Text
+				info.DBResolved = true
+				i++
+			}
+		}
 		for i < len(toks) {
 			tt := toks[i].TokenType
 			switch {
-			case tt == "FROM" || tt == "IN":
-				if i+1 < len(toks) && isNameToken(toks[i+1].TokenType) {
-					info.DB = toks[i+1].Text
-					i += 2
-					continue
-				}
 			case tt == "NOT":
 				info.LikeNot = true
 			case tt == "LIKE" || tt == "I_LIKE":
@@ -91,9 +100,11 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 				info.LikeCaseInsensitive = tt == "I_LIKE"
 				if i+1 < len(toks) && toks[i+1].TokenType == "STRING" {
 					info.Like = toks[i+1].Text
-					i += 2
-					continue
 				}
+				return info, nil
+			case tt == "WHERE" || tt == "LIMIT" || tt == "SETTINGS" || tt == "FORMAT" ||
+				tt == "INTO" || tt == "PARALLEL":
+				return info, nil
 			}
 			i++
 		}
