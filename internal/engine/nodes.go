@@ -1902,13 +1902,45 @@ func tableFunctionArgText(arg any) (string, bool) {
 	return value, ok
 }
 
+// decodeStringLiteralValue returns the semantic string a polyglot literal node
+// denotes, and whether the node is a literal kind whose value is safe to use as
+// a namespace name. ClickHouse heredocs arrive as literal_type "dollar_string";
+// the tagged form $tag$body$tag$ encodes as "<tag>\x00<body>", so reading
+// lit["value"] raw made storage-integrity policy see a different string than
+// Generate emits for ClickHouse to execute (Spec N D6).
+//
+// Any other literal type is deliberately NOT decoded. Treating an unmodelled
+// encoding as an opaque, harmless value is exactly how the tagged heredoc got
+// through; an unrecognized kind must reach the caller as unresolvable so
+// storage-integrity policy fails closed. Widening this whitelist requires
+// proving that the decoded value equals the value Generate emits — the
+// invariant TestTableFunctionArgValue_PolicyValueMatchesGeneratedValueOrRefuses
+// enforces for every literal_type polyglot can produce here.
+func decodeStringLiteralValue(lit map[string]any) (string, bool) {
+	value, ok := lit["value"].(string)
+	if !ok {
+		return "", false
+	}
+	switch lit["literal_type"] {
+	case "string":
+		return value, true
+	case "dollar_string":
+		if nul := strings.IndexByte(value, 0); nul >= 0 {
+			return value[nul+1:], true // strip the "<tag>\x00" prefix
+		}
+		return value, true
+	default:
+		return "", false
+	}
+}
+
 func tableFunctionArgValue(arg any) (string, namespaceValueOrigin, bool) {
 	m, ok := arg.(map[string]any)
 	if !ok {
 		return "", namespaceValueUnknown, false
 	}
 	if lit, ok := m["literal"].(map[string]any); ok {
-		value, ok := lit["value"].(string)
+		value, ok := decodeStringLiteralValue(lit)
 		return value, namespaceValueLiteral, ok && value != ""
 	}
 	if col, ok := m["column"].(map[string]any); ok {
