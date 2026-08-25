@@ -195,7 +195,10 @@ type namespaceRefDetail struct {
 // mergeTree* inspection functions, TimeSeries/Prometheus functions, and
 // dictionary. Prefix handling for mergeTree* intentionally covers newly added
 // inspection functions such as mergeTreeCodecBlockCounts without a brittle
-// one-name patch.
+// one-name patch. The shared statement walker carries forked CTE scope into
+// every SELECT block: a bare IN target bound to an in-scope CTE is not a
+// namespace reference, while a qualified target and an unbound bare target
+// remain real references (Spec I D7b).
 func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {

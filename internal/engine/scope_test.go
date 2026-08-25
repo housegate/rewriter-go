@@ -35,3 +35,38 @@ func TestReferencesIdentifierInScope(t *testing.T) {
 		})
 	}
 }
+
+func TestCollectNamespaceRefs_SkipsInScopeCTEAliases(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("WITH t AS (SELECT 1 AS id) SELECT a FROM other.u WHERE id IN t")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	refs, err := CollectNamespaceRefs(ast)
+	if err != nil {
+		t.Fatalf("CollectNamespaceRefs: %v", err)
+	}
+	for _, ref := range refs {
+		if ref.Source == NamespaceRefInTable && ref.Target.DB == "" && ref.Target.Table == "t" {
+			t.Fatalf("in-scope CTE alias must not be collected as a namespace ref: %+v", refs)
+		}
+	}
+
+	ast, err = e.ParseOne("SELECT a FROM other.u WHERE id IN t")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	refs, err = CollectNamespaceRefs(ast)
+	if err != nil {
+		t.Fatalf("CollectNamespaceRefs: %v", err)
+	}
+	found := false
+	for _, ref := range refs {
+		if ref.Source == NamespaceRefInTable && ref.Target.Table == "t" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a bare IN target with no CTE in scope must still be collected")
+	}
+}
