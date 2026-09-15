@@ -17,7 +17,13 @@
             "name": {
               "name": "c",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 45,
+                "end": 46,
+                "line": 1,
+                "column": 47
+              }
             },
             "schema": null,
             "catalog": null,
@@ -40,12 +46,24 @@
             "name": {
               "name": "u",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 55,
+                "end": 56,
+                "line": 1,
+                "column": 57
+              }
             },
             "schema": {
               "name": "db",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 52,
+                "end": 54,
+                "line": 1,
+                "column": 55
+              }
             },
             "catalog": null,
             "alias": null,
@@ -65,15 +83,33 @@
                 "name": {
                   "name": "x",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 62,
+                    "end": 63,
+                    "line": 1,
+                    "column": 64
+                  }
                 },
                 "table": {
                   "name": "c",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 60,
+                    "end": 61,
+                    "line": 1,
+                    "column": 62
+                  }
                 },
                 "join_mark": false,
-                "trailing_comments": []
+                "trailing_comments": [],
+                "span": {
+                  "start": 60,
+                  "end": 63,
+                  "line": 1,
+                  "column": 64
+                }
               }
             },
             "right": {
@@ -83,21 +119,45 @@
                     "name": {
                       "name": "u",
                       "quoted": false,
-                      "trailing_comments": []
+                      "trailing_comments": [],
+                      "span": {
+                        "start": 69,
+                        "end": 70,
+                        "line": 1,
+                        "column": 71
+                      }
                     },
                     "table": {
                       "name": "db",
                       "quoted": false,
-                      "trailing_comments": []
+                      "trailing_comments": [],
+                      "span": {
+                        "start": 66,
+                        "end": 68,
+                        "line": 1,
+                        "column": 69
+                      }
                     },
                     "join_mark": false,
-                    "trailing_comments": []
+                    "trailing_comments": [],
+                    "span": {
+                      "start": 66,
+                      "end": 70,
+                      "line": 1,
+                      "column": 71
+                    }
                   }
                 },
                 "field": {
                   "name": "x",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 71,
+                    "end": 72,
+                    "line": 1,
+                    "column": 73
+                  }
                 }
               }
             },
@@ -136,7 +196,13 @@
           "alias": {
             "name": "c",
             "quoted": false,
-            "trailing_comments": []
+            "trailing_comments": [],
+            "span": {
+              "start": 5,
+              "end": 6,
+              "line": 1,
+              "column": 7
+            }
           },
           "this": {
             "select": {
@@ -157,12 +223,24 @@
                       "name": {
                         "name": "t",
                         "quoted": false,
-                        "trailing_comments": []
+                        "trailing_comments": [],
+                        "span": {
+                          "start": 28,
+                          "end": 29,
+                          "line": 1,
+                          "column": 30
+                        }
                       },
                       "schema": {
                         "name": "db",
                         "quoted": false,
-                        "trailing_comments": []
+                        "trailing_comments": [],
+                        "span": {
+                          "start": 25,
+                          "end": 27,
+                          "line": 1,
+                          "column": 28
+                        }
                       },
                       "catalog": null,
                       "alias": null,

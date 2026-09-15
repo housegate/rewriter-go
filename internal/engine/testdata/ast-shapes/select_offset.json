@@ -6,11 +6,23 @@
           "name": {
             "name": "a",
             "quoted": false,
-            "trailing_comments": []
+            "trailing_comments": [],
+            "span": {
+              "start": 7,
+              "end": 8,
+              "line": 1,
+              "column": 9
+            }
           },
           "table": null,
           "join_mark": false,
-          "trailing_comments": []
+          "trailing_comments": [],
+          "span": {
+            "start": 7,
+            "end": 8,
+            "line": 1,
+            "column": 9
+          }
         }
       }
     ],
@@ -21,12 +33,24 @@
             "name": {
               "name": "t",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 17,
+                "end": 18,
+                "line": 1,
+                "column": 19
+              }
             },
             "schema": {
               "name": "db",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 14,
+                "end": 16,
+                "line": 1,
+                "column": 17
+              }
             },
             "catalog": null,
             "alias": null,

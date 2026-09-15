@@ -17,7 +17,13 @@
             "name": {
               "name": "a",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 14,
+                "end": 15,
+                "line": 1,
+                "column": 16
+              }
             },
             "schema": null,
             "catalog": null,
@@ -40,7 +46,13 @@
             "name": {
               "name": "b",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 21,
+                "end": 22,
+                "line": 1,
+                "column": 23
+              }
             },
             "schema": null,
             "catalog": null,
@@ -61,15 +73,33 @@
                 "name": {
                   "name": "x",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 28,
+                    "end": 29,
+                    "line": 1,
+                    "column": 30
+                  }
                 },
                 "table": {
                   "name": "a",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 26,
+                    "end": 27,
+                    "line": 1,
+                    "column": 28
+                  }
                 },
                 "join_mark": false,
-                "trailing_comments": []
+                "trailing_comments": [],
+                "span": {
+                  "start": 26,
+                  "end": 29,
+                  "line": 1,
+                  "column": 30
+                }
               }
             },
             "right": {
@@ -77,15 +107,33 @@
                 "name": {
                   "name": "x",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 34,
+                    "end": 35,
+                    "line": 1,
+                    "column": 36
+                  }
                 },
                 "table": {
                   "name": "b",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 32,
+                    "end": 33,
+                    "line": 1,
+                    "column": 34
+                  }
                 },
                 "join_mark": false,
-                "trailing_comments": []
+                "trailing_comments": [],
+                "span": {
+                  "start": 32,
+                  "end": 35,
+                  "line": 1,
+                  "column": 36
+                }
               }
             },
             "left_comments": [],
@@ -107,7 +155,13 @@
             "name": {
               "name": "c",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 41,
+                "end": 42,
+                "line": 1,
+                "column": 43
+              }
             },
             "schema": null,
             "catalog": null,
@@ -128,15 +182,33 @@
                 "name": {
                   "name": "y",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 48,
+                    "end": 49,
+                    "line": 1,
+                    "column": 50
+                  }
                 },
                 "table": {
                   "name": "b",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 46,
+                    "end": 47,
+                    "line": 1,
+                    "column": 48
+                  }
                 },
                 "join_mark": false,
-                "trailing_comments": []
+                "trailing_comments": [],
+                "span": {
+                  "start": 46,
+                  "end": 49,
+                  "line": 1,
+                  "column": 50
+                }
               }
             },
             "right": {
@@ -144,15 +216,33 @@
                 "name": {
                   "name": "y",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 54,
+                    "end": 55,
+                    "line": 1,
+                    "column": 56
+                  }
                 },
                 "table": {
                   "name": "c",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 52,
+                    "end": 53,
+                    "line": 1,
+                    "column": 54
+                  }
                 },
                 "join_mark": false,
-                "trailing_comments": []
+                "trailing_comments": [],
+                "span": {
+                  "start": 52,
+                  "end": 55,
+                  "line": 1,
+                  "column": 56
+                }
               }
             },
             "left_comments": [],

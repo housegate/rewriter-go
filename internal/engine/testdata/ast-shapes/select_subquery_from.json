@@ -22,11 +22,23 @@
                       "name": {
                         "name": "a",
                         "quoted": false,
-                        "trailing_comments": []
+                        "trailing_comments": [],
+                        "span": {
+                          "start": 22,
+                          "end": 23,
+                          "line": 1,
+                          "column": 24
+                        }
                       },
                       "table": null,
                       "join_mark": false,
-                      "trailing_comments": []
+                      "trailing_comments": [],
+                      "span": {
+                        "start": 22,
+                        "end": 23,
+                        "line": 1,
+                        "column": 24
+                      }
                     }
                   }
                 ],
@@ -37,12 +49,24 @@
                         "name": {
                           "name": "t",
                           "quoted": false,
-                          "trailing_comments": []
+                          "trailing_comments": [],
+                          "span": {
+                            "start": 32,
+                            "end": 33,
+                            "line": 1,
+                            "column": 34
+                          }
                         },
                         "schema": {
                           "name": "db",
                           "quoted": false,
-                          "trailing_comments": []
+                          "trailing_comments": [],
+                          "span": {
+                            "start": 29,
+                            "end": 31,
+                            "line": 1,
+                            "column": 32
+                          }
                         },
                         "catalog": null,
                         "alias": null,
@@ -86,7 +110,13 @@
             "alias": {
               "name": "sub",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 35,
+                "end": 38,
+                "line": 1,
+                "column": 39
+              }
             },
             "column_aliases": [],
             "alias_explicit_as": false,

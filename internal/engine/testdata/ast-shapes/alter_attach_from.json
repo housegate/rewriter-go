@@ -4,12 +4,24 @@
       "name": {
         "name": "t",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 15,
+          "end": 16,
+          "line": 1,
+          "column": 17
+        }
       },
       "schema": {
         "name": "db",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 12,
+          "end": 14,
+          "line": 1,
+          "column": 15
+        }
       },
       "catalog": null,
       "alias": null,
