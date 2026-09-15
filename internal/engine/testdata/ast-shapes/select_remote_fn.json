@@ -27,11 +27,23 @@
                   "name": {
                     "name": "db",
                     "quoted": false,
-                    "trailing_comments": []
+                    "trailing_comments": [],
+                    "span": {
+                      "start": 29,
+                      "end": 31,
+                      "line": 1,
+                      "column": 32
+                    }
                   },
                   "table": null,
                   "join_mark": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 29,
+                    "end": 31,
+                    "line": 1,
+                    "column": 32
+                  }
                 }
               },
               {
@@ -39,11 +51,23 @@
                   "name": {
                     "name": "t",
                     "quoted": false,
-                    "trailing_comments": []
+                    "trailing_comments": [],
+                    "span": {
+                      "start": 33,
+                      "end": 34,
+                      "line": 1,
+                      "column": 35
+                    }
                   },
                   "table": null,
                   "join_mark": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 33,
+                    "end": 34,
+                    "line": 1,
+                    "column": 35
+                  }
                 }
               },
               {

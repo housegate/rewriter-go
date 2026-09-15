@@ -17,7 +17,13 @@
             "name": {
               "name": "c",
               "quoted": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 35,
+                "end": 36,
+                "line": 1,
+                "column": 37
+              }
             },
             "schema": null,
             "catalog": null,
@@ -55,7 +61,13 @@
           "alias": {
             "name": "c",
             "quoted": false,
-            "trailing_comments": []
+            "trailing_comments": [],
+            "span": {
+              "start": 5,
+              "end": 6,
+              "line": 1,
+              "column": 7
+            }
           },
           "this": {
             "select": {

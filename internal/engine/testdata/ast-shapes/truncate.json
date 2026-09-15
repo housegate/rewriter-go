@@ -6,12 +6,24 @@
       "name": {
         "name": "t",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 18,
+          "end": 19,
+          "line": 1,
+          "column": 20
+        }
       },
       "schema": {
         "name": "db",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 15,
+          "end": 17,
+          "line": 1,
+          "column": 18
+        }
       },
       "catalog": null,
       "alias": null,

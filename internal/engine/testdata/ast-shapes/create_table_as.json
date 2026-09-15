@@ -4,12 +4,24 @@
       "name": {
         "name": "t",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 16,
+          "end": 17,
+          "line": 1,
+          "column": 18
+        }
       },
       "schema": {
         "name": "db",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 13,
+          "end": 15,
+          "line": 1,
+          "column": 16
+        }
       },
       "catalog": null,
       "alias": null,
@@ -33,12 +45,24 @@
       "name": {
         "name": "src",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 25,
+          "end": 28,
+          "line": 1,
+          "column": 29
+        }
       },
       "schema": {
         "name": "db2",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 21,
+          "end": 24,
+          "line": 1,
+          "column": 25
+        }
       },
       "catalog": null,
       "alias": null,

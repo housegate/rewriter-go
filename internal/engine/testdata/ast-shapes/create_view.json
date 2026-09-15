@@ -4,12 +4,24 @@
       "name": {
         "name": "v",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 15,
+          "end": 16,
+          "line": 1,
+          "column": 17
+        }
       },
       "schema": {
         "name": "db",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 12,
+          "end": 14,
+          "line": 1,
+          "column": 15
+        }
       },
       "catalog": null,
       "alias": null,
@@ -41,12 +53,24 @@
                 "name": {
                   "name": "s",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 37,
+                    "end": 38,
+                    "line": 1,
+                    "column": 39
+                  }
                 },
                 "schema": {
                   "name": "db",
                   "quoted": false,
-                  "trailing_comments": []
+                  "trailing_comments": [],
+                  "span": {
+                    "start": 34,
+                    "end": 36,
+                    "line": 1,
+                    "column": 37
+                  }
                 },
                 "catalog": null,
                 "alias": null,

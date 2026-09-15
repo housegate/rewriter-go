@@ -4,12 +4,24 @@
       "name": {
         "name": "t",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 10,
+          "end": 11,
+          "line": 1,
+          "column": 12
+        }
       },
       "schema": {
         "name": "db",
         "quoted": false,
-        "trailing_comments": []
+        "trailing_comments": [],
+        "span": {
+          "start": 7,
+          "end": 9,
+          "line": 1,
+          "column": 10
+        }
       },
       "catalog": null,
       "alias": null,
@@ -29,7 +41,13 @@
         {
           "name": "x",
           "quoted": false,
-          "trailing_comments": []
+          "trailing_comments": [],
+          "span": {
+            "start": 16,
+            "end": 17,
+            "line": 1,
+            "column": 18
+          }
         },
         {
           "literal": {
@@ -49,11 +67,23 @@
               "name": {
                 "name": "y",
                 "quoted": false,
-                "trailing_comments": []
+                "trailing_comments": [],
+                "span": {
+                  "start": 28,
+                  "end": 29,
+                  "line": 1,
+                  "column": 30
+                }
               },
               "table": null,
               "join_mark": false,
-              "trailing_comments": []
+              "trailing_comments": [],
+              "span": {
+                "start": 28,
+                "end": 29,
+                "line": 1,
+                "column": 30
+              }
             }
           },
           "right": {
