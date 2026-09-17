@@ -14,10 +14,11 @@ import (
 
 // NativeRewriter is the in-process Rewriter. Phase 0 = pass-through.
 type NativeRewriter struct {
-	engine  engine.Engine
-	options func(account string) []*pb.RewriteOption // injected account-derived policy
-	mu      sync.Mutex
-	last    *callContext
+	measuredSnapshotProfiles map[string]string
+	engine                   engine.Engine
+	options                  func(account string) []*pb.RewriteOption // injected account-derived policy
+	mu                       sync.Mutex
+	last                     *callContext
 }
 
 // callContext is the per-connection record of the most recent Rewrite, used by

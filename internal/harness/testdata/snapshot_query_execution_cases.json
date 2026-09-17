@@ -1,0 +1,1875 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "literal_int8_zero",
+      "corpus_case": "literal_int8_zero",
+      "types": [
+        "Int8"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int8_seven",
+      "corpus_case": "literal_int8_seven",
+      "types": [
+        "Int8"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int8_min",
+      "corpus_case": "literal_int8_min",
+      "types": [
+        "Int8"
+      ],
+      "rows": [
+        [
+          "-128"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int8_max",
+      "corpus_case": "literal_int8_max",
+      "types": [
+        "Int8"
+      ],
+      "rows": [
+        [
+          "127"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int8_below_min",
+      "corpus_case": "literal_int8_below_min"
+    },
+    {
+      "name": "literal_int8_above_max",
+      "corpus_case": "literal_int8_above_max"
+    },
+    {
+      "name": "scalar_int8_zero",
+      "corpus_case": "scalar_exact_int8",
+      "types": [
+        "Int8"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int8"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_int8_one",
+      "corpus_case": "scalar_exact_int8",
+      "types": [
+        "Int8"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int8"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_int8_many",
+      "corpus_case": "scalar_exact_int8",
+      "types": [
+        "Int8"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int8"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_int16_zero",
+      "corpus_case": "literal_int16_zero",
+      "types": [
+        "Int16"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int16_seven",
+      "corpus_case": "literal_int16_seven",
+      "types": [
+        "Int16"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int16_min",
+      "corpus_case": "literal_int16_min",
+      "types": [
+        "Int16"
+      ],
+      "rows": [
+        [
+          "-32768"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int16_max",
+      "corpus_case": "literal_int16_max",
+      "types": [
+        "Int16"
+      ],
+      "rows": [
+        [
+          "32767"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int16_below_min",
+      "corpus_case": "literal_int16_below_min"
+    },
+    {
+      "name": "literal_int16_above_max",
+      "corpus_case": "literal_int16_above_max"
+    },
+    {
+      "name": "scalar_int16_zero",
+      "corpus_case": "scalar_exact_int16",
+      "types": [
+        "Int16"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int16"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_int16_one",
+      "corpus_case": "scalar_exact_int16",
+      "types": [
+        "Int16"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int16"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_int16_many",
+      "corpus_case": "scalar_exact_int16",
+      "types": [
+        "Int16"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int16"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_int32_zero",
+      "corpus_case": "literal_int32_zero",
+      "types": [
+        "Int32"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int32_seven",
+      "corpus_case": "literal_int32_seven",
+      "types": [
+        "Int32"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int32_min",
+      "corpus_case": "literal_int32_min",
+      "types": [
+        "Int32"
+      ],
+      "rows": [
+        [
+          "-2147483648"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int32_max",
+      "corpus_case": "literal_int32_max",
+      "types": [
+        "Int32"
+      ],
+      "rows": [
+        [
+          "2147483647"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int32_below_min",
+      "corpus_case": "literal_int32_below_min"
+    },
+    {
+      "name": "literal_int32_above_max",
+      "corpus_case": "literal_int32_above_max"
+    },
+    {
+      "name": "scalar_int32_zero",
+      "corpus_case": "scalar_exact_int32",
+      "types": [
+        "Int32"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int32"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_int32_one",
+      "corpus_case": "scalar_exact_int32",
+      "types": [
+        "Int32"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int32"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_int32_many",
+      "corpus_case": "scalar_exact_int32",
+      "types": [
+        "Int32"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int32"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_int64_zero",
+      "corpus_case": "literal_int64_zero",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int64_seven",
+      "corpus_case": "literal_int64_seven",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int64_min",
+      "corpus_case": "literal_int64_min",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "-9223372036854775808"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int64_max",
+      "corpus_case": "literal_int64_max",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "9223372036854775807"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_int64_below_min",
+      "corpus_case": "literal_int64_below_min"
+    },
+    {
+      "name": "literal_int64_above_max",
+      "corpus_case": "literal_int64_above_max"
+    },
+    {
+      "name": "scalar_int64_zero",
+      "corpus_case": "scalar_exact_int64",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_int64_one",
+      "corpus_case": "scalar_exact_int64",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_int64_many",
+      "corpus_case": "scalar_exact_int64",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_uint8_zero",
+      "corpus_case": "literal_uint8_zero",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint8_seven",
+      "corpus_case": "literal_uint8_seven",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint8_min",
+      "corpus_case": "literal_uint8_min",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint8_max",
+      "corpus_case": "literal_uint8_max",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [
+        [
+          "255"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint8_below_min",
+      "corpus_case": "literal_uint8_below_min"
+    },
+    {
+      "name": "literal_uint8_above_max",
+      "corpus_case": "literal_uint8_above_max"
+    },
+    {
+      "name": "scalar_uint8_zero",
+      "corpus_case": "scalar_exact_uint8",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt8"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_uint8_one",
+      "corpus_case": "scalar_exact_uint8",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt8"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_uint8_many",
+      "corpus_case": "scalar_exact_uint8",
+      "types": [
+        "UInt8"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt8"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_uint16_zero",
+      "corpus_case": "literal_uint16_zero",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint16_seven",
+      "corpus_case": "literal_uint16_seven",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint16_min",
+      "corpus_case": "literal_uint16_min",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint16_max",
+      "corpus_case": "literal_uint16_max",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [
+        [
+          "65535"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint16_below_min",
+      "corpus_case": "literal_uint16_below_min"
+    },
+    {
+      "name": "literal_uint16_above_max",
+      "corpus_case": "literal_uint16_above_max"
+    },
+    {
+      "name": "scalar_uint16_zero",
+      "corpus_case": "scalar_exact_uint16",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt16"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_uint16_one",
+      "corpus_case": "scalar_exact_uint16",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt16"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_uint16_many",
+      "corpus_case": "scalar_exact_uint16",
+      "types": [
+        "UInt16"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt16"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_uint32_zero",
+      "corpus_case": "literal_uint32_zero",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint32_seven",
+      "corpus_case": "literal_uint32_seven",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint32_min",
+      "corpus_case": "literal_uint32_min",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint32_max",
+      "corpus_case": "literal_uint32_max",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [
+        [
+          "4294967295"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint32_below_min",
+      "corpus_case": "literal_uint32_below_min"
+    },
+    {
+      "name": "literal_uint32_above_max",
+      "corpus_case": "literal_uint32_above_max"
+    },
+    {
+      "name": "scalar_uint32_zero",
+      "corpus_case": "scalar_exact_uint32",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt32"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_uint32_one",
+      "corpus_case": "scalar_exact_uint32",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt32"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_uint32_many",
+      "corpus_case": "scalar_exact_uint32",
+      "types": [
+        "UInt32"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt32"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_uint64_zero",
+      "corpus_case": "literal_uint64_zero",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint64_seven",
+      "corpus_case": "literal_uint64_seven",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint64_min",
+      "corpus_case": "literal_uint64_min",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [
+        [
+          "0"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint64_max",
+      "corpus_case": "literal_uint64_max",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [
+        [
+          "18446744073709551615"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "literal_uint64_below_min",
+      "corpus_case": "literal_uint64_below_min"
+    },
+    {
+      "name": "literal_uint64_above_max",
+      "corpus_case": "literal_uint64_above_max"
+    },
+    {
+      "name": "scalar_uint64_zero",
+      "corpus_case": "scalar_exact_uint64",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt64"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_uint64_one",
+      "corpus_case": "scalar_exact_uint64",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_uint64_many",
+      "corpus_case": "scalar_exact_uint64",
+      "types": [
+        "UInt64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "UInt64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "literal_permutation_distinct",
+      "corpus_case": "literal_permutation_distinct",
+      "types": [
+        "Int8",
+        "UInt64"
+      ],
+      "rows": [
+        [
+          "-128",
+          "18446744073709551615"
+        ]
+      ],
+      "tables": [],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_nested_projection",
+      "corpus_case": "scalar_nested_projection",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_zero_row_shape",
+      "corpus_case": "scalar_zero_row_shape",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "0"
+            ]
+          ]
+        }
+      ],
+      "error_code": 349
+    },
+    {
+      "name": "scalar_projection_empty_outer",
+      "corpus_case": "scalar_projection",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "scalar_predicate_unknown",
+      "corpus_case": "scalar_predicate",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": []
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "0"
+            ],
+            [
+              "1"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_predicate_true",
+      "corpus_case": "scalar_predicate",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "1"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "0"
+            ],
+            [
+              "1"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "scalar_predicate_many",
+      "corpus_case": "scalar_predicate",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "0"
+            ],
+            [
+              "1"
+            ]
+          ]
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "scalar_predicate_empty_outer",
+      "corpus_case": "scalar_predicate",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": []
+        }
+      ],
+      "error_code": 125
+    },
+    {
+      "name": "in_predicate_false",
+      "corpus_case": "in_predicate",
+      "types": [
+        "Int64"
+      ],
+      "rows": [],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": []
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "-1"
+            ],
+            [
+              "0"
+            ],
+            [
+              "1"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "in_predicate_true",
+      "corpus_case": "in_predicate",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "1"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r1",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "1"
+            ]
+          ]
+        },
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "-1"
+            ],
+            [
+              "0"
+            ],
+            [
+              "1"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "projection_filter",
+      "corpus_case": "projection_filter",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "-1"
+            ],
+            [
+              "0"
+            ],
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "copy_float32",
+      "corpus_case": "copy_float32",
+      "types": [
+        "Float32"
+      ],
+      "rows": [
+        [
+          "1.5"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Float32"
+            }
+          ],
+          "rows": [
+            [
+              "1.5"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "copy_float64",
+      "corpus_case": "copy_float64",
+      "types": [
+        "Float64"
+      ],
+      "rows": [
+        [
+          "1.5"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Float64"
+            }
+          ],
+          "rows": [
+            [
+              "1.5"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "column_permutation_distinct_types",
+      "corpus_case": "column_permutation_distinct_types",
+      "types": [
+        "Int8",
+        "Int64"
+      ],
+      "rows": [
+        [
+          "-8",
+          "64"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "a",
+              "type": "Int8"
+            },
+            {
+              "name": "b",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "-8",
+              "64"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "double_with_shadow",
+      "corpus_case": "projection_filter",
+      "sql": "WITH x AS (SELECT value FROM tenant.events), y AS (SELECT value FROM x) INSERT INTO tenant.copy WITH x AS (SELECT value FROM y) SELECT value FROM x",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "with_insert_boundary_0",
+      "corpus_case": "projection_filter",
+      "sql": "WITH insert AS (SELECT value FROM tenant.events) INSERT INTO tenant.copy SELECT value FROM insert",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "with_insert_boundary_1",
+      "corpus_case": "projection_filter",
+      "sql": "WITH INSERT AS (SELECT value FROM tenant.events) INSERT INTO tenant.copy SELECT value FROM INSERT",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "with_insert_boundary_2",
+      "corpus_case": "projection_filter",
+      "sql": "WITH InSeRt AS (SELECT value FROM tenant.events) INSERT INTO tenant.copy SELECT value FROM InSeRt",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "with_insert_boundary_3",
+      "corpus_case": "projection_filter",
+      "sql": "WITH `insert` AS (SELECT value FROM tenant.events) INSERT INTO tenant.copy SELECT value FROM `insert`",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "with_insert_boundary_4",
+      "corpus_case": "projection_filter",
+      "sql": "WITH \"insert\" AS (SELECT value FROM tenant.events) INSERT INTO tenant.copy SELECT value FROM \"insert\"",
+      "types": [
+        "Int64"
+      ],
+      "rows": [
+        [
+          "7"
+        ]
+      ],
+      "tables": [
+        {
+          "name": "r2",
+          "columns": [
+            {
+              "name": "value",
+              "type": "Int64"
+            }
+          ],
+          "rows": [
+            [
+              "7"
+            ]
+          ]
+        }
+      ],
+      "error_code": 0
+    },
+    {
+      "name": "ordinary_with_insert_0",
+      "corpus_case": "projection_filter",
+      "sql": "WITH x AS (SELECT 7) SELECT insert FROM tenant.events",
+      "ordinary": true
+    },
+    {
+      "name": "ordinary_with_insert_1",
+      "corpus_case": "projection_filter",
+      "sql": "WITH x AS (SELECT 7) SELECT INSERT FROM tenant.events",
+      "ordinary": true
+    },
+    {
+      "name": "ordinary_with_insert_2",
+      "corpus_case": "projection_filter",
+      "sql": "WITH 7 AS insert SELECT insert",
+      "ordinary": true
+    },
+    {
+      "name": "scalar_user_accurate_cast",
+      "corpus_case": "scalar_user_accurate_cast"
+    },
+    {
+      "name": "scalar_user_assume_not_null",
+      "corpus_case": "scalar_user_assume_not_null"
+    },
+    {
+      "name": "scalar_user_null_default",
+      "corpus_case": "scalar_user_null_default"
+    },
+    {
+      "name": "scalar_user_coalesce_default",
+      "corpus_case": "scalar_user_coalesce_default"
+    },
+    {
+      "name": "scalar_user_setting_keep_nullable_one",
+      "corpus_case": "scalar_user_setting_keep_nullable_one"
+    },
+    {
+      "name": "scalar_user_setting_keep_nullable_zero",
+      "corpus_case": "scalar_user_setting_keep_nullable_zero"
+    },
+    {
+      "name": "scalar_user_setting_unknown_scalar_setting",
+      "corpus_case": "scalar_user_setting_unknown_scalar_setting"
+    }
+  ]
+}

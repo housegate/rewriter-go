@@ -69,12 +69,48 @@ few minutes):
 
 ```bash
 make ffi      # builds third_party/lib/libpolyglot_sql_ffi.<ext> from the submodule
-make test     # sets POLYGLOT_SQL_FFI_PATH and runs `go test ./...`
+make test-ordinary # ordinary unit/FFI regressions; excludes snapshot qualification
 ```
 
 Tests that need the engine skip themselves when `POLYGLOT_SQL_FFI_PATH` is unset, so
-`go test ./...` alone still runs the pure-Go units (comparator, corpus, fidelity-metric,
-contract tests).
+`SNAPSHOT_QUERY_ORDINARY=1 go test ./...` runs the pure-Go units (comparator, corpus,
+fidelity-metric, contract tests). Ordinary public CI/release lanes retain their FFI
+and fidelity checks; they do not qualify the snapshot contract. Final paired
+qualification belongs to the private rewriter-grpc lane.
+
+### Measured snapshot queries
+
+`NewServiceWithSnapshotQueryProfiles(libPath, profilePath)` and
+`NewNativeRewriterWithSnapshotQueryProfiles(libPath, profilePath, opts...)` each own
+an independent engine and immutable, measured profile registry. Their
+`AnalyzeSnapshotQuery` and `PrepareSnapshotQuery` methods use the closed snapshot
+language. The ordinary constructors have no authorized snapshot profiles.
+
+On Linux, `make test` requires `SNAPSHOT_OUT`, `SNAPSHOT_TOOL` (the external HouseGate
+profile generator), and `SNAPSHOT_RECIPE` (actual artifact paths). It first runs the
+ordinary regressions, then compiles three test executables, externally generates
+the profile and resolved frozen corpus, and executes those exact unchanged files.
+The recipe must identify the just-built root/engine/harness executables, matching
+FFI, actual private rewriter service, and execution-profile artifacts. Missing
+inputs fail the full target. The phases are also available as
+`snapshot-measured-compile`, `snapshot-measured-generate`, and
+`snapshot-measured-run` for external generation on a separate host.
+The final paired run also requires `REWRITER_ORACLE_ADDR`, `SNAPSHOT_CLICKHOUSE`,
+`SNAPSHOT_TZDATA_ARCHIVE`, `SNAPSHOT_DEADLINE_PROFILE`, `TZ=UTC`, `TZDIR`, and a fresh
+`SNAPSHOT_RUN_LOG_DIR`. The private RC workflow supplies the measured service and
+one-millisecond diagnostic profile, pinned Linux/AMD64 ClickHouse, complete selected
+timezone archive/directory, and an isolated runtime with fallback timezone roots
+masked. The harness verifies runtime bytes against Q, reads back all six settings
+in each execution session, and independently executes each backend's returned
+Prepare SQL. The separate 102-fixture matrix performs 228 SQL executions and 78
+analyzer refusals without changing the frozen 636/130 corpus; 14 actual RPC checks
+cover cancellation and deadlines. Raw responses, complete metadata/value/error
+results and strict counts are written to the run directory. Missing inputs,
+semantic skips, partial results and incomplete counts fail this gate. This finite
+test runner does not qualify authenticated restore, canonical outputs, or production
+output/restore/sort/spill limits; those remain the consuming roles' acceptance gates. Never rebuild
+a test executable after generating its profile. Darwin `make test` runs only the
+explicitly labeled ordinary lane; measured qualification requires Linux.
 
 ### Oracle differential (optional, local-only)
 
@@ -84,7 +120,7 @@ When `REWRITER_ORACLE_ADDR` points at a live `rewriter-grpc` gRPC server, the
 ```bash
 make ffi
 POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.$(uname | grep -qi darwin && echo dylib || echo so)" \
-  REWRITER_ORACLE_ADDR=localhost:50051 go test ./internal/harness -count=1
+  SNAPSHOT_QUERY_ORDINARY=1 REWRITER_ORACLE_ADDR=localhost:50051 go test ./internal/harness -count=1
 ```
 
 A small, documented allow-list of intentional divergences is carved out per-case in the
