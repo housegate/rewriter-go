@@ -24,6 +24,8 @@ import (
 // The zero value is unusable; construct via NewService.
 type Service struct {
 	engine engine.Engine
+	// Private immutable availability only; never an active admission policy.
+	measuredSnapshotProfiles map[string]string
 }
 
 // NewService loads the polyglot FFI library and returns a ready Service.
