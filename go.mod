@@ -3,16 +3,16 @@ module github.com/housegate/rewriter-go
 go 1.25.0
 
 require (
-	github.com/housegate/rewriter-proto v0.2.1-0.20260916180039-a86e62230aaf
+	github.com/ebitengine/purego v0.10.0
+	github.com/housegate/rewriter-proto v0.2.1-0.20260918115349-d3844a56d7b4
 	github.com/tobilg/polyglot/packages/go v0.10.0
+	golang.org/x/sys v0.42.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 )
 
 require (
-	github.com/ebitengine/purego v0.10.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
 )
