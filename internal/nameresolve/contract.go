@@ -23,3 +23,19 @@ func StorageIntegrityDropContract(sel Selection) bool {
 	return sel.Mode == ModeDynamic &&
 		sel.Dynamic.GetStorageIntegrity().GetContractVersion() == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2
 }
+
+// storageIntegrityReservedDatabase reports whether db is one of the V2
+// reserved_databases. V1 ignores the field, so its protected namespace stays
+// the databases derived from the table map, byte-for-byte.
+func storageIntegrityReservedDatabase(db string, a *pb.RewriteTableDynamicArgs) bool {
+	si := a.GetStorageIntegrity()
+	if db == "" || si.GetContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2 {
+		return false
+	}
+	for _, reserved := range si.GetReservedDatabases() {
+		if reserved == db {
+			return true
+		}
+	}
+	return false
+}
