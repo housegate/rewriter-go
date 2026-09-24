@@ -33,7 +33,7 @@ func AnnotateStorageIntegrityRejectAST(e engine.Engine, resp *pb.RewriteSQLRespo
 	if resp.GetCode() == pb.RewriteCode_Success {
 		return
 	}
-	if sel.Mode != nameresolve.ModeDynamic || len(sel.Dynamic.GetStorageIntegrity().GetTables()) == 0 {
+	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		return
 	}
 	if touchesStorageIntegrity(resp.GetOriginalAccessedTables()) {

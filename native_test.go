@@ -890,7 +890,7 @@ func TestStorageIntegrityContract_RejectsMissingOrUnknownVersionBeforeParse(t *t
 				res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 				t.Fatalf("res = %+v, want InvalidRewriteRequest/original/unspecified", res)
 			}
-			if !strings.Contains(res.Message, "storage-integrity contract version V1 is required") {
+			if res.Message != StorageIntegrityContractMessage {
 				t.Fatalf("message = %q", res.Message)
 			}
 		})

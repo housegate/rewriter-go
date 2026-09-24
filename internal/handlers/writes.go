@@ -137,7 +137,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	// in the engine package. If that adapter cannot prove its complete surface,
 	// active storage integrity must reject generically rather than return a Go
 	// error that legacy callers could treat as fail-open.
-	if len(sel.Dynamic.GetStorageIntegrity().GetTables()) > 0 {
+	if nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		mutation, err := engine.CollectMutationReadSurface(e, ast, sql)
 		if err != nil {
 			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)

@@ -13,7 +13,7 @@ import (
 // rejected conservatively and annotated with SI metadata so downstream legacy
 // fail-open gates cannot forward it.
 func rejectStorageIntegrityNamespaces(e engine.Engine, resp *pb.RewriteSQLResponse, refs []engine.NamespaceRef, sel nameresolve.Selection, code pb.RewriteCode) bool {
-	if sel.Mode != nameresolve.ModeDynamic || len(sel.Dynamic.GetStorageIntegrity().GetTables()) == 0 {
+	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		return false
 	}
 	for _, ref := range refs {

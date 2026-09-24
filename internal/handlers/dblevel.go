@@ -330,7 +330,7 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	case showTargetLess:
 		return passthroughDB(e, ast, sql, resp)
 	case showUnknown:
-		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
+		if nameresolve.StorageIntegritySurfaceActive(dyn) {
 			// Fall through unhandled: native.go's pass-through tail is the Spec I
 			// D1 catch-all and answers with the generic unmodelled-statement
 			// refusal. Re-stating that message here would duplicate the single
@@ -342,7 +342,7 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	// showRewritten (SHOW TABLES) falls through to the synthetic enumeration.
 	logical, present, resolved := showDatabaseTarget(info, dyn.GetUpstreamLogicalDatabaseInContext())
 	if !resolved && info.HasDBClause {
-		if len(dyn.GetStorageIntegrity().GetTables()) > 0 {
+		if nameresolve.StorageIntegritySurfaceActive(dyn) {
 			rejectUnresolvedShowDatabase(resp, sql, info.ShowWhat)
 		} else {
 			rejectDBInvalid(resp, "SHOW TABLES target database is not statically resolvable")
@@ -399,7 +399,7 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 // has no table clause, so that branch is inert for it and its existing corpus
 // cases do not move.
 func rejectShowTargetStorageIntegrityNamespace(resp *pb.RewriteSQLResponse, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs) bool {
-	if len(dyn.GetStorageIntegrity().GetTables()) == 0 {
+	if !nameresolve.StorageIntegritySurfaceActive(dyn) {
 		return false
 	}
 	// A bare SHOW executes in the configured physical context. Guard reserved
