@@ -61,6 +61,13 @@ published corpus.
   normalization, is a hard vacuity violation.
 - Unknown JSON keys and content after the single corpus JSON value fail the
   strict load. Do not silently accept old keys such as `sql_exact`.
+- Every case carries `contract_version` (`"V1"` or `"V2"`, rule R8). Both
+  runners send it as `StorageIntegrityArgs.contract_version` and expect that
+  version acknowledged whenever the surface is active: V1 with a non-empty
+  `tables` map, or any V2 case. An optional
+  `storage_integrity.reserved_databases` string array is sent as
+  `StorageIntegrityArgs.reserved_databases` (read by the engines under V2
+  only).
 
 Regenerate SQL pins only with both engines available. `UPDATE_GOLDEN` is
 enabled only by the exact value `1`, and the scoped command must provide the

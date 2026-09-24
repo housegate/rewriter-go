@@ -32,7 +32,13 @@ logical tables to safe/unsafe physical tables. SELECT uses a derived table in SA
 UNSAFE_LATEST mode while hiding the reserved row-id column; EXISTS maps to the safe
 table; DESCRIBE emits a metadata-shaped `system.columns` query. Non-lane writes and
 DDL reject fail-closed (INSERT intentionally keeps the existing signed-ingress path),
-and every accepted SI request positively acknowledges contract v1 in the response.
+and every accepted SI request positively acknowledges its contract version (v1 or
+v2) in the response. Contract v2 (dynamic table set) differs from v1 in three ways:
+it activates the SI surface by version, even with an empty table map; it protects
+every database in `reserved_databases` exactly like a database named by a
+safe/unsafe table (v1 ignores that field); and it accepts a plain
+`DROP TABLE [IF EXISTS] name[, name...] [SYNC]` of logical SI tables by dropping
+only their ordinary physical tables.
 An SI logical key is usable only when its database is present in the account-filtered
 `database_map` (including INSERT); `known_physical_databases` does not grant that access.
 Every database that hosts a configured safe/unsafe table is a protocol-owned namespace:
