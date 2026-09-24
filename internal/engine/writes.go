@@ -24,6 +24,16 @@ const (
 	RoleDelete      WriteRole = "delete"       // DELETE FROM target
 )
 
+// dropRole names the i-th target of a DROP TABLE. The first keeps RoleDrop so
+// single-target callers are unchanged; later targets get "drop#<i>" because
+// RewriteWriteTargets keys its decisions by role.
+func dropRole(i int) WriteRole {
+	if i == 0 {
+		return RoleDrop
+	}
+	return WriteRole(fmt.Sprintf("%s#%d", RoleDrop, i))
+}
+
 // WriteSlot is one rewriteable table reference inside a write statement.
 type WriteSlot struct {
 	Role   WriteRole
@@ -87,9 +97,14 @@ func writeSlots(kind string, body map[string]any, visit func(role WriteRole, tbl
 	tblOf := func(v any) (map[string]any, bool) { m, ok := v.(map[string]any); return m, ok }
 	switch kind {
 	case NodeDropTable:
-		if names, ok := body["names"].([]any); ok && len(names) > 0 {
-			if tbl, ok := tblOf(names[0]); ok {
-				visit(RoleDrop, tbl)
+		// One slot per name, in document order. A multi-table DROP is rewritten
+		// only on the V2 storage-integrity path; every other path rejects it
+		// before rewriting.
+		if names, ok := body["names"].([]any); ok {
+			for i, name := range names {
+				if tbl, ok := tblOf(name); ok {
+					visit(dropRole(i), tbl)
+				}
 			}
 		}
 	case NodeDropView:

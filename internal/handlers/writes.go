@@ -22,7 +22,11 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return nil, false, err
 	}
 	sel := nameresolve.FindActive(opts)
-	if resp, rejected, err := preflightStorageIntegrityWrite(e, ast, sql, info, sel); err != nil {
+	siDrop, err := storageIntegrityDropAllowed(e, sql, info, sel)
+	if err != nil {
+		return nil, false, err
+	}
+	if resp, rejected, err := preflightStorageIntegrityWrite(e, ast, sql, info, sel, siDrop); err != nil {
 		return nil, false, err
 	} else if rejected {
 		return resp, true, nil
@@ -32,7 +36,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	case engine.NodeCreateTable:
 		return dispatchCreateTable(e, ast, info, sel)
 	case engine.NodeDropTable, engine.NodeDropView, engine.NodeTruncate:
-		return dispatchDropLike(e, ast, sql, info, sel)
+		return dispatchDropLike(e, ast, sql, info, sel, siDrop)
 	case engine.NodeAlterTable:
 		return dispatchAlter(e, ast, info, sel)
 	case engine.NodeUpdate:
@@ -63,11 +67,26 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	}
 }
 
+// storageIntegrityDropAllowed reports whether this statement takes the V2
+// DROP TABLE exemption: the effective selection carries contract V2 and the
+// statement is exactly `DROP TABLE [IF EXISTS] name[, name...] [SYNC]`
+// (engine.PlainDropTable). ON CLUSTER, TEMPORARY, IF EMPTY, FORMAT and
+// SETTINGS keep the V1 rejection; DROP VIEW, DROP DICTIONARY and TRUNCATE are
+// different node kinds and never qualify.
+func storageIntegrityDropAllowed(e engine.Engine, sql string, info engine.WriteInfo, sel nameresolve.Selection) (bool, error) {
+	if info.Kind != engine.NodeDropTable || !nameresolve.StorageIntegrityDropContract(sel) {
+		return false, nil
+	}
+	return engine.PlainDropTable(e, sql)
+}
+
 // preflightStorageIntegrityWrite runs before statement-specific generic guards
 // (multi-DROP, cross-table ALTER, AS table-function, bare rejects). Otherwise
 // those guards can return a non-Success response without the SI access marker
-// Housegate needs to keep fail-closed semantics.
-func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+// Housegate needs to keep fail-closed semantics. siDrop admits authorized
+// logical SI targets of a V2 plain DROP TABLE, exactly as INSERT targets are
+// admitted for the signed ingress lane.
+func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection, siDrop bool) (*pb.RewriteSQLResponse, bool, error) {
 	if sel.Mode != nameresolve.ModeDynamic {
 		return nil, false, nil
 	}
@@ -78,7 +97,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	case engine.NodeSelect, engine.NodeUnion, engine.NodeIntersect, engine.NodeExcept:
 		return nil, false, nil
 	}
-	inspectTarget := func(tt engine.TableTarget, allowInsertTarget bool) (*pb.RewriteSQLResponse, bool) {
+	inspectTarget := func(tt engine.TableTarget, allowLogicalTarget bool) (*pb.RewriteSQLResponse, bool) {
 		if tt.Table == "" {
 			if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
 				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
@@ -103,8 +122,10 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
 				return resp, true
 			}
-			if allowInsertTarget {
-				return nil, false // authorized signed ingress owns logical SI INSERT acceptance
+			if allowLogicalTarget {
+				// Authorized signed ingress owns logical SI INSERT acceptance; a V2
+				// plain DROP TABLE drops only the ordinary physical table.
+				return nil, false
 			}
 			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 			recordAccessedWrite(resp, tt, sel)
@@ -125,7 +146,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 			continue
 		}
 		seen[key] = true
-		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert); rejected {
+		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert || siDrop); rejected {
 			return resp, true, nil
 		}
 	}
@@ -233,8 +254,11 @@ func decideWriteTarget(tt engine.TableTarget, kind string, sel nameresolve.Selec
 	recordAccessedWrite(resp, tt, sel) // record BEFORE any reject (C++ writes.cc:118)
 	// Spec G §4.4: every non-INSERT slot resolving to a storage-integrity
 	// table is refused (INSERT stays on the ordinary path — the caller's
-	// signed ingress owns that decision, see plan deviation D-1).
-	if sel.Mode == nameresolve.ModeDynamic && kind != engine.NodeInsert {
+	// signed ingress owns that decision, see plan deviation D-1). Under
+	// contract V2 a DROP TABLE slot also takes the ordinary path: preflight
+	// has already refused every SI target of a DROP TABLE that is not plain.
+	if sel.Mode == nameresolve.ModeDynamic && kind != engine.NodeInsert &&
+		!(kind == engine.NodeDropTable && nameresolve.StorageIntegrityDropContract(sel)) {
 		if _, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
 			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
 			return engine.TableDecision{}, false
@@ -345,7 +369,7 @@ func dispatchCreateTable(e engine.Engine, ast engine.AST, info engine.WriteInfo,
 	return finishStructured(e, ast, info, sel, resp)
 }
 
-func dispatchDropLike(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+func dispatchDropLike(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection, siDrop bool) (*pb.RewriteSQLResponse, bool, error) {
 	stmt := pb.StatementType_STATEMENT_TYPE_DROP_TABLE
 	switch info.Kind {
 	case engine.NodeDropView:
@@ -367,7 +391,9 @@ func dispatchDropLike(e engine.Engine, ast engine.AST, sql string, info engine.W
 			return resp, true, nil
 		}
 	}
-	if info.Multi {
+	// Contract V2 accepts a plain multi-table DROP TABLE, whose targets may mix
+	// storage-integrity and ordinary tables; everything else stays rejected.
+	if info.Multi && !siDrop {
 		rejectUnsupported(resp, "multi-table DROP/TRUNCATE is not supported")
 		return resp, true, nil
 	}
