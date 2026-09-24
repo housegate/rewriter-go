@@ -43,6 +43,7 @@ type SIArgs struct {
 	Tables              map[string]SITable `json:"tables"`
 	ReadMode            string             `json:"read_mode,omitempty"` // "" | "SAFE" | "UNSAFE_LATEST" | "INVALID_99"
 	ReservedRowIDColumn string             `json:"reserved_row_id_column,omitempty"`
+	ReservedDatabases   []string           `json:"reserved_databases,omitempty"` // contract V2 only
 }
 
 // SIDynamic is the dynamic-args block of a case.
@@ -68,10 +69,13 @@ type SIDynamic struct {
 //     or allow_sql_divergence plus both want_sql_go and want_sql_cpp when they
 //     legitimately differ;
 //   - want_sql_contains is an additional assertion only, and may not contain a
-//     substring that is already present in the input SQL.
+//     substring that is already present in the input SQL;
+//   - every case names the storage-integrity contract it is sent under,
+//     contract_version "V1" or "V2" (R8).
 type SICase struct {
 	Name                string            `json:"name"`
 	SQL                 string            `json:"sql"`
+	ContractVersion     string            `json:"contract_version,omitempty"`
 	Dynamic             *SIDynamic        `json:"dynamic,omitempty"`
 	WantCode            string            `json:"want_code,omitempty"`
 	WantStmt            string            `json:"want_stmt,omitempty"`
@@ -122,6 +126,13 @@ func loadSICorpusFile(path string) ([]SICase, error) {
 	return cases, nil
 }
 
+// siContractByName maps a case's contract_version to the value the runners
+// send in StorageIntegrityArgs.contract_version.
+var siContractByName = map[string]pb.StorageIntegrityContractVersion{
+	"V1": pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+	"V2": pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2,
+}
+
 var siKnownCodes = map[string]pb.RewriteCode{
 	"Success":               pb.RewriteCode_Success,
 	"SyntaxError":           pb.RewriteCode_SyntaxError,
@@ -150,6 +161,9 @@ func ValidateSICorpus(cases []SICase) []string {
 		seen[c.Name] = true
 		if strings.TrimSpace(c.SQL) == "" {
 			add("R2", "sql must be non-empty")
+		}
+		if _, ok := siContractByName[c.ContractVersion]; !ok {
+			add("R8", fmt.Sprintf("contract_version must be \"V1\" or \"V2\", got %q", c.ContractVersion))
 		}
 		if c.WantCode == "" {
 			add("R6", "want_code must be non-empty")
@@ -228,9 +242,9 @@ func siContainsEquivalent(sql, sub string) bool {
 // Intentional updates require paired PRs, an explicit byte-for-byte cmp, and a
 // recorded SHA-256 in each PR description.
 const (
-	SICorpusFingerprint uint64 = 4366038644618079701
-	SICorpusBytes       int    = 232837
-	SICorpusCases       int    = 237
+	SICorpusFingerprint uint64 = 7051648083520101593
+	SICorpusBytes       int    = 254170
+	SICorpusCases       int    = 256
 )
 
 // siCorpusFingerprint is FNV-1a/64 over the exact file bytes, mirrored by

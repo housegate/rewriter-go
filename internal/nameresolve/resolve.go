@@ -293,9 +293,11 @@ func LookupStorageIntegrity(db, table string, a *pb.RewriteTableDynamicArgs) (*p
 }
 
 // LookupStorageIntegrityPhysical reports whether the caller addressed one of
-// the protocol-owned safe/unsafe physical table names directly. Those names are
-// never part of the public SQL surface, even when the physical database is not
-// listed in known_physical_databases.
+// the protocol-owned safe/unsafe physical table names directly, or (contract
+// V2) any table in a reserved_databases namespace. Those names are never part
+// of the public SQL surface, even when the physical database is not listed in
+// known_physical_databases. The logical key is empty for a reserved-database
+// hit that no table-map entry names.
 func LookupStorageIntegrityPhysical(db, table string, a *pb.RewriteTableDynamicArgs) (string, bool) {
 	if a == nil || table == "" {
 		return "", false
@@ -318,11 +320,12 @@ func LookupStorageIntegrityPhysical(db, table string, a *pb.RewriteTableDynamicA
 			}
 		}
 	}
-	return "", false
+	return "", storageIntegrityReservedDatabase(effectiveDB, a)
 }
 
 // IsStorageIntegrityPhysicalDatabase reports whether db is one of the
-// configured safe/unsafe physical namespaces. The reservation is database-wide:
+// configured safe/unsafe physical namespaces, or (contract V2) one of
+// reserved_databases. The reservation is database-wide:
 // once a database hosts a protocol-owned SI table, no user-authored SQL may
 // address any object in that database directly (including table functions and
 // database-scope DDL/DCL).
@@ -341,7 +344,7 @@ func IsStorageIntegrityPhysicalDatabase(db string, a *pb.RewriteTableDynamicArgs
 			}
 		}
 	}
-	return false
+	return storageIntegrityReservedDatabase(db, a)
 }
 
 // IsStorageIntegrityLogicalDatabase reports whether db owns at least one
@@ -365,9 +368,10 @@ func IsStorageIntegrityLogicalDatabase(db string, a *pb.RewriteTableDynamicArgs)
 }
 
 // StorageIntegrityPhysicalDatabases returns the configured protocol-owned
-// safe/unsafe database namespaces in deterministic order. It is used to attach
-// conservative SI classification metadata when a table-function database
-// expression cannot be resolved statically.
+// safe/unsafe database namespaces, plus (contract V2) reserved_databases, in
+// deterministic order. It is used to attach conservative SI classification
+// metadata when a table-function database expression cannot be resolved
+// statically.
 func StorageIntegrityPhysicalDatabases(a *pb.RewriteTableDynamicArgs) []string {
 	seen := map[string]bool{}
 	for _, tbl := range a.GetStorageIntegrity().GetTables() {
@@ -379,6 +383,11 @@ func StorageIntegrityPhysicalDatabases(a *pb.RewriteTableDynamicArgs) []string {
 			if ok {
 				seen[db] = true
 			}
+		}
+	}
+	for _, db := range a.GetStorageIntegrity().GetReservedDatabases() {
+		if storageIntegrityReservedDatabase(db, a) {
+			seen[db] = true
 		}
 	}
 	out := make([]string, 0, len(seen))
@@ -488,6 +497,13 @@ func ValidateStorageIntegrity(a *pb.RewriteTableDynamicArgs) error {
 		}
 		if _, _, ok := exactQualifiedTable(tbl.GetUnsafeTable()); !ok {
 			return fmt.Errorf("storage-integrity table %s unsafe_table %s must have exact <database>.<table> shape", key, tbl.GetUnsafeTable())
+		}
+	}
+	if si.GetContractVersion() == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2 {
+		for _, db := range si.GetReservedDatabases() {
+			if !simpleIdentifier(db) {
+				return fmt.Errorf("storage-integrity reserved_databases entry %q must be a simple identifier", db)
+			}
 		}
 	}
 	return nil

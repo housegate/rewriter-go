@@ -66,7 +66,8 @@ func (c SICase) options() []*pb.RewriteOption {
 			Tables:              map[string]*pb.StorageIntegrityArgs_Table{},
 			ReadMode:            siReadModeByName[si.ReadMode],
 			ReservedRowIdColumn: si.ReservedRowIDColumn,
-			ContractVersion:     pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+			ContractVersion:     siContractByName[c.ContractVersion],
+			ReservedDatabases:   si.ReservedDatabases,
 		}
 		for k, t := range si.Tables {
 			args.Tables[k] = &pb.StorageIntegrityArgs_Table{
@@ -77,6 +78,21 @@ func (c SICase) options() []*pb.RewriteOption {
 	}
 	return []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
 		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{DynamicArgs: da}}}}
+}
+
+// wantContractAck is the acknowledgement a case expects: its own version once
+// the surface is active (V1 with a non-empty table map, or any V2 request),
+// unless the case pins a pre-acknowledgement rejection.
+func (c SICase) wantContractAck() pb.StorageIntegrityContractVersion {
+	if c.Dynamic == nil || c.Dynamic.StorageIntegrity == nil || c.WantNoContractAck {
+		return pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
+	}
+	version := siContractByName[c.ContractVersion]
+	if version == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2 ||
+		len(c.Dynamic.StorageIntegrity.Tables) > 0 {
+		return version
+	}
+	return pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
 }
 
 // TestStorageIntegrityGolden is the Spec G parity gate. Cases are driven
@@ -132,14 +148,8 @@ func TestStorageIntegrityGolden(t *testing.T) {
 				}
 				return
 			}
-			if c.Dynamic != nil && c.Dynamic.StorageIntegrity != nil && len(c.Dynamic.StorageIntegrity.Tables) > 0 {
-				want := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1
-				if c.WantNoContractAck {
-					want = pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
-				}
-				if res.StorageIntegrityContractVersion != want {
-					t.Errorf("storage_integrity_contract_version = %v, want %v", res.StorageIntegrityContractVersion, want)
-				}
+			if want := c.wantContractAck(); res.StorageIntegrityContractVersion != want {
+				t.Errorf("storage_integrity_contract_version = %v, want %v", res.StorageIntegrityContractVersion, want)
 			}
 			if c.WantCode != "" && res.Code != siCodeByName[c.WantCode] {
 				t.Errorf("code = %v, want %s (%s)", res.Code, c.WantCode, res.Message)

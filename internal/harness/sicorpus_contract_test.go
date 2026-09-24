@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
 // TestSICorpusContract is the Spec J D3 gate: the shared corpus must satisfy
@@ -76,6 +78,7 @@ func TestLoadSICorpus_RequiresExactlyOneJSONValue(t *testing.T) {
 
 func TestValidateSICorpus_RejectsVacuousContains(t *testing.T) {
 	got := ValidateSICorpus([]SICase{{
+		ContractVersion: "V1",
 		Name:            "vacuous",
 		SQL:             "SELECT a FROM other.u",
 		WantCode:        "Success",
@@ -89,6 +92,7 @@ func TestValidateSICorpus_RejectsVacuousContains(t *testing.T) {
 
 func TestValidateSICorpus_RejectsDivergenceWithoutPerEnginePins(t *testing.T) {
 	got := ValidateSICorpus([]SICase{{
+		ContractVersion:    "V1",
 		Name:               "half-pinned",
 		SQL:                "SELECT a FROM db1.t",
 		WantCode:           "Success",
@@ -101,7 +105,7 @@ func TestValidateSICorpus_RejectsDivergenceWithoutPerEnginePins(t *testing.T) {
 }
 
 func TestValidateSICorpus_RejectsSuccessWithoutWantSQL(t *testing.T) {
-	got := ValidateSICorpus([]SICase{{Name: "unpinned", SQL: "SELECT 1", WantCode: "Success"}})
+	got := ValidateSICorpus([]SICase{{ContractVersion: "V1", Name: "unpinned", SQL: "SELECT 1", WantCode: "Success"}})
 	if len(got) != 1 || !strings.Contains(got[0], "must carry want_sql") {
 		t.Fatalf("want one R3 violation, got %v", got)
 	}
@@ -109,7 +113,8 @@ func TestValidateSICorpus_RejectsSuccessWithoutWantSQL(t *testing.T) {
 
 func TestValidateSICorpus_RejectsRejectWithoutMessage(t *testing.T) {
 	got := ValidateSICorpus([]SICase{{
-		Name: "silent-reject", SQL: "OPTIMIZE TABLE db1.t",
+		ContractVersion: "V1",
+		Name:            "silent-reject", SQL: "OPTIMIZE TABLE db1.t",
 		WantCode: "UnsupportedStatement", Reject: true,
 	}})
 	if len(got) != 1 || !strings.Contains(got[0], "want_message_contains") {
@@ -120,7 +125,8 @@ func TestValidateSICorpus_RejectsRejectWithoutMessage(t *testing.T) {
 func TestValidateSICorpus_RequiresExplicitKnownWantCode(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		got := ValidateSICorpus([]SICase{{
-			Name: "missing-code", SQL: "SELECT 1", WantSQL: "SELECT 1",
+			ContractVersion: "V1",
+			Name:            "missing-code", SQL: "SELECT 1", WantSQL: "SELECT 1",
 		}})
 		if len(got) != 1 || !strings.Contains(got[0], "R6") || !strings.Contains(got[0], "non-empty") {
 			t.Fatalf("want one missing-code R6 violation, got %v", got)
@@ -129,7 +135,8 @@ func TestValidateSICorpus_RequiresExplicitKnownWantCode(t *testing.T) {
 
 	t.Run("unknown", func(t *testing.T) {
 		got := ValidateSICorpus([]SICase{{
-			Name: "unknown-code", SQL: "OPTIMIZE TABLE db1.t", WantCode: "NotARewriteCode",
+			ContractVersion: "V1",
+			Name:            "unknown-code", SQL: "OPTIMIZE TABLE db1.t", WantCode: "NotARewriteCode",
 			Reject: true, WantMessageContains: "unsupported",
 		}})
 		if len(got) != 1 || !strings.Contains(got[0], "R6") || !strings.Contains(got[0], "unknown want_code") {
@@ -154,7 +161,8 @@ func TestValidateSICorpus_RejectForbidsSQLPinsAndDivergence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := SICase{
-				Name: "reject", SQL: "OPTIMIZE TABLE db1.t", WantCode: "UnsupportedStatement",
+				ContractVersion: "V1",
+				Name:            "reject", SQL: "OPTIMIZE TABLE db1.t", WantCode: "UnsupportedStatement",
 				Reject: true, WantMessageContains: "unsupported",
 			}
 			tt.mutate(&c)
@@ -176,7 +184,8 @@ func TestValidateSICorpus_RejectsCanonicalVacuousContains(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ValidateSICorpus([]SICase{{
-				Name: "vacuous", SQL: tt.sql, WantCode: "Success",
+				ContractVersion: "V1",
+				Name:            "vacuous", SQL: tt.sql, WantCode: "Success",
 				WantSQL: `SELECT * FROM phys."db1.t"`, WantSQLContains: []string{tt.contains},
 			}})
 			if len(got) != 1 || !strings.Contains(got[0], "R4") {
@@ -254,4 +263,50 @@ func TestSICorpusLegacyCoverageReport(t *testing.T) {
 	}
 	t.Logf("pre-fix vacuous: %v", vacuous)
 	t.Logf("pre-fix dead want_sql: %v", dead)
+}
+
+func TestValidateSICorpus_RequiresKnownContractVersion(t *testing.T) {
+	for _, version := range []string{"", "V0", "v2", "V3"} {
+		t.Run("contract_version="+version, func(t *testing.T) {
+			got := ValidateSICorpus([]SICase{{
+				Name: "versioned", SQL: "SELECT 1", ContractVersion: version,
+				WantCode: "Success", WantSQL: "SELECT 1",
+			}})
+			if len(got) != 1 || !strings.Contains(got[0], "R8") || !strings.Contains(got[0], "contract_version") {
+				t.Fatalf("want one R8 violation, got %v", got)
+			}
+		})
+	}
+	for _, version := range []string{"V1", "V2"} {
+		got := ValidateSICorpus([]SICase{{
+			Name: "versioned", SQL: "SELECT 1", ContractVersion: version,
+			WantCode: "Success", WantSQL: "SELECT 1",
+		}})
+		if len(got) != 0 {
+			t.Fatalf("contract_version %s: want no violation, got %v", version, got)
+		}
+	}
+}
+
+func TestSICaseOptionsCarryTheCaseContractVersion(t *testing.T) {
+	for name, want := range map[string]pb.StorageIntegrityContractVersion{
+		"V1": pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+		"V2": pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2,
+	} {
+		c := SICase{ContractVersion: name, Dynamic: &SIDynamic{StorageIntegrity: &SIArgs{Tables: map[string]SITable{}}}}
+		got := c.options()[0].GetTableNameArgs().GetDynamicArgs().GetStorageIntegrity().GetContractVersion()
+		if got != want {
+			t.Fatalf("options() contract_version for %s = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestSICaseOptionsCarryReservedDatabases(t *testing.T) {
+	c := SICase{ContractVersion: "V2", Dynamic: &SIDynamic{StorageIntegrity: &SIArgs{
+		Tables: map[string]SITable{}, ReservedDatabases: []string{"hg_safe", "hg_unsafe", "hg_promote"},
+	}}}
+	got := c.options()[0].GetTableNameArgs().GetDynamicArgs().GetStorageIntegrity().GetReservedDatabases()
+	if !reflect.DeepEqual(got, []string{"hg_safe", "hg_unsafe", "hg_promote"}) {
+		t.Fatalf("options() reserved_databases = %v", got)
+	}
 }

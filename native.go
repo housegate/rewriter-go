@@ -71,7 +71,7 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 	if resp.GetSqlAfterRewrite() == "" {
 		resp.SqlAfterRewrite = sql
 	}
-	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		handlers.AnnotateStorageIntegrityRejectAST(e, resp, ast, sql, sel)
 	}
 }
@@ -92,7 +92,7 @@ func sealStorageIntegrityHandlerError(
 	sel nameresolve.Selection,
 	handlerErr error,
 ) (*pb.RewriteSQLResponse, error) {
-	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		return nil, handlerErr
 	}
 	resp.Code = pb.RewriteCode_UnsupportedStatement
@@ -119,13 +119,18 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 	return r
 }
 
-// StorageIntegrityUnmodelledMessage is returned when a request carries a
-// non-empty storage_integrity.tables map and execution reaches the
-// unmodelled-statement pass-through. The rewriter cannot prove such a
-// statement is harmless to the protocol-owned namespaces, so it refuses to
-// forward it (Spec I D1). Enumerated classes replace this text with a more
-// specific one; see handlers.AnnotateStorageIntegrityReject.
+// StorageIntegrityUnmodelledMessage is returned when a request activates the
+// storage-integrity surface (a V1 request with a non-empty tables map, or any
+// V2 request) and execution reaches the unmodelled-statement pass-through.
+// The rewriter cannot prove such a statement is harmless to the
+// protocol-owned namespaces, so it refuses to forward it (Spec I D1).
+// Enumerated classes replace this text with a more specific one; see
+// handlers.AnnotateStorageIntegrityReject.
 const StorageIntegrityUnmodelledMessage = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+
+// StorageIntegrityContractMessage rejects an active storage-integrity request
+// whose contract_version this engine does not implement.
+const StorageIntegrityContractMessage = "storage-integrity contract version V1 or V2 is required"
 
 // doRewrite is the engine-level rewrite pipeline shared by NativeRewriter
 // (per-connection, options via callback) and Service (stateless, options
@@ -136,10 +141,12 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
 	siVersion := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
 	selection := nameresolve.FindActive(opts)
-	if selection.Mode == nameresolve.ModeDynamic && len(selection.Dynamic.GetStorageIntegrity().GetTables()) > 0 {
-		if selection.Dynamic.GetStorageIntegrity().GetContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+	if selection.Mode == nameresolve.ModeDynamic && nameresolve.StorageIntegritySurfaceActive(selection.Dynamic) {
+		version := selection.Dynamic.GetStorageIntegrity().GetContractVersion()
+		if version != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 &&
+			version != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2 {
 			resp.Code = pb.RewriteCode_InvalidRewriteRequest
-			resp.Message = "storage-integrity contract version V1 is required"
+			resp.Message = StorageIntegrityContractMessage
 			return resp, nil
 		}
 		if err := nameresolve.ValidateStorageIntegrity(selection.Dynamic); err != nil {
@@ -147,7 +154,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 			resp.Message = err.Error()
 			return resp, nil
 		}
-		siVersion = pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1
+		siVersion = version
 		resp.StorageIntegrityContractVersion = siVersion
 	}
 	ast, err := e.ParseOne(sql)
@@ -175,7 +182,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	// literal/comment decoys before it invokes the engine tokenizer. Exact
 	// grammar is eligible for D2 object attribution; malformed prefixes and
 	// classifier failures stay generic.
-	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		liveViewClass, classifyErr := engine.ClassifyLiveView(e, ast, sql)
 		if classifyErr != nil || liveViewClass != engine.NotLiveView {
 			resp.Code = pb.RewriteCode_UnsupportedStatement
@@ -248,7 +255,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	// active storage-integrity contract this branch is a refusal instead:
 	// reaching it means no handler modelled the statement, so no handler
 	// checked it against the protocol-owned namespaces (Spec I D1).
-	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1 {
+	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = StorageIntegrityUnmodelledMessage
 		finalize(resp, ast, sql, ec, siVersion, e, selection)

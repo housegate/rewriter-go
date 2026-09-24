@@ -149,10 +149,11 @@ func TestInspectWrite_dropMultiTable(t *testing.T) {
 	if !info.Multi {
 		t.Errorf("Multi = false, want true for multi-table DROP")
 	}
-	// writeSlots visits only names[0] — the handler rejects multi-table DROP before
-	// rewriting, but InspectWrite must still expose exactly one coherent slot.
-	if len(info.Slots) != 1 {
-		t.Errorf("len(Slots) = %d, want 1 (first name only)", len(info.Slots))
+	// writeSlots visits every name, one role per position. Only the V2
+	// storage-integrity DROP path rewrites a multi-table DROP; every other
+	// path still rejects it before rewriting.
+	if len(info.Slots) != 2 || info.Slots[0].Role != RoleDrop || info.Slots[1].Role != "drop#1" {
+		t.Errorf("Slots = %+v, want roles drop, drop#1", info.Slots)
 	}
 }
 

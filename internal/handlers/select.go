@@ -102,7 +102,7 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if err != nil {
 		return nil, nil, err
 	}
-	storageIntegrityActive := sel.Mode == nameresolve.ModeDynamic && len(sel.Dynamic.GetStorageIntegrity().GetTables()) > 0
+	storageIntegrityActive := sel.Mode == nameresolve.ModeDynamic && nameresolve.StorageIntegritySurfaceActive(sel.Dynamic)
 	if storageIntegrityActive {
 		for i, target := range originals {
 			semantic, ok := engine.SemanticTableTarget(e, target)
