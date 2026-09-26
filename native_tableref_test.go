@@ -1743,3 +1743,67 @@ func TestTableRef_Residual4OperandRegion(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// residual5SignSQL is every ClickHouse-confirmed read through a unary sign
+// before an IN operand (ClickHouse drops a unary plus): residual round 5,
+// open 1.
+var residual5SignSQL = []string{
+	"ALTER TABLE db1.o DELETE WHERE a IN +`db2.x`",
+	"ALTER TABLE db1.o DELETE WHERE a IN + (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE a IN + + `db2.x`",
+	"ALTER TABLE db1.o DELETE WHERE a NOT IN +`db2.x`",
+	"ALTER TABLE db1.o DELETE WHERE a IN -`db2.x`",
+	"ALTER TABLE db1.o UPDATE b = 1 WHERE key IN +`db2.x`",
+	"ALTER TABLE db1.o UPDATE b = a IN +`db2.x` WHERE 1",
+	"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN + \"db2.y\"",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT a IN +`db2.x`",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 MATERIALIZED a IN +`db2.x`",
+	"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a IN +`db2.x`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 3 IN +`db2.y`",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (3 IN +`db2.y`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (3 IN +`db2.y`)",
+	"ALTER TABLE db1.o DELETE WHERE a IN [1, 2], UPDATE b = 1 WHERE key IN (`db2.x`)",
+}
+
+// TestTableRef_Residual5SignsAndSplitBrackets pins residual round 5: a sign
+// is never an IN operand region by itself (open 1), and a Raw ALTER action
+// polyglot split at a comma inside a bracket group is scanned whole again
+// (open 2) while every action keeps its own refusal.
+func TestTableRef_Residual5SignsAndSplitBrackets(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range residual5SignSQL {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		cases = append(cases,
+			tablerefCase{name: "phys/" + "+phys", si: si, sql: "ALTER TABLE db1.o DELETE WHERE a IN +phys.`db2.x`",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "param/+{p:Identifier}", si: si, sql: "ALTER TABLE db1.o DELETE WHERE a IN +{p:Identifier}",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "query parameters are not supported"})
+		literals := []string{"ALTER TABLE db1.o DELETE WHERE a IN -1", "ALTER TABLE db1.o DELETE WHERE a IN (-1, -2)"}
+		if !si {
+			// With the SI surface active a unary plus is refused anywhere in a
+			// Raw DELETE (`a = +1` too) — pre-existing, not this rule.
+			literals = append(literals, "ALTER TABLE db1.o DELETE WHERE a IN +1", "ALTER TABLE db1.o DELETE WHERE a IN (+1, -2)")
+		}
+		for _, sql := range literals {
+			cases = append(cases, tablerefCase{name: "literal/" + sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}})
+		}
+		for _, list := range []string{"[1, 2]", "[1, 2, 3]"} {
+			for _, sql := range []string{
+				"ALTER TABLE db1.o DELETE WHERE a IN " + list,
+				"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN " + list,
+				"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT a IN " + list,
+				"ALTER TABLE db1.o MODIFY COLUMN b UInt8 MATERIALIZED a IN " + list,
+				"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN " + list,
+				"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a IN " + list + ")",
+			} {
+				cases = append(cases, tablerefCase{name: "bracket/" + sql, sql: sql, si: si,
+					wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}})
+			}
+		}
+	}
+	runTablerefCases(t, cases)
+}

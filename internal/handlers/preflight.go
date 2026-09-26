@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strings"
+
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -253,11 +255,14 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 	if err != nil {
 		return false, err
 	}
-	for _, text := range texts {
-		if engine.OpaqueTextIsUngoverned(e, text) {
-			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
-			return true, nil
-		}
+	// The Raw actions of one statement are scanned as ONE text joined with
+	// ", ": polyglot splits a Raw action at a comma inside a bracket group
+	// (`DELETE WHERE a IN [1, 2]` becomes "DELETE WHERE a IN[1" and "2]"), and
+	// joining restores the group. OpaqueTextIsUngoverned still judges every
+	// top-level action on its own (residual round 5).
+	if len(texts) > 0 && engine.OpaqueTextIsUngoverned(e, strings.Join(texts, ", ")) {
+		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+		return true, nil
 	}
 	if text, ok, ierr := engine.OpaqueInsertQueryText(ast); ierr != nil {
 		return false, ierr

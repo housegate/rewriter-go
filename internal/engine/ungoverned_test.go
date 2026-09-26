@@ -133,9 +133,10 @@ func TestOpaqueInRuleCoversEverySpelling(t *testing.T) {
 		"CASE WHEN a THEN 1 END ", "NOT ", "not ", "GLOBAL ", "- ", "(", ""}
 	refused := []string{"p", "`db2.x`", `"db2.x"`, "phys.x", `phys."db2.x"`, "hg_safe.db1__t", "{p:Identifier}",
 		"((db1.p))", "(`db2.x`)", "(SELECT 1)", "(1, b)", "(b, 1)", "(42, (SELECT 1))", "[1, b]", "tuple(1, b)",
-		"`partition`", "(1, 2 + b)", "b"}
+		"`partition`", "(1, 2 + b)", "b",
+		"+p", "+`db2.x`", "+ (`db2.x`)", "+ + `db2.x`", "+ + p", "-p", "-`db2.x`", "- (p)", "+{p:Identifier}", "+phys.x"}
 	literals := []string{"(1, 2)", "(-1, +2)", "('x', 'y')", "(NULL, TRUE, false)", "((1, 2), (3, 4))",
-		"[1, 2]", "([1, 2], [3])", "1", "'x'", "NULL", "-1"}
+		"[1, 2]", "([1, 2], [3])", "1", "'x'", "NULL", "-1", "+1", "(+1, -2)", "+ + 1", "- (1, 2)", "+[1, 2]"}
 	type position struct {
 		name string
 		wrap string // %s = expression
@@ -201,8 +202,9 @@ func TestOpaqueInRuleCoversEverySpelling(t *testing.T) {
 // `a IN partition` is a syntax error in every expression position, while the
 // quoted name reads the table). A tuple( / array( literal constructor directly
 // after IN contributes its argument group; as a callable's argument it is a
-// named token of the region and is refused. A missing or unterminated region
-// fails closed.
+// named token of the region and is refused. A sign is never a region by
+// itself: a run of signs extends to the group or token after it (residual
+// round 5). A missing or unterminated region fails closed.
 func TestOpaqueInRegionEdges(t *testing.T) {
 	e := newTestEngine(t)
 	for text, want := range map[string]bool{
@@ -224,6 +226,23 @@ func TestOpaqueInRegionEdges(t *testing.T) {
 		"ALTER TABLE db1.o DELETE WHERE in(42, tuple(1, 2))":             true,
 		"ALTER TABLE db1.o DELETE WHERE notIn(42, [1, 2])":               false,
 		"ALTER TABLE db1.o DELETE WHERE notIn":                           true,
+		"ALTER TABLE db1.o DELETE WHERE a IN +":                          true,
+		"ALTER TABLE db1.o DELETE WHERE (a IN +)":                        true,
+		"ALTER TABLE db1.o DELETE WHERE a IN + + ":                       true,
+		"ALTER TABLE db1.o DELETE WHERE a IN + (1, 2":                    true,
+		"ALTER TABLE db1.o DELETE WHERE a IN -tuple(1, 2)":               false,
+		"ALTER TABLE db1.o DELETE WHERE a IN +tuple(1, b)":               true,
+		// Raw ALTER actions are scanned as one text joined with ", ": a
+		// bracket group polyglot split at its comma is whole again, and every
+		// action keeps its own refusals.
+		"DELETE WHERE a IN[1, 2]":                                                         false,
+		"DELETE WHERE a IN[1, 2], UPDATE b = 1 WHERE key IN (`db2.x`)":                    true,
+		"DELETE WHERE a IN[1, 2], FETCH PARTITION tuple() FROM '/x'":                      true,
+		"ADD PROJECTION p(SELECT a ORDER BY b), DELETE WHERE a IN[1, 2]":                  false,
+		"ADD PROJECTION p(SELECT a ORDER BY b), FETCH PARTITION 1 FROM '/x'":              true,
+		"ADD PROJECTION p(SELECT a ORDER BY b), MODIFY COLUMN b UInt8 DEFAULT (SELECT 1)": true,
+		"DELETE WHERE 1, ADD PROJECTION p(SELECT a ORDER BY b)":                           false,
+		"DELETE WHERE 1, ADD PROJECTION p(SELECT a FROM db1.p)":                           true,
 	} {
 		if got := OpaqueTextIsUngoverned(e, text); got != want {
 			t.Errorf("OpaqueTextIsUngoverned(%q) = %v, want %v", text, got, want)

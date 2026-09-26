@@ -216,27 +216,35 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 	if tokensHoldIdentifierParameter(toks) {
 		return true
 	}
-	if opaqueProjectionBody(toks) {
-		return opaqueProjectionIsUngoverned(toks)
-	}
-	for i, tok := range toks {
-		if OpaqueInRefusedAt(toks, i) {
-			return true
-		}
-		if !opaqueKeyword(tok) {
+	// Each top-level action is judged on its own, so a caller may pass the
+	// Raw actions of one statement joined with ", " (residual round 5: polyglot
+	// splits a Raw action at a comma inside a bracket group, and the joined
+	// text makes the group whole again) without one action's shape — an ADD
+	// PROJECTION body — changing how another is scanned.
+	for _, segment := range opaqueActionSegments(toks) {
+		if opaqueProjectionBody(segment) {
+			if opaqueProjectionIsUngoverned(segment) {
+				return true
+			}
 			continue
 		}
-		switch strings.ToUpper(tok.Text) {
-		case "SELECT":
-			return true
-		case "WITH":
-			if i+1 < len(toks) && strings.EqualFold(toks[i+1].Text, "NAME") {
-				continue // ALTER … FREEZE WITH NAME 'x'
+		for i, tok := range segment {
+			if OpaqueInRefusedAt(segment, i) {
+				return true
 			}
-			return true
+			if !opaqueKeyword(tok) {
+				continue
+			}
+			switch strings.ToUpper(tok.Text) {
+			case "SELECT":
+				return true
+			case "WITH":
+				if i+1 < len(segment) && strings.EqualFold(segment[i+1].Text, "NAME") {
+					continue // ALTER … FREEZE WITH NAME 'x'
+				}
+				return true
+			}
 		}
-	}
-	for _, segment := range opaqueActionSegments(toks) {
 		if opaqueCrossTableAction(segment) {
 			return true
 		}
@@ -305,19 +313,32 @@ func OpaqueInRefusedAt(toks []rawToken, i int) bool {
 	return false
 }
 
-// opaqueInOperandRegion returns the operand region starting at toks[i]: the
-// bracket group opening there, the argument group of a `tuple(` / `array(`
-// literal constructor, or the single token. ok=false for an unterminated
-// group.
+// opaqueInOperandRegion returns the operand region starting at toks[i]: any
+// run of signs, then the bracket group opening after it, the argument group
+// of a `tuple(` / `array(` literal constructor, or the single token. ok=false
+// for a sign run with nothing after it or an unterminated group.
 func opaqueInOperandRegion(toks []rawToken, i int) (region []rawToken, ok bool) {
+	// A sign is never a region by itself (residual round 5: ClickHouse drops a
+	// unary plus, so `IN +t` reads table t): a maximal run of signs extends to
+	// the group or token after it, and the whole run is literal-checked.
+	start := i
+	for i < len(toks) && (toks[i].TokenType == "PLUS" || toks[i].TokenType == "DASH") {
+		i++
+	}
+	if i >= len(toks) {
+		return nil, false
+	}
+	signs := toks[start:i]
 	if toks[i].TokenType == "VAR" && (strings.EqualFold(toks[i].Text, "tuple") || strings.EqualFold(toks[i].Text, "array")) &&
 		i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
 		i++
 	}
 	switch toks[i].TokenType {
 	case "L_PAREN", "L_BRACKET":
+	case "R_PAREN", "R_BRACKET", "COMMA":
+		return nil, false // no operand at all (`IN +)`): fail closed
 	default:
-		return toks[i : i+1], true
+		return append(append([]rawToken{}, signs...), toks[i]), true
 	}
 	depth := 0
 	for j := i; j < len(toks); j++ {
@@ -327,7 +348,7 @@ func opaqueInOperandRegion(toks []rawToken, i int) (region []rawToken, ok bool) 
 		case "R_PAREN", "R_BRACKET":
 			depth--
 			if depth == 0 {
-				return toks[i : j+1], true
+				return append(append([]rawToken{}, signs...), toks[i:j+1]...), true
 			}
 		}
 	}
@@ -346,15 +367,17 @@ func opaqueInLiteralToken(tok rawToken) bool {
 }
 
 // opaqueActionSegments splits a token stream into its top-level
-// comma-separated ALTER actions.
+// comma-separated ALTER actions (commas inside parentheses or brackets do not
+// split). An ALTER … UPDATE tail also splits between its assignments, which
+// every per-segment rule tolerates.
 func opaqueActionSegments(toks []rawToken) [][]rawToken {
 	var out [][]rawToken
 	depth, start := 0, 0
 	for i, tok := range toks {
 		switch tok.TokenType {
-		case "L_PAREN":
+		case "L_PAREN", "L_BRACKET":
 			depth++
-		case "R_PAREN":
+		case "R_PAREN", "R_BRACKET":
 			if depth > 0 {
 				depth--
 			}
