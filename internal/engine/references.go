@@ -57,6 +57,9 @@ func CollectDatabaseReferenceSets(e Engine, ast AST, sql string) (all, blind []s
 		// USE / SHOW … FROM / EXISTS / SHOW CREATE / DESCRIBE / RENAME / EXCHANGE.
 		if info, err := ParseDBLevel(e, sql); err == nil {
 			add(info.DB)
+			for _, db := range ShowBodyDatabases(e, info, sql) {
+				add(db)
+			}
 		}
 		if t, err := ParseObjectTarget(e, sql); err == nil {
 			if t.ObjType == "DATABASE" {

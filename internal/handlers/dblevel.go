@@ -322,6 +322,14 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if rejectShowTargetStorageIntegrityNamespace(resp, sql, info, dyn) {
 			return resp, true, nil
 		}
+		if engine.ShowBodyIsUngoverned(e, info, sql) {
+			// Spec 2026-09-26 R7: the WHERE / LIKE body is forwarded as
+			// written, so SQL that could read a table there is refused.
+			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+			resp.SqlAfterRewrite = sql
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
+		}
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
 		}

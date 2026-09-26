@@ -277,3 +277,92 @@ func SpliceShowTable(e Engine, sql, replacement string) (string, error) {
 	}
 	return "", fmt.Errorf("engine: SHOW statement has no table clause")
 }
+
+// showColumnsFamily reports the SHOW kinds whose statement names a table and
+// may carry a WHERE / LIKE body ClickHouse evaluates as SQL.
+func showColumnsFamily(kind string) bool {
+	switch kind {
+	case "COLUMNS", "FIELDS", "INDEX", "INDEXES", "INDICES", "KEYS":
+		return true
+	}
+	return false
+}
+
+// showBodyTokens returns the tokens of a SHOW COLUMNS / INDEX family
+// statement's filter body: everything after its first top-level WHERE, LIKE
+// or ILIKE keyword. ok=false when the text does not tokenize.
+func showBodyTokens(e Engine, sql string) (body []rawToken, ok bool) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, false
+	}
+	depth := 0
+	for i, tok := range toks {
+		switch tok.TokenType {
+		case "L_PAREN":
+			depth++
+			continue
+		case "R_PAREN":
+			depth--
+			continue
+		}
+		if depth == 0 && opaqueKeyword(tok) &&
+			(strings.EqualFold(tok.Text, "WHERE") || strings.EqualFold(tok.Text, "LIKE") || strings.EqualFold(tok.Text, "ILIKE")) {
+			return toks[i+1:], true
+		}
+	}
+	return nil, true
+}
+
+// ShowBodyIsUngoverned reports whether a SHOW COLUMNS / INDEX(ES) / KEYS
+// statement's WHERE / LIKE / ILIKE body carries SQL the rewriter does not
+// rewrite (spec 2026-09-26 R7): a SELECT or WITH keyword, any name followed by
+// "(" (a function call — table functions and lookups included), an IN table
+// operand, or a quoted dotted name. A body of literals, plain column
+// identifiers and operators passes. A tokenizer failure is ungoverned.
+func ShowBodyIsUngoverned(e Engine, info DBLevelInfo, sql string) bool {
+	if info.Kind != DBShow || !showColumnsFamily(info.ShowWhat) {
+		return false
+	}
+	body, ok := showBodyTokens(e, sql)
+	if !ok {
+		return true
+	}
+	for i, tok := range body {
+		if tok.TokenType == "QUOTED_IDENTIFIER" && strings.Contains(tok.Text, ".") {
+			return true
+		}
+		if isNameTok(tok.TokenType) && i+1 < len(body) && body[i+1].TokenType == "L_PAREN" {
+			return true
+		}
+		if !opaqueKeyword(tok) {
+			continue
+		}
+		switch strings.ToUpper(tok.Text) {
+		case "SELECT", "WITH":
+			return true
+		case "IN":
+			if opaqueInOperandIsTable(body, i+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ShowBodyDatabases returns the qualifier of every `name.name` run in a SHOW
+// COLUMNS / INDEX family statement's filter body, for the T3 protected check.
+func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
+	if info.Kind != DBShow || !showColumnsFamily(info.ShowWhat) {
+		return nil
+	}
+	body, _ := showBodyTokens(e, sql)
+	var dbs []string
+	for i := 0; i+2 < len(body); i++ {
+		if isNameTok(body[i].TokenType) && body[i+1].TokenType == "DOT" && isNameTok(body[i+2].TokenType) &&
+			(i == 0 || body[i-1].TokenType != "DOT") {
+			dbs = append(dbs, body[i].Text)
+		}
+	}
+	return dbs
+}

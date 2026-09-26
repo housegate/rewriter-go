@@ -6,21 +6,32 @@ import (
 	"strings"
 )
 
-// sqlBearingSettings are the ClickHouse settings whose value is SQL evaluated
-// against tables (spec 2026-09-26 R5): a filter expression or a map of
-// per-table filter expressions ClickHouse parses and executes with the query.
-// A value there can read any table the rewriter never sees, so dynamic mode
-// refuses the setting name wherever it appears.
+// sqlBearingSettings are the ClickHouse settings dynamic mode refuses
+// wherever they appear (spec 2026-09-26 R5): those whose value is SQL
+// evaluated against tables (a filter expression, or a map of per-table filter
+// expressions ClickHouse parses and executes with the query — it can read any
+// table the rewriter never sees), and the dialect switches, which make
+// ClickHouse parse later SQL with a grammar the rewriter does not model (the
+// polyglot dialect transpiles `IN [db2.x]` into a table operand).
 var sqlBearingSettings = map[string]bool{
-	"additional_table_filters":     true,
-	"additional_result_filter":     true,
-	"parallel_replicas_custom_key": true,
+	"additional_table_filters":            true,
+	"additional_result_filter":            true,
+	"parallel_replicas_custom_key":        true,
+	"dialect":                             true,
+	"polyglot_dialect":                    true,
+	"allow_experimental_polyglot_dialect": true,
+	"allow_experimental_prql_dialect":     true,
+	"allow_experimental_kusto_dialect":    true,
 }
 
-// SQLBearingSetting reports whether name is one of sqlBearingSettings
-// (case-insensitively, so a spelling ClickHouse might accept is never let
-// through).
-func SQLBearingSetting(name string) bool { return sqlBearingSettings[strings.ToLower(name)] }
+// SQLBearingSetting reports whether name is one of sqlBearingSettings or any
+// other setting whose name ends in "_dialect" (case-insensitively, so a
+// spelling ClickHouse might accept is never let through). A quoted name
+// arrives already decoded.
+func SQLBearingSetting(name string) bool {
+	lower := strings.ToLower(name)
+	return sqlBearingSettings[lower] || strings.HasSuffix(lower, "_dialect")
+}
 
 // SettingAssignment is one `name = value` of a SET statement or a query-level
 // SETTINGS clause. PlainValue reports a value that is a numeric literal

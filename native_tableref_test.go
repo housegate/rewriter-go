@@ -1395,3 +1395,94 @@ func TestTableRef_HousekeepingRows(t *testing.T) {
 		wantCode: pb.RewriteCode_UnsupportedStatement})
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_ResidualQuotedCallableIn pins residual 1 of the final
+// re-review: a quoted callable-IN name in opaque ALTER text is the same
+// function as its unquoted spelling, so the R2 scanner refuses it.
+func TestTableRef_ResidualQuotedCallableIn(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"ALTER TABLE db1.o DELETE WHERE `in`((a, 0), `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE \"notIn\"(a, `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE `globalNotIn`(a, `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE `nullIn`(a, (`db2.x`))",
+			"ALTER TABLE db1.o DELETE WHERE `IN`(a, db1.p)",
+			"ALTER TABLE db1.o UPDATE b = 1 WHERE `in`(a, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE `in`(a, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT `in`(a, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 MATERIALIZED \"notIn\"(a, `db2.x`)",
+			"ALTER TABLE db1.o ADD PROJECTION pr (SELECT a), MODIFY COLUMN b UInt64 DEFAULT `in`(a, `db2.x`)",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ResidualShowColumnsBody pins residual 2: the WHERE / LIKE
+// body of a SHOW COLUMNS / INDEX family statement is scanned; a subquery, a
+// call, a table-operand IN or a quoted dotted name refuses the statement,
+// after the parameter and protected-database checks.
+func TestTableRef_ResidualShowColumnsBody(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct {
+			sql  string
+			code pb.RewriteCode
+			msg  string
+		}{
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM phys.`db2.x`) = 2", pb.RewriteCode_InvalidRewriteRequest, "protected database phys is not addressable"},
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM `db2.x`) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM remote('127.0.0.1','phys','db2.x')) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM merge('phys','^db2')) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW INDEX FROM o WHERE (SELECT count() FROM `db2.x`) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW EXTENDED FULL COLUMNS FROM o WHERE name IN `db2.x`", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o LIKE (SELECT max(name) FROM `db2.x`)", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE name = `db2.x`", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW KEYS FROM o WHERE lower(name) = 'a'", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE name = {p:Identifier}", pb.RewriteCode_InvalidRewriteRequest, "query parameters are not supported"},
+		} {
+			code, msg := c.code, c.msg
+			if si && code == pb.RewriteCode_UnsupportedStatement {
+				// db1 owns an SI table: the SI handler refuses the target first.
+				msg = "storage-integrity logical database db1 is not directly addressable"
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: code, wantMsg: msg, wantSQL: c.sql})
+		}
+		hg := tablerefCase{name: "hg_safe_body", sql: "SHOW COLUMNS FROM o WHERE (SELECT count() FROM hg_safe.db1__t) = 2", si: si,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database hg_safe is not addressable"}
+		if si {
+			hg.wantCode, hg.wantMsg = pb.RewriteCode_UnsupportedStatement, ""
+		}
+		cases = append(cases, hg)
+	}
+	cases = append(cases, tablerefCase{name: "plain_like_body", sql: "SHOW COLUMNS FROM o WHERE name LIKE 'a%'",
+		wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` WHERE name LIKE 'a%'"})
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ResidualDialectSettings pins residual 3: a dialect switch
+// changes how ClickHouse parses later SQL, so every dialect setting is refused
+// in the SET carve-out and in query-level SETTINGS.
+func TestTableRef_ResidualDialectSettings(t *testing.T) {
+	names := []string{"dialect", "polyglot_dialect", "allow_experimental_polyglot_dialect",
+		"allow_experimental_prql_dialect", "allow_experimental_kusto_dialect", "Dialect"}
+	var cases []tablerefCase
+	for _, n := range names {
+		msg := "table setting " + n + " is not accepted"
+		set := "SET " + n + " = 1"
+		cases = append(cases, tablerefCase{name: set, sql: set, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: set},
+			tablerefCase{name: "si/" + set, sql: set, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+		for _, si := range []bool{false, true} {
+			q := "SELECT * FROM db1.o SETTINGS " + n + " = 1"
+			cases = append(cases, tablerefCase{name: q, sql: q, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: q})
+		}
+	}
+	quoted := "SET `polyglot_dialect` = 'sqlite'"
+	cases = append(cases, tablerefCase{name: quoted, sql: quoted, wantCode: pb.RewriteCode_UnsupportedStatement,
+		wantMsg: "table setting polyglot_dialect is not accepted"})
+	runTablerefCases(t, cases)
+}

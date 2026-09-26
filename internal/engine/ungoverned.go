@@ -197,6 +197,9 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 		return opaqueProjectionIsUngoverned(toks)
 	}
 	for i, tok := range toks {
+		if opaqueCallableInHasTable(toks, i) {
+			return true
+		}
 		if !opaqueKeyword(tok) {
 			continue
 		}
@@ -211,13 +214,6 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 		case "IN":
 			if opaqueInOperandIsTable(toks, i+1) {
 				return true
-			}
-		}
-		if isCallableInName(tok) && i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
-			if groups, ok := rawCallArgGroups(toks, i+1); ok && len(groups) == 2 && len(groups[1]) > 0 {
-				if opaqueInOperandIsTable(groups[1], 0) {
-					return true
-				}
 			}
 		}
 	}
@@ -236,11 +232,23 @@ func opaqueKeyword(tok rawToken) bool {
 }
 
 func isCallableInName(tok rawToken) bool {
-	if tok.TokenType != "VAR" {
+	// A quoted name (`in`, "notIn") calls the same function as the bare
+	// spelling: ClickHouse resolves this family case-insensitively either way.
+	if tok.TokenType != "VAR" && tok.TokenType != "QUOTED_IDENTIFIER" {
 		return false
 	}
 	_, ok := canonicalCallableInName(strings.ToLower(tok.Text))
 	return ok
+}
+
+// opaqueCallableInHasTable reports a callable IN-family call at toks[i]
+// (bare or quoted name) whose second argument is a table operand.
+func opaqueCallableInHasTable(toks []rawToken, i int) bool {
+	if !isCallableInName(toks[i]) || i+1 >= len(toks) || toks[i+1].TokenType != "L_PAREN" {
+		return false
+	}
+	groups, ok := rawCallArgGroups(toks, i+1)
+	return ok && len(groups) == 2 && len(groups[1]) > 0 && opaqueInOperandIsTable(groups[1], 0)
 }
 
 // opaqueInOperandIsTable reports whether the tokens starting at i form a table
@@ -343,6 +351,9 @@ func opaqueProjectionBody(toks []rawToken) bool {
 func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 	selects := 0
 	for i, tok := range toks {
+		if opaqueCallableInHasTable(toks, i) {
+			return true
+		}
 		if !opaqueKeyword(tok) {
 			continue
 		}
@@ -354,13 +365,6 @@ func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 		case "IN":
 			if opaqueInOperandIsTable(toks, i+1) {
 				return true
-			}
-		}
-		if isCallableInName(tok) && i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
-			if groups, ok := rawCallArgGroups(toks, i+1); ok && len(groups) == 2 && len(groups[1]) > 0 {
-				if opaqueInOperandIsTable(groups[1], 0) {
-					return true
-				}
 			}
 		}
 	}
