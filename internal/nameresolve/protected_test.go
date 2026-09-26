@@ -32,10 +32,40 @@ func TestProtectedDatabase(t *testing.T) {
 	}
 }
 
+func TestProtectedDatabase_NilArgsAndSIActive(t *testing.T) {
+	if ProtectedDatabase("phys", nil) {
+		t.Fatal("nil dynamic args protect nothing")
+	}
+	// With the SI surface active, every SI physical and reserved database is
+	// protected even when neither database_map nor protected_databases names it.
+	a := &pb.RewriteTableDynamicArgs{
+		DatabaseMap: map[string]string{"db1": "phys"},
+		StorageIntegrity: &pb.StorageIntegrityArgs{
+			Tables: map[string]*pb.StorageIntegrityArgs_Table{
+				"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"},
+			},
+			ContractVersion:   pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2,
+			ReservedDatabases: []string{"hg_safe", "hg_unsafe", "hg_promote"},
+		},
+	}
+	for db, want := range map[string]bool{
+		"hg_safe": true, "hg_unsafe": true, "hg_promote": true, "phys": true, "db1": false,
+	} {
+		if got := ProtectedDatabase(db, a); got != want {
+			t.Errorf("SI-active ProtectedDatabase(%q) = %v, want %v", db, got, want)
+		}
+	}
+}
+
 func TestProtectedKnownPhysicalIsNotAPassThrough(t *testing.T) {
 	a := protectedArgs()
 	if _, ok := resolvePhysicalDatabase("phys", a); ok {
 		t.Fatal("phys is protected and must not resolve as a pass-through logical")
+	}
+	// A database_map value is protected too, with or without protected_databases.
+	mapped := &pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"db1": "phys"}, KnownPhysicalDatabases: []string{"phys"}}
+	if _, ok := resolvePhysicalDatabase("phys", mapped); ok {
+		t.Fatal("a database_map value must not resolve as a pass-through logical")
 	}
 	// An unprotected known-physical entry keeps the legacy pass-through role.
 	legacy := &pb.RewriteTableDynamicArgs{KnownPhysicalDatabases: []string{"shared"}}

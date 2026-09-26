@@ -189,22 +189,16 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	// one extractor and one fail-closed policy. This covers IN <table>, local
 	// catalog table functions, INSERT INTO FUNCTION, and CREATE TABLE engine
 	// sources before any command-specific generic reject can erase SI metadata.
-	namespaceRefs, err := engine.CollectNamespaceRefs(ast)
+	// An identifier IN operand (spec 2026-09-26 T4) is a real table target the
+	// SELECT pipeline rewrites through an ordinary TableDecision, not a
+	// namespace reference. Write-dispatched statements have no equivalent
+	// rewrite pass over every embedded read, so both kinds are checked here
+	// (e.g. a direct `in(id, hg_safe.db1__t)` inside an INSERT … SELECT or
+	// CREATE VIEW body).
+	namespaceRefs, err := engine.CollectNamespaceAndInTableRefs(ast)
 	if err != nil {
 		return nil, false, err
 	}
-	// An identifier/dot IN operand (spec 2026-09-26 T4) no longer arrives via
-	// CollectNamespaceRefs — it is now a real table target the SELECT pipeline
-	// rewrites through an ordinary TableDecision. Write-dispatched statements
-	// have no equivalent rewrite pass over their own embedded read bodies, so
-	// merge it back in here to keep the same fail-closed coverage (e.g. a
-	// direct `in(id, hg_safe.db1__t)` inside an INSERT ... SELECT or CREATE
-	// VIEW body) that this preflight had before.
-	inTableIdentRefs, err := engine.CollectInTableIdentifierRefs(ast)
-	if err != nil {
-		return nil, false, err
-	}
-	namespaceRefs = append(namespaceRefs, inTableIdentRefs...)
 	namespaceResp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 	if rejectStorageIntegrityNamespaces(e, namespaceResp, namespaceRefs, sel, pb.RewriteCode_UnsupportedStatement) {
 		return namespaceResp, true, nil

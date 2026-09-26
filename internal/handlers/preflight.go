@@ -56,21 +56,16 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
-	dbs, err := engine.CollectDatabaseReferences(e, ast, sql)
+	// T3. A database named only through an SI-handler-blind position (a
+	// string-lookup argument, a parenthesized IN operand) is refused even
+	// while the storage-integrity surface is active, unlike an ordinary table
+	// position, which defers to the SI handlers below.
+	dbs, blindDBs, err := engine.CollectDatabaseReferenceSets(e, ast, sql)
 	if err != nil {
 		return nil, false, err
 	}
 	if ctx := sel.Dynamic.GetUpstreamLogicalDatabaseInContext(); ctx != "" {
 		dbs = append(dbs, ctx)
-	}
-	// A database qualifier discovered only via a position no SI handler
-	// classifies as a table reference (a joinGet/dictGet/hasColumnInTable
-	// string-lookup argument, or a parenthesized single-element IN-list) must
-	// reject even while the storage-integrity surface is active -- unlike an
-	// ordinary table position, which defers to those handlers below.
-	blindDBs, err := engine.CollectSIHandlerBlindDatabaseReferences(ast)
-	if err != nil {
-		return nil, false, err
 	}
 	unconditional := make(map[string]bool, len(blindDBs))
 	for _, db := range blindDBs {
@@ -187,22 +182,17 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
-	// T6 mechanism (a) (spec 2026-09-26, controller ruling 2 / Task 7 fix
-	// round 2): one generic, deterministic walk over the whole statement's
-	// structured AST finds every string-lookup call reachable through an
-	// actual "function" node — SELECT bodies, INSERT/CTAS/VIEW embedded
-	// bodies, structured UPDATE/DELETE, IN subqueries, CREATE TABLE column
-	// DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL expressions, PARTITION BY/TTL/
-	// CONSTRAINT CHECK expressions, and everywhere else a "function" node can
-	// appear — with no per-position collector needed (this replaces fix
-	// round 1's now-deleted CollectAlterMutationStringLookups/
-	// CollectColumnDefinitionStringLookups). joinGet/dictGet-family calls are
-	// refused wherever found (a strict superset of what rewriteSelectCore's
-	// own, still-present, now largely redundant but harmless joinGet/dictGet
-	// handling reaches). hasColumnInTable is refused everywhere EXCEPT when
-	// StringLookupCalls marks it InSelectBody — reachable from a select/
-	// union/intersect/except subtree — where rewriteSelectCore's own rewrite
-	// pipeline owns it instead.
+	// T6: one generic walk over the whole statement's structured AST finds
+	// every string-lookup call reachable through a "function" node — SELECT
+	// bodies, INSERT/CTAS/VIEW embedded bodies, structured UPDATE/DELETE, IN
+	// subqueries, column DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL expressions,
+	// PARTITION BY/TTL/CONSTRAINT CHECK expressions and every other function
+	// position. joinGet/dictGet-family calls are refused wherever found (the
+	// only refusal of them: rewriteSelectCore never sees one). hasColumnInTable
+	// is refused everywhere except where StringLookupCalls marks it
+	// InSelectBody — under a SELECT root the rewrite pipeline processes (a
+	// top-level select/union/intersect/except, or an INSERT … SELECT / CTAS /
+	// CREATE VIEW body) — where rewriteStringLookups resolves it instead.
 	astLookups, err := engine.StringLookupCalls(ast)
 	if err != nil {
 		return nil, false, err

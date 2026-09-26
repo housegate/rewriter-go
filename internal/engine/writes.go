@@ -343,9 +343,9 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 // preflight, including targets that the normal rewrite visitor intentionally
 // omits because the statement will be rejected generically (all names in a
 // multi-DROP and cross-table ALTER sources/destinations). Embedded SELECT bodies
-// are classified separately by CollectEmbeddedSelectSources so INSERT's signed
-// target exception cannot accidentally exempt its read sources; CREATE VIEW
-// bodies continue through the dedicated SELECT-body handler.
+// are not write targets: an INSERT … SELECT / CTAS / CREATE VIEW body goes
+// through the SELECT pipeline (rewriteEmbeddedBody), so INSERT's signed target
+// exception cannot accidentally exempt its read sources.
 func AllWriteTargets(e Engine, ast AST) ([]TableTarget, error) {
 	kind, body, _, err := bodyOf(ast)
 	if err != nil {

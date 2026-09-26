@@ -218,49 +218,50 @@ func (detail namespaceRefDetail) refWithOrigins() NamespaceRef {
 // namespace reference, while a qualified target and an unbound bare target
 // remain real references (Spec I D7b).
 func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
-	var root any
-	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, fmt.Errorf("engine: decode namespace references: %w", err)
-	}
-	var out []NamespaceRef
-	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
-		namespace: func(_ map[string]any, detail namespaceRefDetail) {
-			out = append(out, detail.refWithOrigins())
-		},
-	}); err != nil {
-		return nil, err
-	}
-	return out, nil
+	namespaces, _, err := collectNamespaceAndInTableRefs(ast)
+	return namespaces, err
 }
 
 // CollectInTableIdentifierRefs returns every IN/GLOBAL IN/callable-IN-family
-// table operand that decodes as a column/dot identifier — the complement of
-// what CollectNamespaceRefs now excludes (spec 2026-09-26 T4): an identifier
-// operand is a real table target that CollectSelectTables/RewriteSelectTables
-// handle through visitor.inTable, routed through an ordinary TableDecision
+// table operand that decodes as an identifier — the complement of what
+// CollectNamespaceRefs excludes (spec 2026-09-26 T4): an identifier operand is
+// a real table target that CollectSelectTables/RewriteSelectTables handle
+// through visitor.inTable, routed through an ordinary TableDecision
 // (including ActionSubquery for an Active SI table) instead of a blanket
-// namespace rejection. A caller that has no equivalent rewrite pipeline of its
-// own for the surrounding statement (e.g. an INSERT/CREATE-TABLE-AS-SELECT
-// preflight, or an ALTER mutation predicate) still needs every such operand
-// checked against the storage-integrity/protected-database policy, so it
-// should merge this result into its CollectNamespaceRefs-derived set rather
-// than rely on CollectNamespaceRefs alone.
+// namespace rejection.
 func CollectInTableIdentifierRefs(ast AST) ([]NamespaceRef, error) {
+	_, inTables, err := collectNamespaceAndInTableRefs(ast)
+	return inTables, err
+}
+
+// CollectNamespaceAndInTableRefs returns CollectNamespaceRefs followed by
+// CollectInTableIdentifierRefs from one walk. A caller with no rewrite
+// pipeline over the statement's embedded reads (the SI write preflight) needs
+// both checked against the storage-integrity / protected-database policy.
+func CollectNamespaceAndInTableRefs(ast AST) ([]NamespaceRef, error) {
+	namespaces, inTables, err := collectNamespaceAndInTableRefs(ast)
+	return append(namespaces, inTables...), err
+}
+
+func collectNamespaceAndInTableRefs(ast AST) (namespaces, inTables []NamespaceRef, err error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, fmt.Errorf("engine: decode in-table identifier references: %w", err)
+		return nil, nil, fmt.Errorf("engine: decode namespace references: %w", err)
 	}
-	var out []NamespaceRef
-	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
+	err = walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
+		namespace: func(_ map[string]any, detail namespaceRefDetail) {
+			namespaces = append(namespaces, detail.refWithOrigins())
+		},
 		inTable: func(_ map[string]any, detail namespaceRefDetail) {
 			if detail.tableOrigin == namespaceValueIdentifier {
-				out = append(out, detail.refWithOrigins())
+				inTables = append(inTables, detail.refWithOrigins())
 			}
 		},
-	}); err != nil {
-		return nil, err
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return out, nil
+	return namespaces, inTables, nil
 }
 
 // CollectTableFunctionRefs returns recognized source-role table functions and
@@ -683,19 +684,18 @@ func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespace
 		return inOperandParameter, namespaceRefDetail{}
 	}
 	if col, ok := node["column"].(map[string]any); ok {
-		if unresolvedIdentifierNode(col["name"]) || unresolvedIdentifierNode(col["table"]) {
+		target, parameter, ok := decodeColumnIdentifier(col)
+		switch {
+		case parameter:
 			return inOperandParameter, namespaceRefDetail{}
-		}
-		name := identName(col["name"])
-		if name == "" {
+		case !ok:
 			return inOperandValue, namespaceRefDetail{}
 		}
 		detail := namespaceRefDetail{
-			ref:         NamespaceRef{Source: NamespaceRefInTable, Target: TableTarget{Table: name}},
+			ref:         NamespaceRef{Source: NamespaceRefInTable, Target: target},
 			tableOrigin: namespaceValueIdentifier,
 		}
-		if table := identName(col["table"]); table != "" {
-			detail.ref.Target.DB = table
+		if target.DB != "" {
 			detail.ref.Resolved = true
 			detail.databaseOrigin = namespaceValueIdentifier
 		} else {
@@ -899,15 +899,27 @@ func qualifiedColumnArgTarget(arg any) (TableTarget, namespaceValueOrigin, bool)
 	if !ok {
 		return TableTarget{}, namespaceValueUnknown, false
 	}
-	if unresolvedIdentifierNode(col["name"]) || unresolvedIdentifierNode(col["table"]) {
+	target, parameter, ok := decodeColumnIdentifier(col)
+	if parameter || !ok || target.DB == "" {
 		return TableTarget{}, namespaceValueUnknown, false
+	}
+	return target, namespaceValueIdentifier, true
+}
+
+// decodeColumnIdentifier is the one structural decode of a `column` node used
+// as a table reference: its "table" field is the database and its "name" the
+// table, so a quoted name containing a literal '.' is never split. parameter
+// reports an Identifier query parameter in either part; ok=false means the
+// node names no table.
+func decodeColumnIdentifier(col map[string]any) (target TableTarget, parameter, ok bool) {
+	if unresolvedIdentifierNode(col["name"]) || unresolvedIdentifierNode(col["table"]) {
+		return TableTarget{}, true, false
 	}
 	name := identName(col["name"])
-	table := identName(col["table"])
-	if name == "" || table == "" {
-		return TableTarget{}, namespaceValueUnknown, false
+	if name == "" {
+		return TableTarget{}, false, false
 	}
-	return TableTarget{DB: table, Table: name}, namespaceValueIdentifier, true
+	return TableTarget{DB: identName(col["table"]), Table: name}, false, true
 }
 
 func decodeNamespacePair(source NamespaceRefSource, name string, args []any, first int) NamespaceRef {
@@ -1002,29 +1014,6 @@ func CollectEmbeddedReadSources(ast AST) ([]ReadSourceRef, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-// CollectEmbeddedSelectSources is the compatibility split view for ordinary
-// tables and table functions. IN-table events remain in the ordered union only.
-func CollectEmbeddedSelectSources(ast AST) ([]TableTarget, []TableFunctionRef, error) {
-	refs, err := CollectEmbeddedReadSources(ast)
-	if err != nil {
-		return nil, nil, err
-	}
-	var tables []TableTarget
-	var functions []TableFunctionRef
-	for _, ref := range refs {
-		switch ref.Kind {
-		case ReadSourceTable:
-			tables = append(tables, ref.Target)
-		case ReadSourceTableFunction:
-			functions = append(functions, TableFunctionRef{
-				Target: ref.Target, Resolved: ref.Resolved,
-				UsesCurrentDatabase: ref.UsesCurrentDatabase,
-			})
-		}
-	}
-	return tables, functions, nil
 }
 
 type readSourceVisitor struct {

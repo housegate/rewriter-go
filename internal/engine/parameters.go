@@ -33,12 +33,12 @@ func inOperandHoldsParameter(arg map[string]any) bool {
 
 // TablePositionParameter reports whether any database or table position of
 // the statement holds an Identifier query parameter: FROM / JOIN / subquery /
-// CTE / UNION table nodes, IN and callable-IN operands, every write slot, the
-// MV TO target, CREATE/DROP DATABASE's own target, and — for opaque command
-// nodes — the position-scoped scans in commandTextParameterHit. sql is the
-// original, unmodified source text that produced ast (never a
-// CommandSQL(ast)/reprinted form — see commandTextParameterHit's doc comment
-// for why that distinction matters), used only for the command-node case.
+// CTE / UNION table nodes, IN and callable-IN operands (any paren depth),
+// column / constraint / storage-property / ALTER-action expressions, every
+// write slot, the MV TO target, CREATE/DROP DATABASE's own target, every Raw
+// ALTER action's text, and — for an opaque command node — anywhere in its
+// text (commandTextParameterHit). sql is the original, unmodified source text
+// that produced ast, used only for the command-node case.
 func TablePositionParameter(e Engine, ast AST, sql string) (bool, error) {
 	kind, err := NodeKind(ast)
 	if err != nil {

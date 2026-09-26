@@ -718,7 +718,7 @@ func TestCollectNamespaceRefs_PreservesIdentifierOrigins(t *testing.T) {
 	}
 }
 
-func TestCollectEmbeddedSelectSources(t *testing.T) {
+func TestCollectEmbeddedReadSources_TablesAndFunctions(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
 		sql       string
@@ -736,9 +736,21 @@ func TestCollectEmbeddedSelectSources(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %q: %v", tc.sql, err)
 		}
-		gotTables, gotFns, err := CollectEmbeddedSelectSources(ast)
+		refs, err := CollectEmbeddedReadSources(ast)
 		if err != nil {
 			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		var gotTables []TableTarget
+		var gotFns []TableFunctionRef
+		for _, ref := range refs {
+			switch ref.Kind {
+			case ReadSourceTable:
+				gotTables = append(gotTables, ref.Target)
+			case ReadSourceTableFunction:
+				gotFns = append(gotFns, TableFunctionRef{
+					Target: ref.Target, Resolved: ref.Resolved, UsesCurrentDatabase: ref.UsesCurrentDatabase,
+				})
+			}
 		}
 		if !reflect.DeepEqual(gotTables, tc.wantTable) || !reflect.DeepEqual(gotFns, tc.wantFn) {
 			t.Errorf("%q: tables=%+v functions=%+v, want tables=%+v functions=%+v ast=%s", tc.sql, gotTables, gotFns, tc.wantTable, tc.wantFn, ast)
@@ -1067,10 +1079,6 @@ func TestObjectWalker_UnknownReadBearingCarrierFailsClosedForEveryProjection(t *
 	}{
 		{"tables", func() error { _, err := CollectSelectTables(ast); return err }},
 		{"read sources", func() error { _, err := CollectEmbeddedReadSources(ast); return err }},
-		{"split read sources", func() error {
-			_, _, err := CollectEmbeddedSelectSources(ast)
-			return err
-		}},
 		{"namespaces", func() error { _, err := CollectNamespaceRefs(ast); return err }},
 		{"table functions", func() error { _, err := CollectTableFunctionRefs(ast); return err }},
 		{"rewrite", func() error {

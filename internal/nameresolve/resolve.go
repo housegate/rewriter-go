@@ -71,7 +71,10 @@ func LookupStatic(db, table string, a *pb.RewriteTableStaticArgs) Outcome {
 }
 
 // resolvePhysicalDatabase maps a logical DB to its physical name, or ok=false
-// when unresolvable. Order: database_map, then known_physical (passthrough).
+// when unresolvable. Order: database_map, then known_physical (passthrough) —
+// except that a protected database (ProtectedDatabase: a database_map value,
+// a protected_databases entry, or an active SI physical / reserved database)
+// never resolves as a pass-through logical (spec 2026-09-26 T3).
 func resolvePhysicalDatabase(logical string, a *pb.RewriteTableDynamicArgs) (string, bool) {
 	if logical == "" {
 		return "", false
@@ -85,10 +88,8 @@ func resolvePhysicalDatabase(logical string, a *pb.RewriteTableDynamicArgs) (str
 		}
 		// A protected name loses the pass-through role: caller SQL may not
 		// address it as a database at all (spec 2026-09-26 T3).
-		for _, protected := range a.GetProtectedDatabases() {
-			if protected == k {
-				return "", false
-			}
+		if ProtectedDatabase(k, a) {
+			return "", false
 		}
 		return logical, true
 	}
@@ -540,8 +541,11 @@ func simpleIdentifier(s string) bool {
 }
 
 // ApplyDynamic resolves (db, table) under dynamic args. Mirrors applyDynamicRewrite.
-// On any policy failure returns StatusInvalid (SELECT caller treats that as a lenient
-// skip; non-SELECT as reject).
+// On any policy failure returns StatusInvalid: a write-side caller rejects it
+// with RejectReason, while the SELECT caller treats it as a lenient skip and
+// leaves the table unrewritten — so the protected-database StatusInvalid below
+// is a defensive layer only; the refusal a caller sees for a protected name
+// comes from PreflightTableReferences, which runs first.
 func ApplyDynamic(db, table string, a *pb.RewriteTableDynamicArgs) Outcome {
 	logical := db
 	if logical == "" {

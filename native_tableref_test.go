@@ -128,16 +128,20 @@ func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
 // contain, so each of these must still be refused.
 func TestTableRef_CommentBypassAttemptsAreRefused(t *testing.T) {
 	const msg = "query parameters are not supported in a database or table position"
-	runTablerefCases(t, []tablerefCase{
-		{name: "exists_line_comment_slash_slash", sql: "EXISTS TABLE // it's\n db1.{p:Identifier}",
-			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
-		{name: "exists_line_comment_hash", sql: "EXISTS TABLE # it's\n db1.{p:Identifier}",
-			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
-		{name: "describe_line_comment_slash_slash", sql: "DESCRIBE TABLE // it's\n db1.{p:Identifier}",
-			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
-		{name: "show_create_line_comment_hash_bang", sql: "SHOW CREATE TABLE #! it's\n db1.{p:Identifier}",
-			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
-	})
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "exists_line_comment_slash_slash", sql: "EXISTS TABLE // it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+			tablerefCase{name: "exists_line_comment_hash", sql: "EXISTS TABLE # it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+			tablerefCase{name: "describe_line_comment_slash_slash", sql: "DESCRIBE TABLE // it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+			tablerefCase{name: "show_create_line_comment_hash_bang", sql: "SHOW CREATE TABLE #! it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+		)
+	}
+	runTablerefCases(t, cases)
 }
 
 func TestTableRef_ValueAndColumnParametersStayAllowed(t *testing.T) {
@@ -213,7 +217,7 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			//     this repo classifies either position as a table reference,
 			//     so nothing downstream would otherwise reject them.
 			//     PreflightTableReferences now rejects a protected hit there
-			//     unconditionally too (engine.CollectSIHandlerBlindDatabaseReferences),
+			//     unconditionally too (engine.CollectDatabaseReferenceSets' blind set),
 			//     with the preflight's own generic message/code rather than an
 			//     SI handler's. Ruling 3 anticipated adjusting the *code* per
 			//     observed handler behaviour for an SI-owned row; this is the
@@ -332,6 +336,7 @@ func TestTableRef_InOperandsAreRewrittenAndReported(t *testing.T) {
 		{name: "active table derived read", sql: "SELECT * FROM db1.o WHERE a IN db1.t", si: true, wantCode: pb.RewriteCode_Success,
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", "db1.t"}},
 		{name: "callable active table derived read", sql: "SELECT * FROM db1.o WHERE in(a, db1.t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))`,
 			wantAcc: []string{"db1.o", "db1.t"}},
 		// Unqualified spellings of the same Active table (controller review
 		// round 2): the operand resolves via UpstreamLogicalDatabaseInContext
@@ -1349,5 +1354,44 @@ func TestTableRef_MinorRulings(t *testing.T) {
 			sql:      "CREATE TABLE db1.n (a UInt64) ENGINE = Memory",
 			wantCode: pb.RewriteCode_Success, wantSQL: `CREATE TABLE phys."db1.n" (a UInt64) ENGINE=Memory`})
 	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_HousekeepingRows pins the parked-review rows the final review
+// asked for: nested-paren INSERT … SELECT / CTAS bodies, a statement with
+// several lookups, mixed ALTER MODIFY actions, the SI-active Merge engine, and
+// one accessed entry per table named by several hasColumnInTable calls.
+func TestTableRef_HousekeepingRows(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "insert_nested_paren_source", sql: "INSERT INTO db1.o SELECT * FROM ((SELECT * FROM db1.p))", si: si,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o", "db1.p"},
+				wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM ((SELECT * FROM phys."db1.p" "db1.p"))`},
+			tablerefCase{name: "ctas_nested_paren_body", sql: "CREATE TABLE db1.n ENGINE = Memory AS ((SELECT * FROM db1.p))", si: si,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.n", "db1.p"},
+				wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS (((SELECT * FROM phys."db1.p" "db1.p")))`},
+			tablerefCase{name: "multi_lookup_first_wins", si: si,
+				sql:      "SELECT dictGet('db1.d', 'v', 1), joinGet('db1.j', 'v', 1)",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.d" does not resolve`},
+			tablerefCase{name: "multi_lookup_hascolumnintable_then_joinget", si: si,
+				sql:      "SELECT hasColumnInTable('db1', 'o', 'a'), joinGet('db1.j', 'v', 1)",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+			tablerefCase{name: "hascolumnintable_accessed_once", si: si,
+				sql:      "SELECT hasColumnInTable('db1', 'o', 'a'), hasColumnInTable('db1', 'o', 'b') FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT hasColumnInTable('phys', 'db1.o', 'a'), hasColumnInTable('phys', 'db1.o', 'b') FROM phys."db1.o" "db1.o"`,
+				wantAcc:  []string{"db1.o"}},
+			tablerefCase{name: "alter_modify_setting_disk_mixed", si: si,
+				sql:      "ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT 2, MODIFY SETTING disk = 'd'",
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting disk is not accepted"},
+			tablerefCase{name: "alter_modify_column_lookup", si: si,
+				sql:      "ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT dictGet('db1.d', 'v', a)",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.d" does not resolve`},
+		)
+	}
+	cases = append(cases, tablerefCase{name: "merge_engine_si_active", si: true,
+		sql:      "CREATE TABLE db1.n (a UInt64) ENGINE = Merge('db1', '^o')",
+		wantCode: pb.RewriteCode_UnsupportedStatement})
 	runTablerefCases(t, cases)
 }

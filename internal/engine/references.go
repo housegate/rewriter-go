@@ -9,28 +9,49 @@ import (
 
 // CollectDatabaseReferences returns every database name the statement
 // addresses, in document order and deduplicated, across every position the
-// table-reference policy governs (spec 2026-09-26 §5). Unqualified names
-// contribute nothing: the logical context is checked by the caller.
+// table-reference policy governs (spec 2026-09-26 §5). See
+// CollectDatabaseReferenceSets.
+func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) {
+	all, _, err := CollectDatabaseReferenceSets(e, ast, sql)
+	return all, err
+}
+
+// CollectDatabaseReferenceSets decodes the statement once and returns every
+// database name it addresses (all), in document order and deduplicated, plus
+// the SI-handler-blind subset (blind): the databases named only through a
+// position no storage-integrity handler classifies as a table reference — a
+// joinGet/dictGet/hasColumnInTable-family argument (an ordinary scalar
+// function call whose argument embeds a namespace) and a parenthesized
+// single-operand IN (`x IN (db.table)`, at any paren depth; the SI handlers
+// classify only the bare form). PreflightTableReferences refuses a protected
+// blind hit even while the storage-integrity surface is active. Unqualified
+// names contribute nothing: the logical context is checked by the caller.
 //
 // Write targets (the statement's own CREATE/DROP/INSERT/ALTER/RENAME/TO
 // target(s), CREATE/DROP DATABASE, table-function clone sources, ...) are
 // collected before embedded read sources (FROM/JOIN/subquery/IN/table
-// function arguments/...) so a statement's own target database is reported
-// ahead of the databases it merely reads — matching the textual order of the
-// statements this policy governs (the target always precedes the body it
-// reads).
-func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) {
+// function arguments/column and ALTER-action expressions/...) so a
+// statement's own target database is reported ahead of the databases it
+// merely reads; opaque ALTER text and string-lookup arguments follow.
+func CollectDatabaseReferenceSets(e Engine, ast AST, sql string) (all, blind []string, err error) {
 	seen := map[string]bool{}
-	var out []string
 	add := func(db string) {
 		if db != "" && !seen[db] {
 			seen[db] = true
-			out = append(out, db)
+			all = append(all, db)
 		}
+	}
+	blindSeen := map[string]bool{}
+	addBlind := func(db string) {
+		if db != "" && !blindSeen[db] {
+			blindSeen[db] = true
+			blind = append(blind, db)
+		}
+		add(db)
 	}
 	kind, err := NodeKind(ast)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if kind == NodeCommand {
 		// USE / SHOW … FROM / EXISTS / SHOW CREATE / DESCRIBE / RENAME / EXCHANGE.
@@ -50,20 +71,17 @@ func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) 
 			}
 		}
 		if err := addOpaqueAlterDatabases(e, ast, add); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return out, nil
+		return all, blind, nil
 	}
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// Write targets first: CREATE/DROP/INSERT/ALTER/CLONE-SOURCE/MV-TO targets
-	// and CREATE/DROP DATABASE — the statement's own object(s) — precede the
-	// databases its body merely reads.
 	targets, err := AllWriteTargets(e, ast)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, tt := range targets {
 		add(tt.DB)
@@ -73,17 +91,17 @@ func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) 
 		inTable:   func(_ map[string]any, d namespaceRefDetail) { add(d.ref.Target.DB) },
 		namespace: func(_ map[string]any, d namespaceRefDetail) { add(d.ref.Target.DB) },
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := addOpaqueAlterDatabases(e, ast, add); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// Ruling 1 (controller review, spec 2026-09-26 T3): CollectDatabaseReferences
-	// must also see string-form lookup arguments (joinGet/dictGet/hasColumnInTable
-	// family) — those are ordinary scalar function calls, not source-role table
-	// functions, so the shared read-source visitor above never emits them.
-	collectStringLookupDatabases(root, add)
-	return out, nil
+	// String-lookup arguments are ordinary scalar function calls, not
+	// source-role table functions, so the read-source visitor never emits
+	// them (spec 2026-09-26 T3).
+	collectStringLookupDatabases(root, addBlind)
+	collectParenthesizedInDatabases(root, addBlind)
+	return all, blind, nil
 }
 
 // addOpaqueAlterDatabases adds the qualifier of every qualified name in the
@@ -106,35 +124,6 @@ func addOpaqueAlterDatabases(e Engine, ast AST, add func(string)) error {
 		}
 	}
 	return nil
-}
-
-// CollectSIHandlerBlindDatabaseReferences returns, in document order and
-// deduplicated, the subset of CollectDatabaseReferences' result that comes
-// from a position no existing storage-integrity handler classifies as a
-// table reference: an IsStringLookup call's first string-literal argument
-// (joinGet/dictGet/hasColumnInTable family — an ordinary scalar function call
-// whose string argument happens to embed a namespace) and a parenthesized
-// single-element IN-list (`x IN (db.table)` — not is_field-tagged, so the
-// same SI machinery that classifies a bare `x IN db.table` never sees it
-// either). PreflightTableReferences must reject a protected hit here even
-// while the storage-integrity surface is active, unlike the ordinary table
-// positions it otherwise defers to the SI handlers.
-func CollectSIHandlerBlindDatabaseReferences(ast AST) ([]string, error) {
-	var root any
-	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	var out []string
-	add := func(db string) {
-		if db != "" && !seen[db] {
-			seen[db] = true
-			out = append(out, db)
-		}
-	}
-	collectStringLookupDatabases(root, add)
-	collectParenthesizedInDatabases(root, add)
-	return out, nil
 }
 
 // IsStringLookup reports whether name is a ClickHouse function whose first
@@ -318,16 +307,11 @@ type StringLookup struct {
 // anywhere in ast — an ordinary scalar-expression position (SELECT list,
 // WHERE, a CREATE TABLE column's DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL
 // expression, …), not gated by readSourceVisitor's source-role traversal —
-// in document order (spec 2026-09-26 T6, Task 7 fix round 2 mechanism (a) +
-// (c)): ordered by polyglot's span start offset where available, falling
-// back to a SQL-clause-aware traversal order for calls whose subtree carries
-// none (measured: a call's argument carries a span only when it is a column/
-// identifier, never a string or number literal — the overwhelmingly common
-// shape for these functions in practice — so a plain alphabetical key sort
-// would visit a SELECT's ORDER BY before its WHERE, backwards from where
-// they appear in the source). Only a call that names a first argument at all
-// is reported (spec 2026-09-26 T6, controller ruling 2): a bare `joinGet()`
-// names nothing to refuse or rewrite.
+// in the single total order collectStringLookupOccurrences walks the tree
+// (SQL-clause rank among one map's keys, then key name, then array index),
+// which follows document order for every clause this policy walks. Only a
+// call that names a first argument at all is reported (spec 2026-09-26 T6):
+// a bare `joinGet()` names nothing to refuse or rewrite.
 func StringLookupCalls(ast AST) ([]StringLookup, error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
@@ -468,18 +452,11 @@ func collectStringLookupOccurrences(root any) []stringLookupOccurrence {
 }
 
 // stringLookupClauseOrder ranks a SELECT statement's own clause field names
-// by SQL grammar/textual position, used as collectStringLookupOccurrences's
-// walk order (a TIEBREAKER among one map's direct children, never a gate on
-// which nodes are visited): a string-lookup call's arguments carry a span
-// only when they are column/identifier expressions, never string or number
-// literals — the overwhelmingly common shape in practice — so relying on
-// plain alphabetical key order alone would report a SELECT's ORDER BY call
-// ahead of its WHERE call, backwards from the source text (measured
-// directly; spec 2026-09-26 T6, Task 7 fix round 2 finding 1). Every other
-// field name (CREATE TABLE properties, a dictionary source's properties, an
-// IN node's own fields, …) has no comparable ambiguity in the shapes this
-// policy walks, so it keeps plain alphabetical order among itself, sorted
-// after every ranked name.
+// by SQL grammar / textual position; collectStringLookupOccurrences visits a
+// map's ranked keys first, in rank order, so a SELECT's WHERE call is reported
+// before its ORDER BY call (plain alphabetical key order would reverse them).
+// Every other field name (CREATE TABLE properties, an IN node's own fields, …)
+// keeps alphabetical order among itself, after every ranked name.
 var stringLookupClauseOrder = map[string]int{
 	"with": 0, "expressions": 1, "from": 2, "joins": 3, "where_clause": 4,
 	"group_by": 5, "having": 6, "qualify": 7, "windows": 8, "order_by": 9,
