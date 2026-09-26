@@ -72,6 +72,33 @@ func TestCompare_privilegeDeltas(t *testing.T) {
 	}
 }
 
+func TestCompare_message(t *testing.T) {
+	got := &pb.RewriteSQLResponse{Code: pb.RewriteCode_InvalidRewriteRequest, Message: "protected database phys is not addressable"}
+	want := &pb.RewriteSQLResponse{Code: pb.RewriteCode_InvalidRewriteRequest, Message: "protected database other is not addressable"}
+	d := Compare(got, want, nil)
+	if d.Equal() || len(d.Mismatches) != 1 || !strings.Contains(d.Mismatches[0], "message") {
+		t.Fatalf("differing message should mismatch, got: %v", d.Mismatches)
+	}
+}
+
+func TestCompare_originalAccessedTables(t *testing.T) {
+	mk := func(isSI bool) *pb.RewriteSQLResponse {
+		return &pb.RewriteSQLResponse{OriginalAccessedTables: []*pb.AccessedTable{{
+			OriginalDatabase:   "db1",
+			OriginalTable:      "t",
+			LogicalDatabase:    "db1",
+			PhysicalDatabase:   "phys",
+			IsRemote:           false,
+			IsStorageIntegrity: isSI,
+		}}}
+	}
+	got, want := mk(false), mk(true)
+	d := Compare(got, want, nil)
+	if d.Equal() || len(d.Mismatches) != 1 || !strings.Contains(d.Mismatches[0], "original_accessed_tables") {
+		t.Fatalf("differing original_accessed_tables (is_storage_integrity only) should mismatch, got: %v", d.Mismatches)
+	}
+}
+
 func TestCompare_nilVsEmptyMap(t *testing.T) {
 	// native often inits an empty non-nil map; the C++ oracle returns nil.
 	got := &pb.RewriteSQLResponse{TableRewrites: map[string]string{}, DatabaseRewrites: map[string]string{}}
