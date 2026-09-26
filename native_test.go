@@ -1369,9 +1369,22 @@ func TestDoRewrite_StorageIntegritySealsCollectorErrors(t *testing.T) {
 		t.Fatalf("resp = %+v, want acknowledged UnsupportedStatement echoing the original SQL", resp)
 	}
 
+	// Spec 2026-09-26 R6: a dynamic request with no SI surface seals the same
+	// failure as the table-reference policy's UnsupportedStatement; only a
+	// static/no-rewrite request keeps the legacy Go error channel.
 	legacy := proto.Clone(dyn).(*pb.RewriteTableDynamicArgs)
 	legacy.StorageIntegrity = nil
-	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(legacy)}); err == nil {
-		t.Fatal("empty-SI collector failure must retain the legacy Go error channel")
+	resp, err = doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(legacy)})
+	if err != nil {
+		t.Fatalf("empty-SI dynamic collector failure escaped through the Go error channel: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+		resp.GetMessage() != "statement is not supported" ||
+		resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED ||
+		resp.GetSqlAfterRewrite() != sql {
+		t.Fatalf("resp = %+v, want unacknowledged UnsupportedStatement echoing the original SQL", resp)
+	}
+	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteStatic()}); err == nil {
+		t.Fatal("static-mode collector failure must retain the legacy Go error channel")
 	}
 }

@@ -942,3 +942,33 @@ func TestTableRef_InOperandsDecodeOnce(t *testing.T) {
 		wantSQL:  `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`})
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_GoErrorsFailClosed pins spec 2026-09-26 R6 (final review
+// Critical 7): in dynamic mode a handler, walk or generate error — including a
+// polyglot recursion-limit error — is a coded UnsupportedStatement rejection
+// in both SI states, never a Go error a caller could treat as fail-open.
+func TestTableRef_GoErrorsFailClosed(t *testing.T) {
+	nestedIN := "SELECT a FROM db1.o"
+	for i := 0; i < 60; i++ {
+		nestedIN = "SELECT a FROM db1.o WHERE a IN (" + nestedIN + ")"
+	}
+	union := strings.TrimSuffix(strings.Repeat("SELECT a FROM db1.o UNION ALL ", 500), " UNION ALL ")
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		msg := "statement is not supported"
+		if si {
+			msg = StorageIntegrityUnmodelledMessage
+		}
+		for _, c := range []struct{ name, sql string }{
+			{"lambda_body_subquery", "SELECT arrayMap(x -> x IN (SELECT a FROM phys.`db2.x`), [1]) FROM db1.o"},
+			{"any_subquery", "SELECT * FROM db1.o WHERE a = ANY (SELECT a FROM phys.`db2.x`)"},
+			{"values_scalar_subquery", "SELECT * FROM values('a UInt64', (SELECT max(a) FROM phys.`db2.x`))"},
+			{"nested_in_60", nestedIN},
+			{"union_500", union},
+		} {
+			cases = append(cases, tablerefCase{name: c.name, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}

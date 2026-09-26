@@ -76,12 +76,16 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 	}
 }
 
-// sealStorageIntegrityHandlerError closes the last fail-open escape hatch in
-// the active SI pipeline. A handler/collector error means the engine could not
-// prove the complete statement surface; exposing that as a Go error would make
-// legacy callers forward the original SQL. Empty-SI requests retain that legacy
-// error channel, while active SI converts it to an ordinary, acknowledged
-// UnsupportedStatement response that HouseGate must reject (Spec I D1/D2).
+// sealStorageIntegrityHandlerError closes the fail-open escape hatch a Go
+// error would otherwise be. A handler/collector/generator error (including a
+// polyglot recursion-limit error) means the engine could not prove the
+// complete statement surface; exposing that as a Go error would make legacy
+// callers forward the original SQL. Every dynamic-mode request therefore
+// converts it to an ordinary UnsupportedStatement response HouseGate must
+// reject: with the SI surface active the message is the SI catch-all (Spec I
+// D1/D2), otherwise the table-reference policy's "statement is not
+// supported" (spec 2026-09-26 §5). Static and no-rewrite requests keep the
+// legacy error channel.
 func sealStorageIntegrityHandlerError(
 	resp *pb.RewriteSQLResponse,
 	ast engine.AST,
@@ -93,7 +97,13 @@ func sealStorageIntegrityHandlerError(
 	handlerErr error,
 ) (*pb.RewriteSQLResponse, error) {
 	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
-		return nil, handlerErr
+		if sel.Mode != nameresolve.ModeDynamic {
+			return nil, handlerErr
+		}
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = engine.UnsupportedStatementMessage
+		finalize(resp, ast, sql, ec, siVersion, e, sel)
+		return resp, nil
 	}
 	resp.Code = pb.RewriteCode_UnsupportedStatement
 	resp.Message = StorageIntegrityUnmodelledMessage
@@ -134,9 +144,10 @@ const StorageIntegrityContractMessage = "storage-integrity contract version V1 o
 
 // doRewrite is the engine-level rewrite pipeline shared by NativeRewriter
 // (per-connection, options via callback) and Service (stateless, options
-// from the request). A non-nil error means an unexpected/internal failure
-// the caller should treat as fail-open; rewrite rejections travel inside
-// the response Code instead.
+// from the request). A non-nil error means an unexpected/internal failure on
+// a static or no-rewrite request; a dynamic-mode request never returns one
+// (sealStorageIntegrityHandlerError turns it into an UnsupportedStatement
+// response). Rewrite rejections travel inside the response Code.
 func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
 	siVersion := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
@@ -317,7 +328,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	}
 	resp, err := doRewrite(r.engine, sql, opts)
 	if err != nil {
-		return RewriteResult{}, err // unexpected/internal → fail-open Go error
+		return RewriteResult{}, err // static/no-rewrite internal failure → legacy Go error
 	}
 	r.stash(sql, account, resp)
 	return resultFromPB(resp), nil
