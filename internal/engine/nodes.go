@@ -107,6 +107,15 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 	var out []TableTarget
 	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
 		table: func(_, _ map[string]any, tt TableTarget) { out = append(out, tt) },
+		// An IN operand that decodes to a column/dot identifier is a real table
+		// reference (spec 2026-09-26 T4); a literal or other non-identifier
+		// operand is reported to the SI namespace policy instead (see
+		// walkInExpression/walkFunctionExpression) and never reaches here.
+		inTable: func(_ map[string]any, d namespaceRefDetail) {
+			if tt := d.ref.Target; tt.Table != "" && d.tableOrigin == namespaceValueIdentifier {
+				out = append(out, tt)
+			}
+		},
 	}); err != nil {
 		return nil, err
 	}
@@ -217,6 +226,36 @@ func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
 	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
 		namespace: func(_ map[string]any, detail namespaceRefDetail) {
 			out = append(out, detail.refWithOrigins())
+		},
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CollectInTableIdentifierRefs returns every IN/GLOBAL IN/callable-IN-family
+// table operand that decodes as a column/dot identifier — the complement of
+// what CollectNamespaceRefs now excludes (spec 2026-09-26 T4): an identifier
+// operand is a real table target that CollectSelectTables/RewriteSelectTables
+// handle through visitor.inTable, routed through an ordinary TableDecision
+// (including ActionSubquery for an Active SI table) instead of a blanket
+// namespace rejection. A caller that has no equivalent rewrite pipeline of its
+// own for the surrounding statement (e.g. an INSERT/CREATE-TABLE-AS-SELECT
+// preflight, or an ALTER mutation predicate) still needs every such operand
+// checked against the storage-integrity/protected-database policy, so it
+// should merge this result into its CollectNamespaceRefs-derived set rather
+// than rely on CollectNamespaceRefs alone.
+func CollectInTableIdentifierRefs(ast AST) ([]NamespaceRef, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode in-table identifier references: %w", err)
+	}
+	var out []NamespaceRef
+	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
+		inTable: func(_ map[string]any, detail namespaceRefDetail) {
+			if detail.tableOrigin == namespaceValueIdentifier {
+				out = append(out, detail.refWithOrigins())
+			}
 		},
 	}); err != nil {
 		return nil, err
@@ -405,9 +444,18 @@ func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
 }
 
 func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
-	isField, _ := in["is_field"].(bool)
+	// is_field distinguishes only the syntactic bare-vs-parenthesized IN
+	// operand (`a IN db.t` sets it, `a IN (db.t)` does not); ClickHouse reads
+	// a single parenthesized identifier as a table just like the bare form, so
+	// it is no longer gated on here (spec 2026-09-26 T4, controller ruling 1).
+	// A genuine multi-element value list (`a IN (1, 2, 3)`) is excluded by the
+	// len(exprs)==1 check below regardless of is_field; decodeNamespaceSingleDetail
+	// itself distinguishes a column/dot identifier operand (namespaceValueIdentifier
+	// origin, a real table reference) from a literal one (namespaceValueLiteral,
+	// a value that merely happens to spell a namespace — still worth a namespace
+	// question, but never rewritable — see walkInExpression/walkFunctionExpression).
 	exprs, _ := in["expressions"].([]any)
-	if !isField || len(exprs) != 1 {
+	if len(exprs) != 1 {
 		return namespaceRefDetail{}, false
 	}
 	name := "IN"
@@ -1615,10 +1663,28 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 	}
 	if detail, ok := decodeInNamespaceRefDetail(inNode); ok {
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
-			if visitor.namespace != nil {
+			// A plain identifier/dot operand is now a real table target handled
+			// by CollectSelectTables/RewriteSelectTables through visitor.inTable
+			// below (spec 2026-09-26 T4); routing it through the SI namespace
+			// policy too would fail-closed-reject it a second time instead of
+			// letting the ordinary TableDecision (including ActionSubquery for
+			// an Active SI table) apply. A literal or otherwise-unrewritable
+			// operand can't go through that path, so it still reaches
+			// visitor.namespace as a namespace question.
+			if visitor.namespace != nil && detail.tableOrigin != namespaceValueIdentifier {
 				visitor.namespace(inNode, detail)
 			}
 			if visitor.inTable != nil {
+				// visitor.inTable's RewriteSelectTables consumer may replace an
+				// ActionSubquery target's operand in place by populating
+				// "query" (applyInOperandDecision) — decode-ok is only ever
+				// true when "expressions" held exactly one element, which a
+				// genuine pre-existing `a IN (SELECT …)` node never does (its
+				// "expressions" is empty and its "query" already holds the
+				// statement), so nothing pre-existing in "query" is skipped by
+				// not walking it here. Walking it anyway would re-discover the
+				// just-injected derived-table body (e.g. hg_safe.db1__t) as a
+				// second, user-authored table reference in this same pass.
 				visitor.inTable(inNode, detail)
 			}
 		}
@@ -1626,9 +1692,12 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 		if err := walkExpression(inNode["expressions"], scope, visitor); err != nil {
 			return err
 		}
-	}
-	if err := walkExpression(inNode["query"], scope, visitor); err != nil {
-		return err
+		// A genuine subquery IN (`a IN (SELECT …)`) reaches this branch
+		// (decode-ok is false: "expressions" is empty, not length 1) with its
+		// tables/IN-operands still to be walked/rewritten.
+		if err := walkExpression(inNode["query"], scope, visitor); err != nil {
+			return err
+		}
 	}
 	if err := walkExpression(inNode["unnest"], scope, visitor); err != nil {
 		return err
@@ -1661,7 +1730,12 @@ func walkFunctionExpression(function map[string]any, scope readSourceScope, visi
 			}
 		}
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
-			if visitor.namespace != nil {
+			// Same reasoning as walkInExpression above: an identifier operand is
+			// now handled as an ordinary table target via visitor.inTable, so the
+			// SI namespace policy only needs to see the (never reachable today,
+			// since decodeCallableInNamespaceRefDetail already requires a
+			// column/dot arg) non-identifier case.
+			if visitor.namespace != nil && detail.tableOrigin != namespaceValueIdentifier {
 				visitor.namespace(function, detail)
 			}
 			if visitor.inTable != nil {
@@ -2162,6 +2236,13 @@ func RewriteSelectTables(ast AST, decide func(TableTarget) TableDecision) (AST, 
 		table: func(expr, tbl map[string]any, tt TableTarget) {
 			applyDecision(expr, tbl, tt, decide(tt))
 		},
+		inTable: func(container map[string]any, d namespaceRefDetail) {
+			tt := d.ref.Target
+			if tt.Table == "" || d.tableOrigin != namespaceValueIdentifier {
+				return
+			}
+			applyInOperandDecision(container, tt, decide(tt))
+		},
 	}); err != nil {
 		return nil, err
 	}
@@ -2259,6 +2340,85 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 		}
 	case ActionSkip:
 		// no-op
+	}
+}
+
+// applyInOperandDecision rewrites the table operand of an IN expression. The
+// container is either the `in` node (infix/parenthesised form: operand at
+// expressions[0], or — once a subquery replaces it — at "query" instead) or
+// the callable-IN `function` node (operand at args[1]). ActionRename installs
+// a qualified column node in place of the operand; ActionSubquery replaces it
+// with the derived-table body the FROM path uses, so an Active SI table is
+// read through hg_safe / hg_unsafe here too (spec 2026-09-26 T4). An IN
+// operand takes no back-alias — unlike a FROM table, nothing ever qualifies a
+// column against it.
+func applyInOperandDecision(container map[string]any, tt TableTarget, d TableDecision) {
+	// The infix and parenthesised forms both carry "expressions" (Step 1: only
+	// the identifier-vs-value-list distinction, not parens, is is_field-gated);
+	// the callable form carries "args" instead.
+	_, isInNode := container["expressions"]
+	setOperand := func(node any) {
+		if isInNode {
+			container["expressions"] = []any{node}
+			return
+		}
+		if args, ok := container["args"].([]any); ok && len(args) == 2 {
+			container["args"] = []any{args[0], node}
+		}
+	}
+	switch d.Action {
+	case ActionRename:
+		col := map[string]any{"name": ident(d.NewTable)}
+		if d.NewDB != "" {
+			col["table"] = ident(d.NewDB)
+		}
+		setOperand(map[string]any{"column": col})
+	case ActionSubquery:
+		if len(d.Subquery) == 0 {
+			return // misconfigured decision — leave the operand untouched
+		}
+		var body any
+		if err := json.Unmarshal(d.Subquery, &body); err != nil {
+			return
+		}
+		if isInNode {
+			// Measured shape (spec 2026-09-26 T4 Step 1, confirmed by parsing
+			// `a IN (SELECT …)` directly): {"in": {"this": …, "expressions": [],
+			// "query": {"select": …}}} — polyglot's generator requires the
+			// "expressions" key to still be present (an empty array), even
+			// though it carries no operand once "query" is populated; is_field
+			// must read false once the identifier operand is gone (it may have
+			// been true for the bare unparenthesized form, or absent for the
+			// parenthesised one — either way the query field, not a field-list,
+			// now governs).
+			container["expressions"] = []any{}
+			container["is_field"] = false
+			container["query"] = body
+			return
+		}
+		// Callable form has no documented subquery spelling in Step 1, but
+		// measured directly (parsing `in(a, (SELECT …))`): the generator
+		// requires the full subquery-wrapper field set, not just "this" —
+		// mirrors what polyglot itself emits for a parenthesized subquery
+		// argument. No alias fields are populated: an IN operand is never
+		// column-qualified against its subquery, unlike a FROM table.
+		setOperand(map[string]any{"subquery": map[string]any{
+			"this":                body,
+			"alias":               nil,
+			"alias_explicit_as":   false,
+			"column_aliases":      []any{},
+			"order_by":            nil,
+			"limit":               nil,
+			"offset":              nil,
+			"lateral":             false,
+			"modifiers_inside":    false,
+			"trailing_comments":   []any{},
+			opaqueDerivedTableKey: true,
+		}})
+	default:
+		// ActionSkip / ActionRemote: leave the operand as written. A remote
+		// target is rejected earlier by the SELECT handler's remote rules, so
+		// ActionRemote is not expected to reach an IN operand in practice.
 	}
 }
 

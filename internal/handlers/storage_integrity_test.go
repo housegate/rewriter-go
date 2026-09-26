@@ -1138,6 +1138,36 @@ func TestGrant_storageIntegrityPhysicalDatabaseScopeAndAttachGrant(t *testing.T)
 	}
 }
 
+// TestStorageIntegrityINTableIdentifierResolvesLikeFromTable pins spec
+// 2026-09-26 T4: a bare identifier IN operand naming an Active, authorized SI
+// table is no longer a namespace question that fails closed — it is an
+// ordinary table target, read through the same derived hg_safe/hg_unsafe
+// surface a FROM reference to the same table gets (see
+// storageIntegrityDecision / applyInOperandDecision). Contrast the still-
+// rejected cases in TestStorageIntegrityINTableNamespacesFailClosed below: a
+// direct physical hg_safe/hg_unsafe address, or an unqualified operand whose
+// current-database context resolves to one, is never rewritable and keeps
+// failing closed regardless of this change.
+func TestStorageIntegrityINTableIdentifierResolvesLikeFromTable(t *testing.T) {
+	e := newEngine(t)
+	sql := `SELECT * FROM other.u WHERE id IN db1.t`
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+	}
+	want := `SELECT * FROM phys."other.u" "other.u" WHERE id IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`
+	if resp.GetSqlAfterRewrite() != want {
+		t.Fatalf("sql = %q, want %q", resp.GetSqlAfterRewrite(), want)
+	}
+}
+
 func TestStorageIntegrityINTableNamespacesFailClosed(t *testing.T) {
 	e := newEngine(t)
 	for _, tc := range []struct {
@@ -1146,7 +1176,6 @@ func TestStorageIntegrityINTableNamespacesFailClosed(t *testing.T) {
 		context string
 		write   bool
 	}{
-		{"logical", `SELECT * FROM other.u WHERE id IN db1.t`, "", false},
 		{"global_physical", `SELECT * FROM other.u WHERE id GLOBAL IN hg_safe.db1__t`, "", false},
 		{"not_in_physical", `SELECT * FROM other.u WHERE id NOT IN hg_safe.db1__t`, "", false},
 		{"global_not_in_physical", `SELECT * FROM other.u WHERE id GLOBAL NOT IN hg_unsafe.db1__t`, "", false},

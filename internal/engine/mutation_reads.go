@@ -157,6 +157,21 @@ func collectMutationExpression(node any) (MutationReadSet, error) {
 			reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadNamespace, Namespace: ref})
 			reads.Namespaces = append(reads.Namespaces, ref)
 		},
+		// An identifier/dot IN operand no longer reaches visitor.namespace
+		// (spec 2026-09-26 T4: it is a real table target now, not a namespace
+		// question — see walkInExpression/walkFunctionExpression). Mutation
+		// predicates/assignments have no RewriteSelectTables-style rewrite
+		// pipeline of their own, so report it as an ordinary MutationReadTable
+		// instead: writes.go's inspectTarget already applies the same
+		// storage-integrity checks to it that a FROM/JOIN table gets.
+		inTable: func(_ map[string]any, detail namespaceRefDetail) {
+			if detail.tableOrigin == namespaceValueIdentifier {
+				if tt := detail.ref.Target; tt.Table != "" {
+					reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadTable, Table: tt})
+					reads.Tables = append(reads.Tables, tt)
+				}
+			}
+		},
 	})
 	return reads, err
 }

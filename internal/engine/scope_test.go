@@ -36,6 +36,15 @@ func TestReferencesIdentifierInScope(t *testing.T) {
 	}
 }
 
+// TestCollectNamespaceRefs_SkipsInScopeCTEAliases pins isScopedCurrentDatabaseRef,
+// the CTE-scope guard shared by every consumer of the underlying IN-table
+// decode. Spec 2026-09-26 T4 moved which consumer sees an identifier-form
+// operand — CollectNamespaceRefs no longer reports one (it is a real table
+// target now; see walkInExpression/walkFunctionExpression), while the new
+// CollectInTableIdentifierRefs carries exactly those — but the CTE-scope guard
+// itself is unchanged: a bare `t` bound to an in-scope CTE must never surface
+// as a table reference through either collector, and a bare `t` with no CTE in
+// scope must still surface, now through CollectInTableIdentifierRefs.
 func TestCollectNamespaceRefs_SkipsInScopeCTEAliases(t *testing.T) {
 	e := newTestEngine(t)
 	ast, err := e.ParseOne("WITH t AS (SELECT 1 AS id) SELECT a FROM other.u WHERE id IN t")
@@ -51,17 +60,26 @@ func TestCollectNamespaceRefs_SkipsInScopeCTEAliases(t *testing.T) {
 			t.Fatalf("in-scope CTE alias must not be collected as a namespace ref: %+v", refs)
 		}
 	}
+	inTableRefs, err := CollectInTableIdentifierRefs(ast)
+	if err != nil {
+		t.Fatalf("CollectInTableIdentifierRefs: %v", err)
+	}
+	for _, ref := range inTableRefs {
+		if ref.Target.DB == "" && ref.Target.Table == "t" {
+			t.Fatalf("in-scope CTE alias must not be collected as an in-table identifier ref: %+v", inTableRefs)
+		}
+	}
 
 	ast, err = e.ParseOne("SELECT a FROM other.u WHERE id IN t")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	refs, err = CollectNamespaceRefs(ast)
+	inTableRefs, err = CollectInTableIdentifierRefs(ast)
 	if err != nil {
-		t.Fatalf("CollectNamespaceRefs: %v", err)
+		t.Fatalf("CollectInTableIdentifierRefs: %v", err)
 	}
 	found := false
-	for _, ref := range refs {
+	for _, ref := range inTableRefs {
 		if ref.Source == NamespaceRefInTable && ref.Target.Table == "t" {
 			found = true
 		}
