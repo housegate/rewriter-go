@@ -1100,3 +1100,37 @@ func TestTableRef_ModifyQueryIsRefused(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_MaterializedViewStorageAllowlists pins spec 2026-09-26 R4
+// (final review Critical 4): a materialized view's own ENGINE / SETTINGS go
+// through the same T5 allowlist and engine-argument protected-database walk as
+// a CREATE TABLE's, in both SI states.
+func TestTableRef_MaterializedViewStorageAllowlists(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(currentDatabase(),'^db2') AS SELECT * FROM db1.o", "table engine Merge is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Buffer(currentDatabase(), `db2.x`, 1, 10, 100, 10000, 1000000, 10000000, 100000000) AS SELECT * FROM db1.o", "table engine Buffer is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Distributed('c', currentDatabase(), `db2.x`) AS SELECT * FROM db1.o", "table engine Distributed is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Kafka('h:9092', 't', 'g', 'JSONEachRow') AS SELECT * FROM db1.o", "table engine Kafka is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS disk = disk(type=local, path='/') AS SELECT * FROM db1.o", "table setting disk is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS storage_policy = 'p' AS SELECT * FROM db1.o", "table setting storage_policy is not accepted"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+		}
+		cases = append(cases,
+			tablerefCase{name: "merge_protected_literal", si: si,
+				sql:      "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge('phys', '^db2') AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "mergetree_allowed", si: si,
+				sql:      "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.mv" ENGINE=MergeTree ORDER BY a AS SELECT * FROM phys."db1.o" "db1.o"`},
+		)
+	}
+	regexp := tablerefCase{name: "merge_regexp_inactive", sql: "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(REGEXP('hg_.*'),'.*') AS SELECT * FROM db1.o",
+		wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table engine Merge is not accepted"}
+	cases = append(cases, regexp)
+	runTablerefCases(t, cases)
+}

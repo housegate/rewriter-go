@@ -325,9 +325,9 @@ func CollectSourceFunctionNames(ast AST) ([]string, error) {
 	return out, nil
 }
 
-// CreateTableStorage returns the CREATE TABLE engine name/arg-count and every
-// SETTINGS key from either of the two shapes the T5 policy inspects (spec
-// 2026-09-26 §5):
+// CreateTableStorage returns the CREATE TABLE / CREATE MATERIALIZED VIEW
+// engine name/arg-count and every SETTINGS key from either of the two shapes
+// the T5 policy inspects (spec 2026-09-26 §5, R4):
 //
 //   - a CREATE TABLE's engine_property (decoded the same way
 //     decodeTableEngineNamespaceRef reads it: property.this.anonymous.this.
@@ -349,8 +349,18 @@ func CreateTableStorage(e Engine, ast AST) (engineName string, argCount int, set
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return "", 0, nil, false, fmt.Errorf("engine: decode create table storage: %w", err)
 	}
-	if body, isCreateTable := root[NodeCreateTable].(map[string]any); isCreateTable {
-		props, _ := body["properties"].([]any)
+	// A materialized view with its own storage (CREATE MATERIALIZED VIEW …
+	// ENGINE = … [SETTINGS …] AS SELECT …) carries the same engine and
+	// settings properties as a CREATE TABLE, under table_properties (spec
+	// 2026-09-26 R4).
+	createBody, isCreateTable := root[NodeCreateTable].(map[string]any)
+	propsKey := "properties"
+	if !isCreateTable {
+		createBody, isCreateTable = root[NodeCreateView].(map[string]any)
+		propsKey = "table_properties"
+	}
+	if body := createBody; isCreateTable {
+		props, _ := body[propsKey].([]any)
 		for _, p := range props {
 			pm, ok := p.(map[string]any)
 			if !ok {
