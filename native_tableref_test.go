@@ -1072,3 +1072,31 @@ func TestTableRef_MutationAndColumnExpressionReads(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_ModifyQueryIsRefused pins spec 2026-09-26 R3 (final review
+// Critical 3). Option taken: refuse. ALTER TABLE … MODIFY QUERY is a Raw ALTER
+// action whose body polyglot does not structure; rather than splice a
+// rewritten materialized-view body back into that text, dynamic mode refuses
+// every MODIFY QUERY with "statement is not supported" after T2 (parameter)
+// and T3 (protected database) have run on its text.
+func TestTableRef_ModifyQueryIsRefused(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		hgSafe := tablerefCase{name: "hg_safe", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t", si: si,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database hg_safe is not addressable"}
+		if si {
+			hgSafe.wantCode, hgSafe.wantMsg = pb.RewriteCode_UnsupportedStatement, "statement is not supported"
+		}
+		cases = append(cases, hgSafe,
+			tablerefCase{name: "phys", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM phys.`db2.x`", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "parameter", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM {p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "query parameters are not supported in a database or table position"},
+			tablerefCase{name: "dotted_unqualified", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM `db2.x`", si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+			tablerefCase{name: "own_table", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT a FROM db1.o", si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		)
+	}
+	runTablerefCases(t, cases)
+}

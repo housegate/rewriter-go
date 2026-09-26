@@ -181,8 +181,10 @@ func OpaqueTextDatabases(e Engine, text string) (dbs []string, ok bool) {
 // identifier, a quoted identifier, a parameter, or a parenthesis opening one
 // of those (a table operand), an Identifier parameter anywhere, or one of the
 // cross-table partition actions (FETCH PARTITION|PART, ATTACH / REPLACE
-// PARTITION|PART … FROM, MOVE PARTITION|PART … TO TABLE). A tokenizer failure
-// is reported as ungoverned (fail closed).
+// PARTITION|PART … FROM, MOVE PARTITION|PART … TO TABLE). ALTER TABLE …
+// MODIFY QUERY always carries a SELECT, so it is always refused (spec
+// 2026-09-26 R3: the materialized-view body is not rewritten in place). A
+// tokenizer failure is reported as ungoverned (fail closed).
 func OpaqueTextIsUngoverned(e Engine, text string) bool {
 	toks, err := tokenizeRaw(e, text)
 	if err != nil {
