@@ -8,15 +8,16 @@ import (
 
 // PreflightTableReferences applies the position-independent halves of the
 // table-reference policy (spec 2026-09-26 §5) before any handler runs, in
-// precedence order: identifier parameters (T2), then protected databases
-// (T3, Task 4), then — only while the storage-integrity surface is inactive
-// (controller ruling 1, Task 7) — the table-function/table-engine/
-// table-setting allowlists (T5). While the surface is active,
-// rewriteSelectCore and preflightStorageIntegrityWrite run the very same T5
-// check themselves, immediately after their own SI namespace policy finds
-// nothing to reject, so none of the SI-owned messages this corpus pins
-// (merge('hg_safe', …), merge('db1', …) under contract V2, …) ever move.
-// Static mode and requests without dynamic args are untouched.
+// precedence order: identifier parameters (T2); for a command node, the
+// unmodelled-class refusal; protected databases (T3); the table-function /
+// table-engine / table-setting allowlists (T5, only while the
+// storage-integrity surface is inactive — while it is active,
+// rewriteSelectCore and preflightStorageIntegrityWrite run the same check
+// after their own SI namespace policy, so an SI-owned message wins);
+// command-text findings; string lookups (T6); then SQL-bearing settings and
+// ungoverned reads (rejectUngovernedReads, again deferred to the SI handlers
+// while the surface is active). Static mode and requests without dynamic
+// args are untouched.
 func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, bool, error) {
 	sel := nameresolve.FindActive(opts)
 	if sel.Mode != nameresolve.ModeDynamic {
@@ -95,31 +96,19 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 			return resp, true, nil
 		}
 	}
-	// T5 + T3 for a DESCRIBE / EXISTS / SHOW CREATE target that is a function
-	// call, not a plain [db.]name (Task 7 fix round 1 finding 3), plus T6
-	// mechanism (b) (Task 7 fix round 2): a `command` node's raw text is
-	// tokenized exactly once and used for BOTH concerns. ParseObjectTarget's
-	// own name-run extraction silently drops everything from "(" onward, so
-	// e.g. `DESCRIBE TABLE mysql('h', ...)` reported Table="mysql" and fell
-	// through RewriteDescribe's existing pass-through-unchanged branch —
-	// neither the T5 allowlist nor the protected-database check ever saw it.
-	// The verb/target detection reads the tokenizer's first token (comments
-	// are stripped before the token stream, never a separate token) rather
-	// than string-matching the raw text, so a leading comment can no longer
-	// defeat it (fix round 2 finding 3). Every lookup-family call the same
-	// tokenize pass finds (mechanism (b): an ALTER TABLE … UPDATE/DELETE
-	// mutation, including a multi-command tail, has no structured "function"
-	// node at all — it is either the command's whole text, as here, or an
-	// embedded Raw action, handled separately below) is refused with the
-	// generic "does not resolve" message; hasColumnInTable is refused here
-	// too, since a command node's raw text never has a SELECT-body rewrite
-	// pipeline of its own. A tokenizer error fails CLOSED regardless of SI
-	// state (mechanism (b)'s own words), unlike an ordinary internal-error
-	// propagation elsewhere in this file.
-	//
-	// Unconditional (both SI states): unlike SELECT/write dispatch, no later
-	// handler defers either concern for an active SI surface, so there is no
-	// other opportunity to catch them.
+	// Command-text findings. A `command` node's raw text is tokenized once
+	// and used for three concerns: a tokenizer error fails closed
+	// (UnsupportedStatement, in both SI states); every lookup-family call in
+	// the text — an ALTER TABLE … UPDATE/DELETE tail, multi-command included,
+	// has no structured "function" node — is refused with the "does not
+	// resolve" message (hasColumnInTable too: command text has no SELECT-body
+	// rewrite pipeline); and a DESCRIBE / EXISTS / SHOW CREATE whose target is
+	// a function call rather than a plain [db.]name gets the T5 table-function
+	// classification and the T3 check on its arguments (ParseObjectTarget's
+	// name-run extraction stops at the name and would otherwise pass the call
+	// through). The verb is read from the token stream, so a leading comment
+	// cannot hide it. All of this runs in both SI states: no later handler
+	// examines these concerns for a command node.
 	if kind, kerr := engine.NodeKind(ast); kerr != nil {
 		return nil, false, kerr
 	} else if kind == engine.NodeCommand {
@@ -212,7 +201,7 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 	// keeps precedence.
 	if !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-		if rejected, rerr := rejectUngovernedReads(e, ast, resp); rerr != nil {
+		if rejected, rerr := rejectUngovernedReads(e, ast, sql, sel, resp); rerr != nil {
 			return nil, false, rerr
 		} else if rejected {
 			resp.SqlAfterRewrite = sql
@@ -233,9 +222,21 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 // always wins. Shared, like rejectDisallowedCarriers, by
 // PreflightTableReferences (SI surface inactive) and the SI-active handler
 // paths.
-func rejectUngovernedReads(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLResponse) (bool, error) {
-	if rejected, err := rejectSQLBearingSettings(e, ast, resp); err != nil || rejected {
-		return rejected, err
+func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (bool, error) {
+	// An unmodelled command class is refused as such (with the SI surface
+	// active, by the SI catch-all after this check finds nothing), so its
+	// SETTINGS clause is not examined: the unmodelled-class refusal precedes
+	// the settings check (spec 2026-09-26 R8).
+	checkSettings := true
+	if kind, err := engine.NodeKind(ast); err != nil {
+		return false, err
+	} else if kind == engine.NodeCommand && !commandClassModelled(e, ast, sql, sel) {
+		checkSettings = false
+	}
+	if checkSettings {
+		if rejected, err := rejectSQLBearingSettings(e, ast, resp); err != nil || rejected {
+			return rejected, err
+		}
 	}
 	reads, err := engine.ExpressionPositionHasReads(ast)
 	if err != nil {
@@ -264,7 +265,7 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLR
 // PreflightTableReferences (run only while the storage-integrity surface is
 // inactive) and rewriteSelectCore / preflightStorageIntegrityWrite (run only
 // while it is active, immediately after their own SI namespace policy finds
-// nothing to reject) — controller ruling 1. A CREATE TABLE's engine name is
+// nothing to reject), so an SI-owned message wins. A CREATE TABLE's engine name is
 // checked only when CreateTableStorage found one: an ALTER TABLE … MODIFY
 // SETTING has no engine of its own, and CreateTableStorage reports that shape
 // with an empty engineName rather than a bare (refused) engine name.

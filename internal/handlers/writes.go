@@ -215,7 +215,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 		} else if rejected {
 			return namespaceResp, true, nil
 		}
-		if rejected, rerr := rejectUngovernedReads(e, ast, namespaceResp); rerr != nil {
+		if rejected, rerr := rejectUngovernedReads(e, ast, sql, sel, namespaceResp); rerr != nil {
 			return nil, false, rerr
 		} else if rejected {
 			namespaceResp.SqlAfterRewrite = sql

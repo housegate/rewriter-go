@@ -138,7 +138,7 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			} else if rejected {
 				return ast, resp, nil
 			}
-			if rejected, rerr := rejectUngovernedReads(e, ast, resp); rerr != nil {
+			if rejected, rerr := rejectUngovernedReads(e, ast, "", sel, resp); rerr != nil {
 				return nil, nil, rerr
 			} else if rejected {
 				return ast, resp, nil

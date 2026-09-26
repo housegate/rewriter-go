@@ -372,7 +372,8 @@ func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 }
 
 // CreateViewHasRefresh reports a CREATE [MATERIALIZED] VIEW whose header (the
-// depth-0 tokens before its body's first SELECT / WITH) carries REFRESH. The
+// depth-0 tokens before its body's first SELECT / WITH) carries a REFRESH
+// EVERY | AFTER clause. The
 // pinned polyglot drops a refreshable view's REFRESH … [APPEND] TO clause when
 // it regenerates the statement, so dynamic mode refuses it rather than
 // forwarding a different statement (spec 2026-09-26 R12). A tokenizer failure
@@ -382,7 +383,9 @@ func CreateViewHasRefresh(e Engine, sql string) bool {
 	if err != nil {
 		return true
 	}
-	return headerHasWords(toks, "REFRESH")
+	// REFRESH is the clause keyword only when EVERY or AFTER follows it; a
+	// view or target named `refresh` is an ordinary name.
+	return headerHasWords(toks, "REFRESH", "EVERY") || headerHasWords(toks, "REFRESH", "AFTER")
 }
 
 // InsertFromInfile reports an INSERT … FROM INFILE statement: the pinned

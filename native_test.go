@@ -1388,3 +1388,23 @@ func TestDoRewrite_StorageIntegritySealsCollectorErrors(t *testing.T) {
 		t.Fatal("static-mode collector failure must retain the legacy Go error channel")
 	}
 }
+
+// TestNativeRewrite_StaticInOperandsDecodeLikeFrom pins that the shared
+// IN-operand decoder also serves static mode: a nested-paren operand and a
+// bare quoted dotted operand are rewritten like a static FROM table.
+func TestNativeRewrite_StaticInOperandsDecodeLikeFrom(t *testing.T) {
+	e := newEngine(t)
+	r := New(e, WithOptions(statOptFn(map[string]string{"x": "p.x3", "db2.x": "p.x2"})))
+	for sql, want := range map[string]string{
+		"SELECT * FROM t WHERE a IN ((x))":   `SELECT * FROM t WHERE a IN ("p.x3")`,
+		"SELECT * FROM t WHERE a IN `db2.x`": `SELECT * FROM t WHERE a IN "p.x2"`,
+	} {
+		res, err := r.Rewrite(context.Background(), sql, "acct")
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		if res.Code != pb.RewriteCode_Success || res.SQL != want {
+			t.Errorf("%s: code=%v sql=%q, want Success %q", sql, res.Code, res.SQL, want)
+		}
+	}
+}

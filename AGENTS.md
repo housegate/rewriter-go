@@ -88,16 +88,16 @@ rewriter-go/
 
 ## Table-reference policy (spec 2026-09-26)
 
-Applies only to requests that select `nameresolve.ModeDynamic`; static and no-rewrite requests are untouched.
+The policy checks apply only to requests that select `nameresolve.ModeDynamic`. The IN-operand decoder below is shared by every mode, so a static-mode IN operand at any paren depth, or a bare quoted `` `db2.x` ``, is rewritten like a static-mode FROM table (`a IN ((x))` → `a IN ("p.x3")` for a table_map entry `x → p.x3`).
 
 Where it lives:
 
 - `internal/handlers/preflight.go` — `PreflightTableReferences` (the ordered checks below), `commandClassModelled`, `rejectDisallowedCarriers` (T5), `rejectUngovernedReads` (R2 / R5), `CheckSessionSet` (the SET carve-out).
 - `internal/engine/parameters.go` — T2 (`TablePositionParameter`, `IdentifierParameterInText`).
 - `internal/engine/nodes.go` — the ordered walker (`walkStatementObjects`) and the one IN-operand decoder, `decodeInOperand`, used by every IN consumer.
-- `internal/engine/references.go` — T3 database collection (`CollectDatabaseReferences`, `CollectSIHandlerBlindDatabaseReferences`) and the T6 string-lookup family.
+- `internal/engine/references.go` — T3 database collection (`CollectDatabaseReferences`, `CollectDatabaseReferenceSets` — every database plus the SI-handler-blind subset) and the T6 string-lookup family.
 - `internal/engine/ungoverned.go` — `walkGenericExpression` (column / constraint / storage-property / ALTER-action expressions), `ExpressionPositionHasReads`, and the opaque ALTER text scans (`OpaqueAlterTexts`, `OpaqueTextDatabases`, `OpaqueTextIsUngoverned`).
-- `internal/engine/settings.go` — SQL-bearing settings and the setting-value rule.
+- `internal/engine/settings.go` — SQL-bearing and dialect settings and the setting-value rule.
 - `internal/engine/allowlists.go` — T5 classification and messages.
 - `native.go` — dispatch order, the final unmodelled-class refusal and the SET carve-out, and `sealStorageIntegrityHandlerError`.
 
@@ -117,9 +117,9 @@ Precedence (first match wins):
 4. T5 allowlists — source-role table functions, CREATE TABLE / materialized-view ENGINE and SETTINGS, ALTER … MODIFY SETTING. With the surface active this runs inside the SI handlers after their namespace policy, so an SI message wins.
 5. Command-text findings — a tokenizer failure (T7), a lookup-family call in the text (T6), an EXISTS / SHOW CREATE / DESCRIBE whose target is a table function (T5 classification, T3 on its arguments).
 6. T6 string lookups — joinGet / dictGet-family calls anywhere, hasColumnInTable outside a SELECT body; Raw ALTER action text is scanned the same way.
-7. R5 settings, then R2 ungoverned reads (`rejectUngovernedReads`; with the surface active, inside the SI handlers after their own checks): a SQL-bearing setting (`additional_table_filters`, `additional_result_filter`, `parallel_replicas_custom_key`) in any query-level SETTINGS clause is a T5 table-setting refusal and a setting value that is not a numeric / string literal or bare identifier / keyword is T7; a table, IN-table operand, table function or namespace carrier in a structured UPDATE / DELETE, INSERT VALUES, column / constraint / non-engine storage property or structured ALTER action is T7; opaque ALTER text carrying a subquery, a table-operand IN, FETCH PARTITION, ATTACH / REPLACE PARTITION … FROM, MOVE PARTITION … TO TABLE or MODIFY QUERY is T7.
-8. Ordinary dispatch. Handlers resolve what they model: DESCRIBE / EXISTS / SHOW CREATE / SHOW COLUMNS resolve an unqualified target like FROM; `DESCRIBE (SELECT …)` and an empty EXISTS / SHOW CREATE are T7; `CREATE MATERIALIZED VIEW … REFRESH` and `INSERT … FROM INFILE` are T7 (the generator does not round-trip them).
-9. The final fallthrough refuses every statement no handler took, except a session SET the carve-out admits (surface inactive only; every assignment `<name> = <value>` with a numeric literal, string literal or bare identifier / keyword value).
+7. R5 settings, then R2 ungoverned reads (`rejectUngovernedReads`; with the surface active, inside the SI handlers after their own checks; skipped for an unmodelled command class, which step 2 refuses): a SQL-bearing setting (`additional_table_filters`, `additional_result_filter`, `parallel_replicas_custom_key`) or dialect setting (`dialect`, `polyglot_dialect`, `allow_experimental_{polyglot,prql,kusto}_dialect`, any name ending in `_dialect`) in any query-level SETTINGS clause is a T5 table-setting refusal and a setting value that is not a numeric / string literal or bare identifier / keyword is T7; a table, IN-table operand, table function or namespace carrier in a structured UPDATE / DELETE, INSERT VALUES, column / constraint / non-engine storage property or structured ALTER action is T7; opaque ALTER text carrying a subquery, a table-operand IN (a quoted callable-IN name such as `` `in`(…) `` counts as the bare one), FETCH PARTITION, ATTACH / REPLACE PARTITION … FROM, MOVE PARTITION … TO TABLE or MODIFY QUERY is T7.
+8. Ordinary dispatch. Handlers resolve what they model: DESCRIBE / EXISTS / SHOW CREATE / SHOW COLUMNS resolve an unqualified target like FROM; `DESCRIBE (SELECT …)` and an empty EXISTS / SHOW CREATE are T7; a SHOW COLUMNS / INDEX / KEYS WHERE or LIKE body carrying a subquery, a function call, a table-operand IN or a quoted dotted name is T7 (its qualified names went through T3); `CREATE MATERIALIZED VIEW … REFRESH EVERY|AFTER` and `INSERT … FROM INFILE` are T7 (the generator does not round-trip them).
+9. The final fallthrough refuses every statement no handler took, except a session SET the carve-out admits (surface inactive only; every assignment `<name> = <value>` with a numeric literal, string literal or bare identifier / keyword value, and no SQL-bearing or dialect setting name).
 
 Any handler, walk or generate error (including a polyglot recursion-limit error) is sealed as UnsupportedStatement: `statement is not supported` with the surface inactive, the SI catch-all with it active. With the surface active, the live-view classification in `doRewrite` still runs before T2.
 

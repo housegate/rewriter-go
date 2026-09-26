@@ -1486,3 +1486,26 @@ func TestTableRef_ResidualDialectSettings(t *testing.T) {
 		wantMsg: "table setting polyglot_dialect is not accepted"})
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_ResidualMinors pins the residual-round minors: REFRESH is
+// matched only as the refresh clause, and under V2 an unmodelled command class
+// answers with the SI catch-all before its SETTINGS clause is examined.
+func TestTableRef_ResidualMinors(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "mv_named_refresh", si: si, sql: "CREATE MATERIALIZED VIEW db1.refresh TO db1.t2 AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.refresh" TO phys."db1.t2" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			tablerefCase{name: "mv_to_refresh", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv TO db1.refresh AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.refresh" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			tablerefCase{name: "mv_refresh_after", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv REFRESH AFTER 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		)
+	}
+	cases = append(cases, tablerefCase{name: "explain_settings_v2", si: true,
+		sql:      "EXPLAIN SELECT * FROM db1.o SETTINGS additional_result_filter = 'a > 1'",
+		wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+	runTablerefCases(t, cases)
+}
