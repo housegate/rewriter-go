@@ -266,14 +266,20 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		return hresp, nil
 	}
 
-	// Pass-through: regenerate (proves the engine round-trips); fall back to
-	// the input on any generate hiccup so SQL is always runnable. With an
-	// active storage-integrity contract this branch is a refusal instead:
-	// reaching it means no handler modelled the statement, so no handler
-	// checked it against the protocol-owned namespaces (Spec I D1).
+	// Spec 2026-09-26 T7: no handler modelled the statement. Without the SI
+	// surface this used to pass through as Success; every unmodelled class is
+	// now refused, except a session SET, which names no table and which
+	// clients send routinely. Under an active SI surface SET stays refused
+	// (H6), so the carve-out is inside the inactive branch only.
 	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = StorageIntegrityUnmodelledMessage
+		finalize(resp, ast, sql, ec, siVersion, e, selection)
+		return resp, nil
+	}
+	if selection.Mode == nameresolve.ModeDynamic && !isSessionSet(ast, sql) {
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = engine.UnsupportedStatementMessage
 		finalize(resp, ast, sql, ec, siVersion, e, selection)
 		return resp, nil
 	}
@@ -283,6 +289,18 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	resp.Code = pb.RewriteCode_Success
 	finalize(resp, ast, sql, ec, siVersion, e, selection)
 	return resp, nil
+}
+
+// isSessionSet reports a top-level SET statement. Measured 2026-09-26: the
+// pinned polyglot renders `SET max_threads = 1` as
+// {"command": {"this": "SET max_threads = 1"}}, so the check is the command text.
+func isSessionSet(ast engine.AST, sql string) bool {
+	kind, _ := engine.NodeKind(ast)
+	if kind != engine.NodeCommand {
+		return false
+	}
+	text, _ := engine.CommandSQL(ast)
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(text)), "SET ")
 }
 
 func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {
@@ -376,6 +394,12 @@ func classifyCommand(sql string) pb.StatementType {
 		return pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES
 	case strings.HasPrefix(u, "SHOW TABLES"), strings.HasPrefix(u, "SHOW"):
 		return pb.StatementType_STATEMENT_TYPE_SHOW_TABLES
+	case strings.HasPrefix(u, "SET "):
+		// A session SET carries no statement type of its own (spec 2026-09-26
+		// T7); isSessionSet recognizes the same prefix for doRewrite's
+		// unmodelled-tail carve-out. Listed explicitly so it reads as a
+		// recognized class, not lumped in with a genuinely unclassified one.
+		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	default:
 		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	}

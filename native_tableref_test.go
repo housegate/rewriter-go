@@ -494,3 +494,152 @@ func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
 		t.Fatalf("accessed[0] = %+v, want IsStorageIntegrity=true", acc)
 	}
 }
+
+// TestTableRef_TableFunctionsAndEnginesAreAllowlisted pins spec 2026-09-26 T5
+// (Task 7): every source-role table function and CREATE TABLE engine/setting
+// must be on a closed allowlist, and an unrecognized table function name is
+// refused as "not recognised" rather than silently forwarded.
+//
+// Controller ruling 1 restructured the brief's original single si-independent
+// table: the refused-function and refused-engine rows below all run with
+// si:false (the default, unchanged from the brief) because with the
+// storage-integrity surface active, PreflightTableReferences defers this
+// check entirely to rewriteSelectCore / preflightStorageIntegrityWrite,
+// AFTER their own SI namespace policy — so an SI-owned message (e.g.
+// merge('hg_safe', …) or merge('db1', …) under contract V2) is never
+// pre-empted. The three si:true rows appended at the end exercise exactly
+// that ordering: the existing SI message for a table function whose target IS
+// SI-owned, the NEW T5 refusal for one whose target is NOT, and a plain
+// success for an allowed function.
+func TestTableRef_TableFunctionsAndEnginesAreAllowlisted(t *testing.T) {
+	var cases []tablerefCase
+	for _, fn := range []string{
+		"merge('db1', 'o')", "remote('h', 'db1', 'o')", "remoteSecure('h', 'db1', 'o')", "cluster('c', db1.o)",
+		"clusterAllReplicas('c', db1.o)", "loop('db1', 'o')", "dictionary(db1.d)", "mergeTreeIndex('db1', 'o')",
+		"mergeTreeProjection('db1', 'o', 'p')", "timeSeriesData('db1', 'o')", "prometheusQuery('db1', 'o', 'up')",
+		"clickhouse('db1.o')", "mysql('h', 'db1', 'o', 'u', 'p')", "postgresql('h', 'db1', 'o', 'u', 'p')",
+		"mongodb('h', 'db1', 'o', 'u', 'p', 'a UInt8')", "jdbc('ds', 'db1', 'o')", "odbc('ds', 'db1', 'o')",
+		"executable('x.sh', 'TSV', 'a UInt8')", "fuzzQuery('SELECT 1')",
+	} {
+		name := fn[:strings.IndexByte(fn, '(')]
+		cases = append(cases, tablerefCase{name: fn, sql: "SELECT * FROM " + fn,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function " + name + " is not accepted"})
+	}
+	cases = append(cases,
+		tablerefCase{name: "unknown", sql: "SELECT * FROM frobnicate('x')", wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg: "table function frobnicate is not recognised"},
+		tablerefCase{name: "numbers", sql: "SELECT * FROM numbers(10)", wantCode: pb.RewriteCode_Success, wantAcc: []string{}},
+		tablerefCase{name: "view body", sql: "SELECT * FROM view(SELECT * FROM db1.o)", wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}},
+		tablerefCase{name: "input", sql: "INSERT INTO db1.o SELECT * FROM input('a UInt8')", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "url unchanged (non-goal)", sql: "SELECT * FROM url('http://127.0.0.1/x', CSV)", wantCode: pb.RewriteCode_Success, wantAcc: []string{}},
+		tablerefCase{name: "insert function", sql: "INSERT INTO FUNCTION remote('h', 'db1', 'o') VALUES (1)", wantCode: pb.RewriteCode_UnsupportedStatement},
+	)
+	for _, eng := range []string{
+		"Merge('db1', '^o')", "Buffer(db1.o, 16, 10, 100, 10000, 1000000, 10000000, 100000000)",
+		"Distributed(default, db1.o)", "URL('http://127.0.0.1/x', CSV)", "Dictionary(db1.d)", "KeeperMap('/x')",
+		"EmbeddedRocksDB", "Kafka", "S3('http://127.0.0.1/x', CSV)", "File(CSV)",
+		"ReplicatedMergeTree('/clickhouse/tables/x', 'r1')",
+	} {
+		name := eng
+		if i := strings.IndexByte(eng, '('); i >= 0 {
+			name = eng[:i]
+		}
+		cases = append(cases, tablerefCase{name: eng, sql: "CREATE TABLE db1.n (a UInt64) ENGINE = " + eng + " ORDER BY a",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table engine " + name + " is not accepted"})
+	}
+	cases = append(cases,
+		tablerefCase{name: "MergeTree", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "ReplicatedMergeTree bare", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = ReplicatedMergeTree ORDER BY a", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "Memory", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = Memory", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "storage_policy", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a SETTINGS storage_policy = 's3'",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting storage_policy is not accepted"},
+		tablerefCase{name: "disk", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a SETTINGS disk = 'd'",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting disk is not accepted"},
+		tablerefCase{name: "alter modify setting disk", sql: "ALTER TABLE db1.o MODIFY SETTING disk = 'd'",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting disk is not accepted"},
+		tablerefCase{name: "unknown engine", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = Frob", wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg: "table engine Frob is not accepted"},
+		// Controller ruling 1's first and third si:true rows: the precedence
+		// guarantee that an SI-owned message never moves, and that a plainly
+		// allowed function stays allowed. The second si:true row (an
+		// ordinary local-catalog function reaching the NEW T5 check itself)
+		// needs a database with no Active table of its own -- "db1" cannot be
+		// reused here, since db1.t Active reserves the WHOLE "db1" database
+		// for every indirect namespace surface (see the row directly below);
+		// it is TestTableRef_TableFunctionAllowlistAppliesUnderActiveSI.
+		tablerefCase{name: "si merge active logical db unmoved", sql: "SELECT * FROM merge('db1', 'o')", si: true,
+			wantCode: pb.RewriteCode_RewriteError, wantMsg: "not directly addressable through merge table function"},
+		tablerefCase{name: "si numbers stays allowed", sql: "SELECT * FROM numbers(10)", si: true, wantCode: pb.RewriteCode_Success},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_TableFunctionAllowlistAppliesUnderActiveSI pins controller
+// ruling 1's second si:true row directly: a table function whose database
+// hosts no Active storage-integrity table of its own (unlike "db1", which
+// owns db1.t and so is entirely reserved by rejectStorageIntegrityNamespaces's
+// IsStorageIntegrityLogicalDatabase branch — see
+// TestTableRef_ProtectedDatabasesAreRefusedEverywhere and the "si merge
+// active logical db unmoved" row above) still reaches the NEW T5 allowlist
+// from rewriteSelectCore, once the SI namespace policy finds nothing to
+// reject for it.
+func TestTableRef_TableFunctionAllowlistAppliesUnderActiveSI(t *testing.T) {
+	e := newEngine(t)
+	dyn := tablerefDynamic(true)
+	dyn.DatabaseMap["other"] = "phys"
+	resp, err := doRewrite(e, "SELECT * FROM mergeTreeIndex('other', 'u')", []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || !strings.Contains(resp.GetMessage(), "table function mergeTreeIndex is not accepted") {
+		t.Fatalf("resp = %s %q, want UnsupportedStatement \"table function mergeTreeIndex is not accepted\"",
+			resp.GetCode(), resp.GetMessage())
+	}
+}
+
+// TestTableRef_StringLookupsAreResolvedOrRefused pins spec 2026-09-26 T6
+// (Task 7): joinGet/dictGet-family calls are always refused (measured against
+// ClickHouse 25.8 directly by the controller — none of the string/identifier
+// forms those functions accept actually resolves a dotted logical table name,
+// so there is no working rewrite for them), while hasColumnInTable's
+// database/table pair is resolved and rewritten exactly like a FROM
+// reference.
+func TestTableRef_StringLookupsAreResolvedOrRefused(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "joinGet mapped literal", sql: "SELECT joinGet('db1.j', 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+		{name: "joinGet identifier form", sql: "SELECT joinGet(db1.j, 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+		{name: "dictGet mapped", sql: "SELECT dictGet('db1.d', 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.d" does not resolve`},
+		// Task 4's preflight protected-database step fires first: "phys" is
+		// protected, so this never reaches the T6 refusal above.
+		{name: "joinGet protected preflight fires first", sql: "SELECT joinGet('phys.`db2.x`', 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+		{name: "hasColumnInTable mapped", sql: "SELECT hasColumnInTable('db1', 'j', 'v')", wantCode: pb.RewriteCode_Success,
+			wantSQL: "SELECT hasColumnInTable('phys', 'db1.j', 'v')", wantAcc: []string{"db1.j"}},
+		{name: "hasColumnInTable with host prefix", sql: "SELECT hasColumnInTable('localhost', 'db1', 'j', 'v')", wantCode: pb.RewriteCode_Success,
+			wantSQL: "SELECT hasColumnInTable('localhost', 'phys', 'db1.j', 'v')", wantAcc: []string{"db1.j"}},
+		{name: "hasColumnInTable active table refused", sql: "SELECT hasColumnInTable('db1', 't', 'v')", si: true,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "db1.t" does not resolve`},
+		{name: "hasColumnInTable non-literal db refused", sql: "SELECT hasColumnInTable(concat('db', '1'), 'j', 'v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest},
+	})
+}
+
+// TestTableRef_UnmodelledClassesAreRefusedWithoutSI pins spec 2026-09-26 T7
+// (Task 7): with the storage-integrity surface inactive, a statement class no
+// handler models is now refused (it used to pass through as Success) — except
+// a session SET, which names no table and which clients send routinely.
+func TestTableRef_UnmodelledClassesAreRefusedWithoutSI(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "system", sql: "SYSTEM RELOAD CONFIG", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "explain", sql: "EXPLAIN SELECT * FROM db1.o", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "check", sql: "CHECK TABLE db1.o", wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "create user", sql: "CREATE USER u1", wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "create function", sql: "CREATE FUNCTION f AS x -> x + 1", wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET max_threads = 1"},
+		{name: "set refused under V2", sql: "SET max_threads = 1", si: true, wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "select 1", sql: "SELECT 1", wantCode: pb.RewriteCode_Success},
+	})
+}

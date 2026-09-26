@@ -300,6 +300,203 @@ func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
 	return out, nil
 }
 
+// CollectSourceFunctionNames returns every function name reached through a
+// source role — FROM/JOIN (walkTableSource), INSERT INTO FUNCTION
+// (walkInsertObjects), and CREATE … AS function(…) (walkCreateTableFunctionSource)
+// — in document order, regardless of whether the name is one this package
+// otherwise recognizes as a namespace-bearing table function (spec
+// 2026-09-26 T5): the allowlist must see an unrecognized name too, so it can
+// refuse it as "not recognised" rather than silently forwarding it.
+func CollectSourceFunctionNames(ast AST) ([]string, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode source functions: %w", err)
+	}
+	var out []string
+	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
+		sourceFunction: func(name string) {
+			if name != "" {
+				out = append(out, name)
+			}
+		},
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateTableStorage returns the CREATE TABLE engine name/arg-count and every
+// SETTINGS key from either of the two shapes the T5 policy inspects (spec
+// 2026-09-26 §5):
+//
+//   - a CREATE TABLE's engine_property (decoded the same way
+//     decodeTableEngineNamespaceRef reads it: property.this.anonymous.this.
+//     identifier for a parenthesized engine, or property.this.identifier for
+//     a bare one) and settings_property (each SETTINGS key, read from its
+//     "eq" expressions' left-hand column name).
+//   - an ALTER TABLE … MODIFY SETTING action. Polyglot leaves this one
+//     unstructured — a {"Raw":{"sql":"MODIFY SETTING <k>=<v>[, …]"}} action,
+//     the same shape alterCrossTableTargets already reads for other raw ALTER
+//     forms — so its setting keys are recovered by tokenizing, not by a
+//     structured field read. There is no engine to check for an ALTER, so
+//     engineName is always "" here; the caller must not treat that as a bare
+//     engine name.
+//
+// ok=false when ast is neither shape (or a CREATE TABLE with no engine and no
+// settings at all — nothing for the allowlist to check).
+func CreateTableStorage(e Engine, ast AST) (engineName string, argCount int, settings []string, ok bool, err error) {
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return "", 0, nil, false, fmt.Errorf("engine: decode create table storage: %w", err)
+	}
+	if body, isCreateTable := root[NodeCreateTable].(map[string]any); isCreateTable {
+		props, _ := body["properties"].([]any)
+		for _, p := range props {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if engProp, ok := pm["engine_property"].(map[string]any); ok {
+				engineName, argCount = decodeEngineProperty(engProp)
+			}
+			if setProp, ok := pm["settings_property"].(map[string]any); ok {
+				settings = append(settings, settingsPropertyKeys(setProp)...)
+			}
+		}
+		if engineName == "" && len(settings) == 0 {
+			return "", 0, nil, false, nil
+		}
+		return engineName, argCount, settings, true, nil
+	}
+	if body, isAlterTable := root[NodeAlterTable].(map[string]any); isAlterTable {
+		actions, _ := body["actions"].([]any)
+		for _, a := range actions {
+			am, ok := a.(map[string]any)
+			if !ok {
+				continue
+			}
+			raw, ok := am["Raw"].(map[string]any)
+			if !ok {
+				continue
+			}
+			sql, _ := raw["sql"].(string)
+			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "MODIFY SETTING") {
+				continue
+			}
+			keys, kerr := modifySettingKeys(e, sql)
+			if kerr != nil {
+				return "", 0, nil, false, kerr
+			}
+			settings = append(settings, keys...)
+		}
+		if len(settings) == 0 {
+			return "", 0, nil, false, nil
+		}
+		return "", 0, settings, true, nil
+	}
+	return "", 0, nil, false, nil
+}
+
+// decodeEngineProperty reads one engine_property node's identifier/argument
+// count, matching the two shapes polyglot emits: a parenthesized engine
+// ({"this":{"anonymous":{"this":{"identifier":{"name":…}},"expressions":[…]}}})
+// or a bare one ({"this":{"identifier":{"name":…}}}, no arguments).
+func decodeEngineProperty(property map[string]any) (name string, argCount int) {
+	outer, ok := property["this"].(map[string]any)
+	if !ok {
+		return "", 0
+	}
+	if anon, ok := outer["anonymous"].(map[string]any); ok {
+		nameHolder, _ := anon["this"].(map[string]any)
+		args, _ := anon["expressions"].([]any)
+		return identName(nameHolder["identifier"]), len(args)
+	}
+	return identName(outer["identifier"]), 0
+}
+
+// settingsPropertyKeys reads every SETTINGS key from a CREATE TABLE
+// settings_property node: {"expressions":[{"eq":{"left":{"column":{"name":
+// {"name":"<key>"}}},"right":…}},…]}.
+func settingsPropertyKeys(property map[string]any) []string {
+	exprs, _ := property["expressions"].([]any)
+	var out []string
+	for _, e := range exprs {
+		em, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		eq, ok := em["eq"].(map[string]any)
+		if !ok {
+			continue
+		}
+		left, ok := eq["left"].(map[string]any)
+		if !ok {
+			continue
+		}
+		col, ok := left["column"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name := identName(col["name"]); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// modifySettingKeys extracts every setting key from an ALTER TABLE … MODIFY
+// SETTING action's raw SQL text (e.g. "MODIFY SETTING disk='d'") by
+// tokenizing (mirrors alterCrossTableTargets's precedent for raw ALTER
+// actions polyglot cannot structure): the first name token after the
+// "SETTING" keyword text is a key, and so is the first name token after every
+// subsequent top-level comma. Parenthesized argument lists inside a setting's
+// value (e.g. a function call) are skipped by paren depth so an argument's
+// own comma is never mistaken for a new setting.
+func modifySettingKeys(e Engine, sql string) ([]string, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, err
+	}
+	settingIdx := -1
+	for i, tok := range toks {
+		if strings.EqualFold(tok.Text, "SETTING") || strings.EqualFold(tok.Text, "SETTINGS") {
+			settingIdx = i
+			break
+		}
+	}
+	if settingIdx < 0 {
+		return nil, nil
+	}
+	var out []string
+	depth := 0
+	expectKey := true
+	for i := settingIdx + 1; i < len(toks); i++ {
+		tok := toks[i]
+		switch tok.TokenType {
+		case "L_PAREN":
+			depth++
+			continue
+		case "R_PAREN":
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth > 0 {
+			continue
+		}
+		if expectKey && isNameTok(tok.TokenType) {
+			out = append(out, tok.Text)
+			expectKey = false
+			continue
+		}
+		if tok.TokenType == "COMMA" {
+			expectKey = true
+		}
+	}
+	return out, nil
+}
+
 func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 	detail, ok := decodeNamespaceFunctionRefDetail(fn)
 	return detail.ref, ok
@@ -755,6 +952,13 @@ type readSourceVisitor struct {
 	// an Identifier query parameter (spec 2026-09-26 T2). Callers that do not
 	// set it keep dropping those positions, as before.
 	parameter func(node map[string]any)
+	// sourceFunction fires once for EVERY function reached through a source
+	// role (FROM/JOIN, INSERT INTO FUNCTION, CREATE … AS function(…)) —
+	// before decodeNamespaceFunctionRefDetail's recognized-namespace check,
+	// so an unrecognized name is reported too (spec 2026-09-26 T5:
+	// CollectSourceFunctionNames must see it to refuse it as "not
+	// recognised" rather than silently accepting it).
+	sourceFunction func(name string)
 }
 
 type readSourceScope struct {
@@ -838,6 +1042,9 @@ func walkInsertObjects(body map[string]any, parent readSourceScope, visitor read
 	}
 	if target, ok := body["function_target"].(map[string]any); ok {
 		if function, ok := target["function"].(map[string]any); ok {
+			if visitor.sourceFunction != nil {
+				visitor.sourceFunction(nameOf(function))
+			}
 			if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 				detail.ref.Source == NamespaceRefTableFunction && visitor.namespace != nil {
 				visitor.namespace(function, detail)
@@ -909,6 +1116,9 @@ func walkCreateTableFunctionSource(node any, scope readSourceScope, visitor read
 	function, ok := identifierFunc["function"].(map[string]any)
 	if !ok {
 		return rejectUnknownReadCarrier(identifierFunc, "CREATE AS table function")
+	}
+	if visitor.sourceFunction != nil {
+		visitor.sourceFunction(nameOf(function))
 	}
 	if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 		detail.ref.Source == NamespaceRefTableFunction && visitor.namespace != nil {
@@ -1373,6 +1583,9 @@ func walkTableSource(node any, scope readSourceScope, visitor readSourceVisitor)
 			return nil
 		}
 		if function, ok := n["function"].(map[string]any); ok {
+			if visitor.sourceFunction != nil {
+				visitor.sourceFunction(nameOf(function))
+			}
 			if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 				detail.ref.Source == NamespaceRefTableFunction {
 				if visitor.namespace != nil {

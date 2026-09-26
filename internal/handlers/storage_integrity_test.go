@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
@@ -678,17 +680,45 @@ func TestRewriteSelect_storageIntegrityIdentifierOriginNamespacesDecoded(t *test
 	}
 
 	t.Run("string literal database is already semantic", func(t *testing.T) {
+		// Originally pinned that a merge() call whose string-literal argument
+		// does not decode to an SI-owned name (here "\x64b1" stays raw text,
+		// unlike the backtick-quoted IDENTIFIER form in "merge identifier
+		// database" above, which IS hex-unescaped to "db1") reaches Success:
+		// the SI namespace extractor must not double-apply identifier
+		// hex-escape decoding to an already-semantic string literal. Spec
+		// 2026-09-26 T5 (Task 7) now refuses every merge() call outright,
+		// via the table-function allowlist, before the literal/identifier
+		// distinction this subtest exercises is ever consulted -- so the
+		// SAME SQL now reaches Success by RewriteSelect (its namespace target
+		// is never SI-owned, so rejectStorageIntegrityNamespaces still
+		// correctly finds nothing here) is no longer observable through the
+		// full pipeline. Confirmed instead at the layer this subtest actually
+		// cares about: rejectStorageIntegrityNamespaces itself.
 		sql := `SELECT * FROM merge('\\x64b1', '.*')`
 		ast, err := e.ParseOne(sql)
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+		refs, err := engine.CollectNamespaceRefs(ast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resp.GetCode() != pb.RewriteCode_Success {
-			t.Fatalf("code=%v message=%q, string literal was decoded twice", resp.GetCode(), resp.GetMessage())
+		resp := &pb.RewriteSQLResponse{TableRewrites: map[string]string{}}
+		sel := nameresolve.FindActive(dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
+		if rejectStorageIntegrityNamespaces(e, resp, refs, sel, pb.RewriteCode_RewriteError) {
+			t.Fatalf("rejectStorageIntegrityNamespaces rejected %+v, want no rejection (string literal was decoded twice)", resp)
+		}
+
+		// Full pipeline: spec 2026-09-26 T5 now refuses every merge() call
+		// outright (it is on the table-function allowlist's refused list),
+		// regardless of whether its own namespace target is SI-owned.
+		resp2, err := RewriteSelect(e, ast, dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const wantMsg = "table function merge is not accepted"
+		if resp2.GetCode() != pb.RewriteCode_UnsupportedStatement || resp2.GetMessage() != wantMsg {
+			t.Fatalf("code=%v message=%q, want UnsupportedStatement %q", resp2.GetCode(), resp2.GetMessage(), wantMsg)
 		}
 	})
 }
@@ -1339,32 +1369,83 @@ func TestStorageIntegrityTableEngineNamespacesFailClosed(t *testing.T) {
 	assertStorageIntegrityReject(t, resp, "storage-integrity")
 }
 
+// TestStorageIntegrityNamespaceExtractorLeavesResolvedOrdinaryTargetsAlone
+// pins that rejectStorageIntegrityNamespaces itself (the SI namespace policy)
+// does not reject a namespace target that is not SI-owned. Before spec
+// 2026-09-26 T5 (Task 7), that was also the whole pipeline's observable
+// outcome for every one of these shapes: nothing else looked at a table
+// function or table-engine name at all, so "the extractor leaves it alone"
+// meant "the statement succeeds." T5 now closes that gap with its own
+// allowlist, layered on top, so mergeTreeIndex/loop/the Remote engine are
+// refused regardless of their (still not-SI-owned) target — this test
+// verifies the extractor layer directly for those three, and keeps the
+// full-pipeline Success assertion only for the plain IN operand, which T5
+// does not touch at all.
 func TestStorageIntegrityNamespaceExtractorLeavesResolvedOrdinaryTargetsAlone(t *testing.T) {
 	e := newEngine(t)
 	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
-	for _, sql := range []string{
-		`SELECT * FROM other.u WHERE id IN other.v`,
-		`SELECT * FROM mergeTreeIndex('other', 'u')`,
-		`SELECT * FROM loop(other.u)`,
-	} {
-		ast, err := e.ParseOne(sql)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp, err := RewriteSelect(e, ast, dynOpt(dyn), sql)
-		if err != nil || resp.GetCode() != pb.RewriteCode_Success {
-			t.Fatalf("%q: err=%v code=%v msg=%q", sql, err, resp.GetCode(), resp.GetMessage())
-		}
-	}
+	sel := nameresolve.FindActive(dynOpt(dyn))
 
-	sql := `CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'other', 'u')`
+	// Untouched by T5 (not a source-role function or a CREATE TABLE storage
+	// clause): still succeeds end to end.
+	sql := `SELECT * FROM other.u WHERE id IN other.v`
 	ast, err := e.ParseOne(sql)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, handled, err := RewriteWrite(e, ast, sql, dynOpt(dyn))
-	if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
-		t.Fatalf("ordinary engine: handled=%v err=%v code=%v msg=%q", handled, err, resp.GetCode(), resp.GetMessage())
+	resp, err := RewriteSelect(e, ast, dynOpt(dyn), sql)
+	if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("%q: err=%v code=%v msg=%q", sql, err, resp.GetCode(), resp.GetMessage())
+	}
+
+	// On the T5 refused-function list: the extractor itself still finds
+	// nothing (target not SI-owned), confirmed directly; the full pipeline
+	// now refuses via T5 instead of succeeding.
+	for _, tc := range []struct {
+		sql, fn string
+	}{
+		{`SELECT * FROM mergeTreeIndex('other', 'u')`, "mergeTreeIndex"},
+		{`SELECT * FROM loop(other.u)`, "loop"},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs, err := engine.CollectNamespaceRefs(ast)
+		if err != nil {
+			t.Fatal(err)
+		}
+		extractorResp := &pb.RewriteSQLResponse{TableRewrites: map[string]string{}}
+		if rejectStorageIntegrityNamespaces(e, extractorResp, refs, sel, pb.RewriteCode_RewriteError) {
+			t.Fatalf("%q: rejectStorageIntegrityNamespaces rejected %+v, want no rejection", tc.sql, extractorResp)
+		}
+		resp, err := RewriteSelect(e, ast, dynOpt(dyn), tc.sql)
+		wantMsg := "table function " + tc.fn + " is not accepted"
+		if err != nil || resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != wantMsg {
+			t.Fatalf("%q: err=%v code=%v msg=%q, want UnsupportedStatement %q", tc.sql, err, resp.GetCode(), resp.GetMessage(), wantMsg)
+		}
+	}
+
+	// Same shape for a CREATE TABLE storage clause: "Remote" is not on the T5
+	// allowed-engines list either, so the write path now refuses it too.
+	createSQL := `CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'other', 'u')`
+	createAST, err := e.ParseOne(createSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createRefs, err := engine.CollectNamespaceRefs(createAST)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineExtractorResp := &pb.RewriteSQLResponse{TableRewrites: map[string]string{}}
+	if rejectStorageIntegrityNamespaces(e, engineExtractorResp, createRefs, sel, pb.RewriteCode_UnsupportedStatement) {
+		t.Fatalf("rejectStorageIntegrityNamespaces rejected %+v, want no rejection", engineExtractorResp)
+	}
+	createResp, handled, err := RewriteWrite(e, createAST, createSQL, dynOpt(dyn))
+	const wantEngineMsg = "table engine Remote is not accepted"
+	if err != nil || !handled || createResp.GetCode() != pb.RewriteCode_UnsupportedStatement || createResp.GetMessage() != wantEngineMsg {
+		t.Fatalf("ordinary engine: handled=%v err=%v code=%v msg=%q, want UnsupportedStatement %q",
+			handled, err, createResp.GetCode(), createResp.GetMessage(), wantEngineMsg)
 	}
 }
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -257,4 +258,180 @@ func unwrapQuoted(s string) string {
 		}
 	}
 	return s
+}
+
+// StringLookup is one detected string-form table/dictionary lookup call
+// (spec 2026-09-26 T6): a joinGet/dictGet-family call, whose single first
+// argument denotes a table or dictionary by a qualified string or unquoted
+// identifier, or hasColumnInTable, whose database and table are two separate
+// literal arguments (an optional leading host[, user[, pw]] triple shifts
+// every index — the same shift stringLookupArgDatabase already documents).
+type StringLookup struct {
+	// Function is the call's name exactly as written in the source SQL —
+	// used verbatim in the caller's rejection message.
+	Function string
+	// Arg is the qualified "db.table" text the call names: for the
+	// joinGet-family it is that single argument's decoded value (from either
+	// a string literal or an unquoted qualified identifier); for
+	// hasColumnInTable it is the database and table literals joined with a
+	// "." (splitting on the FIRST '.' always recovers the original pair,
+	// because the physical database half is a plain identifier and never
+	// itself contains a literal '.'). "" when no usable target could be
+	// decoded at all.
+	Arg string
+	// Literal reports whether every argument this decode depends on came
+	// from a string literal (hasColumnInTable's own db/table pair, or the
+	// joinGet-family's lone literal argument) — false for an unquoted
+	// identifier argument (joinGet-family only) or an unresolvable
+	// expression.
+	Literal bool
+}
+
+// StringLookupCalls returns every recognized string-form lookup call in ast,
+// in document order, wherever it appears — an ordinary scalar-expression
+// position (SELECT list, WHERE, …), not gated by readSourceVisitor's
+// source-role traversal, mirroring collectStringLookupDatabases. Only a call
+// that names a first argument at all is reported (spec 2026-09-26 T6,
+// controller ruling 2): a bare `joinGet()` names nothing to refuse or
+// rewrite.
+func StringLookupCalls(ast AST) ([]StringLookup, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode string lookups: %w", err)
+	}
+	var out []StringLookup
+	collectStringLookupCalls(root, &out)
+	return out, nil
+}
+
+func collectStringLookupCalls(node any, out *[]StringLookup) {
+	switch n := node.(type) {
+	case map[string]any:
+		if fn, ok := n["function"].(map[string]any); ok {
+			name, _ := fn["name"].(string)
+			args, _ := fn["args"].([]any)
+			if IsStringLookup(name) && len(args) > 0 {
+				*out = append(*out, decodeStringLookupCall(name, args))
+			}
+		}
+		for _, v := range n {
+			collectStringLookupCalls(v, out)
+		}
+	case []any:
+		for _, v := range n {
+			collectStringLookupCalls(v, out)
+		}
+	}
+}
+
+// decodeStringLookupCall decodes one already-matched (IsStringLookup, len(args)>0)
+// call's target into a StringLookup. hasColumnInTable requires BOTH its
+// database and table arguments (args[len-3] and args[len-2] — see
+// stringLookupArgDatabase) to be string literals; a fully-decoded call always
+// carries Literal=true for the join-Get family too, since the joined value is
+// meaningless once any half is unresolvable (RewriteStringLookups is never
+// asked to rewrite either family that measured out to always-refuse).
+func decodeStringLookupCall(name string, args []any) StringLookup {
+	if strings.HasPrefix(strings.ToLower(name), "hascolumnintable") {
+		if len(args) < 3 {
+			return StringLookup{Function: name}
+		}
+		dbLit, dbOK := literalStringArg(args[len(args)-3])
+		tableLit, tableOK := literalStringArg(args[len(args)-2])
+		if !dbOK || !tableOK {
+			return StringLookup{Function: name}
+		}
+		return StringLookup{Function: name, Arg: dbLit + "." + tableLit, Literal: true}
+	}
+	value, origin, ok := tableFunctionArgValue(args[0])
+	if !ok {
+		return StringLookup{Function: name}
+	}
+	return StringLookup{Function: name, Arg: value, Literal: origin == namespaceValueLiteral}
+}
+
+// literalStringArg decodes arg as a string literal, or reports ok=false for
+// anything else (an identifier, an expression, a non-string literal).
+func literalStringArg(arg any) (string, bool) {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	lit, ok := m["literal"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	return decodeStringLiteralValue(lit)
+}
+
+// RewriteStringLookups mutates every string-lookup call decide accepts,
+// re-walking ast in the same shape StringLookupCalls inspects. decide is
+// invoked once per call; returning ok=false leaves that call's arguments
+// untouched. Because decide is expected to be a pure function of the call's
+// own Function/Arg (exactly mirroring how RewriteSelectTables's decide is a
+// pure function of the TableTarget it receives), this second, independent
+// walk never needs to agree on ORDER with a caller's own earlier
+// StringLookupCalls pass — only on each call's own content. The accepted
+// replacement is the new qualified "db.table" text: for a single-argument
+// call it becomes that argument's whole literal value; for hasColumnInTable
+// it is split on the FIRST '.' into the physical database and physical table
+// literals (buildDynamicTableName's own "<logical>.<table>" shape, so the
+// table half may itself still contain a dot — the database half never does).
+func RewriteStringLookups(ast AST, decide func(StringLookup) (string, bool)) (AST, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode string lookups: %w", err)
+	}
+	rewriteStringLookupCalls(root, decide)
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode string lookups: %w", err)
+	}
+	return AST(out), nil
+}
+
+func rewriteStringLookupCalls(node any, decide func(StringLookup) (string, bool)) {
+	switch n := node.(type) {
+	case map[string]any:
+		if fn, ok := n["function"].(map[string]any); ok {
+			name, _ := fn["name"].(string)
+			args, _ := fn["args"].([]any)
+			if IsStringLookup(name) && len(args) > 0 {
+				call := decodeStringLookupCall(name, args)
+				if replacement, ok := decide(call); ok {
+					fn["args"] = applyStringLookupReplacement(name, args, replacement)
+				}
+			}
+		}
+		for _, v := range n {
+			rewriteStringLookupCalls(v, decide)
+		}
+	case []any:
+		for _, v := range n {
+			rewriteStringLookupCalls(v, decide)
+		}
+	}
+}
+
+// applyStringLookupReplacement builds the mutated args slice for one accepted
+// rewrite: replacement is split on the first '.' into the hasColumnInTable
+// db/table pair, or used whole for the joinGet-family's single argument.
+func applyStringLookupReplacement(name string, args []any, replacement string) []any {
+	out := append([]any(nil), args...)
+	if strings.HasPrefix(strings.ToLower(name), "hascolumnintable") {
+		if len(out) < 3 {
+			return out
+		}
+		db, table := replacement, ""
+		if idx := strings.IndexByte(replacement, '.'); idx >= 0 {
+			db, table = replacement[:idx], replacement[idx+1:]
+		}
+		out[len(out)-3] = litStr(db)
+		out[len(out)-2] = litStr(table)
+		return out
+	}
+	if len(out) > 0 {
+		out[0] = litStr(replacement)
+	}
+	return out
 }

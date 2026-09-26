@@ -209,6 +209,19 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	if rejectStorageIntegrityNamespaces(e, namespaceResp, namespaceRefs, sel, pb.RewriteCode_UnsupportedStatement) {
 		return namespaceResp, true, nil
 	}
+	// Controller ruling 1 (spec 2026-09-26 T5, Task 7): while the
+	// storage-integrity surface is active, PreflightTableReferences does NOT
+	// run the table-function/table-engine/table-setting allowlists (that
+	// would risk pre-empting an SI-owned message this corpus pins) — run the
+	// same check here instead, now that the SI namespace policy above has
+	// already had first refusal.
+	if nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+		if rejected, cerr := rejectDisallowedCarriers(e, ast, namespaceResp); cerr != nil {
+			return nil, false, cerr
+		} else if rejected {
+			return namespaceResp, true, nil
+		}
+	}
 
 	// CREATE TABLE AS SELECT and INSERT ... SELECT embedded sources are no
 	// longer preflight-rejected here (spec 2026-09-26 T4, second half): the

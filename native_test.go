@@ -1291,7 +1291,7 @@ func TestStorageIntegrityContract_EmptySILiveViewKeepsLegacyDispatch(t *testing.
 	}
 }
 
-func TestDoRewrite_UnmodelledStatementPassesThroughWithoutStorageIntegrity(t *testing.T) {
+func TestDoRewrite_UnmodelledStatementIsRefusedWithoutStorageIntegrity(t *testing.T) {
 	e := newEngine(t)
 	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
 		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
@@ -1304,9 +1304,13 @@ func TestDoRewrite_UnmodelledStatementPassesThroughWithoutStorageIntegrity(t *te
 	if err != nil {
 		t.Fatalf("doRewrite: %v", err)
 	}
-	if resp.GetCode() != pb.RewriteCode_Success {
-		t.Fatalf("code = %v (%s), want Success — empty-SI requests keep the legacy pass-through",
-			resp.GetCode(), resp.GetMessage())
+	// Spec 2026-09-26 T7 (Task 7): every unmodelled class is now refused, even
+	// with the storage-integrity surface inactive — only a session SET keeps
+	// the legacy pass-through (see TestStorageIntegrityContractV1_
+	// EmptyMapRefusesUnmodelledButPassesSet in native_v2_test.go).
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage {
+		t.Fatalf("code = %v (%s), want UnsupportedStatement %q",
+			resp.GetCode(), resp.GetMessage(), engine.UnsupportedStatementMessage)
 	}
 	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		t.Fatalf("contract ack = %v, want UNSPECIFIED", resp.GetStorageIntegrityContractVersion())
