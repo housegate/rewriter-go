@@ -288,6 +288,14 @@ func TestValidateSICorpus_RequiresKnownContractVersion(t *testing.T) {
 	}
 }
 
+func TestValidateSICorpus_TableReferenceCasesCarryProtectedDatabases(t *testing.T) {
+	cases := []SICase{{Name: "si_tr_x_rejected", SQL: "SELECT 1", ContractVersion: "V1", WantCode: "InvalidRewriteRequest",
+		WantMessageContains: "x", Reject: true, Dynamic: &SIDynamic{DatabaseMap: map[string]string{"db1": "phys"}}}}
+	if violations := ValidateSICorpus(cases); len(violations) == 0 || !strings.Contains(violations[0], "protected_databases") {
+		t.Fatalf("a si_tr_ case without protected_databases must fail validation: %v", violations)
+	}
+}
+
 func TestSICaseOptionsCarryTheCaseContractVersion(t *testing.T) {
 	for name, want := range map[string]pb.StorageIntegrityContractVersion{
 		"V1": pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,

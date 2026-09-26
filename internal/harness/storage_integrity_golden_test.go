@@ -50,6 +50,7 @@ func (c SICase) options() []*pb.RewriteOption {
 		KnownPhysicalDatabases:               c.Dynamic.KnownPhysicalDatabases,
 		UpstreamLogicalDatabaseInContext:     c.Dynamic.UpstreamLogical,
 		Delim:                                c.Dynamic.Delim,
+		ProtectedDatabases:                   c.Dynamic.ProtectedDatabases,
 		LogicalDatabaseToRemoteUpstreamIndex: c.Dynamic.LogicalDatabaseToRemoteUpstreamIndex,
 	}
 	if c.Dynamic.UpstreamPhysical != "" {
