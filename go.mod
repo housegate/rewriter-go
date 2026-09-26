@@ -20,3 +20,5 @@ require (
 // polyglot is vendored as a git submodule so the Go bindings and the Rust FFI
 // lib are built from the same pinned commit (see .gitmodules).
 replace github.com/tobilg/polyglot/packages/go => ./third_party/polyglot-src/packages/go
+
+replace github.com/housegate/rewriter-proto => ../rewriter-proto.feat-protected-databases

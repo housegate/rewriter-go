@@ -80,9 +80,17 @@ func resolvePhysicalDatabase(logical string, a *pb.RewriteTableDynamicArgs) (str
 		return phys, true
 	}
 	for _, k := range a.GetKnownPhysicalDatabases() {
-		if k == logical {
-			return logical, true
+		if k != logical {
+			continue
 		}
+		// A protected name loses the pass-through role: caller SQL may not
+		// address it as a database at all (spec 2026-09-26 T3).
+		for _, protected := range a.GetProtectedDatabases() {
+			if protected == k {
+				return "", false
+			}
+		}
+		return logical, true
 	}
 	return "", false
 }
