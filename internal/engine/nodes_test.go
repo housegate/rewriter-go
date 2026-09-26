@@ -1151,20 +1151,32 @@ func TestCollectEmbeddedReadSources_InSubqueryAndScalarArgumentsStayRoleAware(t 
 	}
 }
 
-func TestCollectEmbeddedReadSources_InTableOperandsRespectCTEScopeAndOpacity(t *testing.T) {
+func TestCollectEmbeddedReadSources_InTableOperandsRespectCTEScopeAndParameterOperandsAreReported(t *testing.T) {
 	e := newTestEngine(t)
-	got := collectReadSourceViews(t, e, `WITH t AS (SELECT * FROM other.cte_body)
+	sql := `WITH t AS (SELECT * FROM other.cte_body)
 		SELECT
 			id IN t,
 			id IN hg_safe.{target:Identifier},
 			in(id, {other_target:Identifier})
-		FROM other.base`)
+		FROM other.base`
+	got := collectReadSourceViews(t, e, sql)
 	want := []readSourceView{
 		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "cte_body"}, resolved: true},
 		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "base"}, resolved: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, err := TablePositionParameter(ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatalf("TablePositionParameter = false, want true for %q", sql)
 	}
 }
 
@@ -1294,15 +1306,26 @@ func TestRewriteSelectTables_RecursiveCTESelfReferencesStayScoped(t *testing.T) 
 	}
 }
 
-func TestCollectEmbeddedReadSources_QualifiedOpaqueTableTargetIsNotFabricated(t *testing.T) {
+func TestCollectEmbeddedReadSources_QualifiedParameterTargetIsReported(t *testing.T) {
 	e := newTestEngine(t)
-	got := collectReadSourceViews(t, e,
-		`SELECT * FROM hg_safe.{target:Identifier} JOIN hg_unsafe.db1__x ON 1`)
+	sql := `SELECT * FROM hg_safe.{target:Identifier} JOIN hg_unsafe.db1__x ON 1`
+	got := collectReadSourceViews(t, e, sql)
 	want := []readSourceView{
 		{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "db1__x"}, resolved: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, err := TablePositionParameter(ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatalf("TablePositionParameter = false, want true for %q", sql)
 	}
 }
 

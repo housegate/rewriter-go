@@ -157,6 +157,13 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		siVersion = version
 		resp.StorageIntegrityContractVersion = siVersion
 	}
+	if selection.Mode == nameresolve.ModeDynamic {
+		if err := nameresolve.ValidateProtectedDatabases(selection.Dynamic); err != nil {
+			resp.Code = pb.RewriteCode_InvalidRewriteRequest
+			resp.Message = err.Error()
+			return resp, nil
+		}
+	}
 	ast, err := e.ParseOne(sql)
 	if err != nil {
 		resp.Code = pb.RewriteCode_SyntaxError
@@ -190,6 +197,15 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 			finalize(resp, ast, sql, ec, siVersion, e, selection)
 			return resp, nil
 		}
+	}
+
+	// Table-reference policy (spec 2026-09-26 §5): identifier parameters and
+	// protected databases are refused before any handler can rewrite them.
+	if presp, handled, perr := handlers.PreflightTableReferences(e, ast, sql, opts); perr != nil {
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, perr)
+	} else if handled {
+		finalize(presp, ast, sql, ec, siVersion, e, selection)
+		return presp, nil
 	}
 
 	// Phase 2: route writes (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME/EXCHANGE/

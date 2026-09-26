@@ -652,6 +652,10 @@ type readSourceVisitor struct {
 	function  func(function map[string]any, detail namespaceRefDetail)
 	inTable   func(expression map[string]any, detail namespaceRefDetail)
 	namespace func(expression map[string]any, detail namespaceRefDetail)
+	// parameter fires once for every database or table position that holds
+	// an Identifier query parameter (spec 2026-09-26 T2). Callers that do not
+	// set it keep dropping those positions, as before.
+	parameter func(node map[string]any)
 }
 
 type readSourceScope struct {
@@ -1322,6 +1326,13 @@ func isTableRefPayload(node map[string]any) bool {
 }
 
 func emitTableSource(expr, table map[string]any, scope readSourceScope, visitor readSourceVisitor) {
+	if unresolvedIdentifierNode(table["name"]) ||
+		(table["schema"] != nil && unresolvedIdentifierNode(table["schema"])) {
+		if visitor.parameter != nil {
+			visitor.parameter(table)
+		}
+		return
+	}
 	target := decodeTableTarget(table)
 	if target.Table == "" || (target.DB == "" && scope.ctes[target.Table]) {
 		return
@@ -1544,6 +1555,22 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 	if err := walkExpression(inNode["this"], scope, visitor); err != nil {
 		return err
 	}
+	// An Identifier query parameter as the sole IN operand (bare `{p:Identifier}`,
+	// a qualified `db.{p:Identifier}`, or a column/dot chain naming one) is a
+	// database/table position (spec 2026-09-26 T2) that decodeInNamespaceRefDetail
+	// below cannot see: it bails out to unresolved (Target.Table=="", !Resolved)
+	// for any of these shapes, which reads as "not a namespace ref" rather than
+	// "a namespace ref this policy must reject". Detect it here, ahead of that
+	// decode, so the parameter position is reported instead of silently dropped.
+	if isField, _ := inNode["is_field"].(bool); isField {
+		if exprs, _ := inNode["expressions"].([]any); len(exprs) == 1 {
+			if arg, ok := exprs[0].(map[string]any); ok && inOperandHoldsParameter(arg) {
+				if visitor.parameter != nil {
+					visitor.parameter(arg)
+				}
+			}
+		}
+	}
 	if detail, ok := decodeInNamespaceRefDetail(inNode); ok {
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
 			if visitor.namespace != nil {
@@ -1571,6 +1598,19 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 
 func walkFunctionExpression(function map[string]any, scope readSourceScope, visitor readSourceVisitor) error {
 	args, _ := function["args"].([]any)
+	// Same reasoning as walkInExpression's parameter check, for the callable
+	// IN family's second (in-table) argument: `in(a, {p:Identifier})` and
+	// `in(a, db.{p:Identifier})` both hold an Identifier parameter that
+	// decodeNamespaceFunctionRefDetail below cannot resolve to a target, so it
+	// would otherwise be silently dropped rather than reported.
+	if canonical, ok := canonicalCallableInName(strings.ToLower(nameOf(function))); ok && len(args) == 2 {
+		if arg, ok := args[1].(map[string]any); ok && inOperandHoldsParameter(arg) {
+			if visitor.parameter != nil {
+				visitor.parameter(arg)
+			}
+		}
+		_ = canonical
+	}
 	if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 		detail.ref.Source == NamespaceRefInTable {
 		if len(args) > 0 {

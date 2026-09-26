@@ -77,6 +77,8 @@ type WriteInfo struct {
 
 	Sub        CommandSub    // command sub-classification (later tasks)
 	RawTargets []TableTarget // raw targets parsed from a command's SQL (later tasks)
+
+	ParameterTarget bool // a write slot or MV TO target holds an Identifier parameter (spec T2)
 }
 
 // setTableRef sets a table node's name (always) and schema (only when newDB is
@@ -313,6 +315,10 @@ func InspectWrite(ast AST) (WriteInfo, error) {
 		info.Sub = classifyWriteCommand(raw)
 	}
 	writeSlots(kind, body, func(role WriteRole, tbl map[string]any) {
+		if unresolvedIdentifierNode(tbl["name"]) || (tbl["schema"] != nil && unresolvedIdentifierNode(tbl["schema"])) {
+			info.ParameterTarget = true
+			return
+		}
 		info.Slots = append(info.Slots, WriteSlot{Role: role, Target: decodeTableTarget(tbl)})
 	})
 	// A table-function target leaves an empty-name placeholder slot: CREATE TABLE x
