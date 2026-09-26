@@ -319,6 +319,22 @@ func TestTableRef_InOperandsAreRewrittenAndReported(t *testing.T) {
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", "db1.t"}},
 		{name: "callable active table derived read", sql: "SELECT * FROM db1.o WHERE in(a, db1.t)", si: true, wantCode: pb.RewriteCode_Success,
 			wantAcc: []string{"db1.o", "db1.t"}},
+		// Unqualified spellings of the same Active table (controller review
+		// round 2): the operand resolves via UpstreamLogicalDatabaseInContext
+		// ("db1") to the same db1.t, so it must read through the derived safe
+		// surface exactly like the qualified form above — not get blanket-
+		// rejected the way an unqualified table-function/table-engine operand
+		// still does. wantAcc's second entry is ".t", not "db1.t": like the
+		// "unqualified" (non-SI) case above, TableTarget{DB:"",Table:"t"}
+		// reports its raw, unresolved OriginalDatabase; the accessed entry is
+		// still correctly flagged IsStorageIntegrity (measured, not asserted by
+		// this helper, which only compares db+table).
+		{name: "unqualified active table derived read (infix)", sql: "SELECT * FROM db1.o WHERE a IN t", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", ".t"}},
+		{name: "unqualified active table derived read (paren)", sql: "SELECT * FROM db1.o WHERE a IN (t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", ".t"}},
+		{name: "unqualified active table derived read (callable)", sql: "SELECT * FROM db1.o WHERE in(a, t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))`, wantAcc: []string{"db1.o", ".t"}},
 		{name: "cte alias untouched", sql: "WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c", wantCode: pb.RewriteCode_Success,
 			wantSQL: `WITH c AS (SELECT 1 AS a) SELECT * FROM phys."db1.o" "db1.o" WHERE a IN c`, wantAcc: []string{"db1.o"}},
 		{name: "system stays", sql: "SELECT * FROM db1.o WHERE a IN system.tables", wantCode: pb.RewriteCode_Success,
