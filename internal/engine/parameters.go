@@ -146,13 +146,14 @@ func commandTextParameterHit(e Engine, ast AST, sql string) (bool, error) {
 	}
 }
 
-// dbLevelHoldsParameter reads a USE/SHOW ... FROM|IN target for an explicit
-// but unresolved shape: ParseDBLevel only ever populates DB when the
-// subsequent token(s) resolved to a plain name (see ParseDBLevel's USE branch
-// and parsedIdentifierAt), so an explicit clause that stayed unresolved is the
-// Identifier-parameter shape, and DB containing '{' guards any future
-// ParseDBLevel change that starts echoing the raw span into DB instead of
-// leaving it empty.
+// dbLevelHoldsParameter reads a USE/SHOW ... FROM|IN (and, for the COLUMNS/
+// INDEX family, SHOW ... FROM <table> [FROM <database>]) target for an
+// explicit but unresolved shape: ParseDBLevel only ever populates DB/ShowTable
+// when the subsequent token(s) resolved to a plain name (see ParseDBLevel's
+// USE branch, parseShowTableThenDatabase, and parsedIdentifierAt), so an
+// explicit clause that stayed unresolved is the Identifier-parameter shape.
+// DB/ShowTable containing '{' guards any future ParseDBLevel change that
+// starts echoing the raw span into one of them instead of leaving it empty.
 func dbLevelHoldsParameter(info DBLevelInfo) bool {
 	switch info.Kind {
 	case DBUse:
@@ -161,7 +162,17 @@ func dbLevelHoldsParameter(info DBLevelInfo) bool {
 		if info.HasDBClause && !info.DBResolved {
 			return true
 		}
-		return strings.Contains(info.DB, "{")
+		// The COLUMNS/INDEX family's FIRST FROM/IN clause names a TABLE, kept
+		// in ShowTable/ShowTableResolved rather than DB/DBResolved (dblevel.go's
+		// parseShowTableThenDatabase) — checked independently of the database
+		// clause above, since either can carry the parameter on its own (e.g.
+		// "SHOW COLUMNS FROM {p:Identifier}" never reaches a database clause at
+		// all, while "SHOW COLUMNS FROM t FROM {d:Identifier}" resolves the
+		// table and leaves only the database clause unresolved).
+		if info.HasTableClause && !info.ShowTableResolved {
+			return true
+		}
+		return strings.Contains(info.DB, "{") || strings.Contains(info.ShowTable, "{")
 	default:
 		return false
 	}

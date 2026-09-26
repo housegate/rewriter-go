@@ -107,6 +107,8 @@ func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
 			"ALTER TABLE db1.{p:Identifier} UPDATE a = 1 WHERE 1",
 			"CREATE DATABASE {d:Identifier}",
 			"DROP DATABASE {d:Identifier}",
+			"SHOW COLUMNS FROM {p:Identifier}",
+			"SHOW INDEX FROM db1.{p:Identifier}",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg, wantSQL: sql})

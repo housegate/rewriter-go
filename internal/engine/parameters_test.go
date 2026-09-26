@@ -32,6 +32,21 @@ func TestTablePositionParameter(t *testing.T) {
 		"DROP DATABASE {d:Identifier}":   true,
 		"CREATE DATABASE db1":            false,
 		"DROP DATABASE db1":              false,
+
+		// Controller re-review (task-3 fix round 2): the SHOW COLUMNS/INDEX
+		// family's FIRST FROM/IN clause names a TABLE, tracked by ParseDBLevel
+		// in HasTableClause/ShowTable/ShowTableResolved rather than
+		// HasDBClause/DB/DBResolved (dblevel.go's parseShowTableThenDatabase).
+		// dbLevelHoldsParameter's DBShow branch only checked the latter, so a
+		// parameter in the table clause was never reported -- fixed by also
+		// checking HasTableClause && !ShowTableResolved.
+		"SHOW COLUMNS FROM {p:Identifier}":        true,
+		"SHOW COLUMNS FROM db1.{p:Identifier}":    true,
+		"SHOW INDEX FROM {p:Identifier}":          true,
+		"SHOW INDEX FROM db1.{p:Identifier}":      true,
+		"SHOW COLUMNS FROM t FROM {d:Identifier}": true, // database clause, already covered pre-fix
+		"SHOW COLUMNS FROM db1.o":                 false,
+		"SHOW COLUMNS FROM o FROM db1":            false,
 	} {
 		ast, err := e.ParseOne(sql)
 		if err != nil {
