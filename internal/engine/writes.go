@@ -600,13 +600,61 @@ func SetViewBody(ast AST, body AST) (AST, error) {
 	return AST(out), nil
 }
 
+// subqueryShells recursively peels polyglot's `{"subquery": {"this": …, …}}`
+// wrapper off n — the representation of a PARENTHESIZED embedded body
+// (`AS (SELECT …)` / `INSERT INTO t (SELECT …)`), which further
+// parenthesization nests around itself (`AS ((SELECT …))` is
+// `{"subquery":{"this":{"subquery":{"this":{"select":…}, …}}, …}}`, verified
+// via probe). Returns the innermost node reached and the ordered shells
+// peeled (outermost first, i.e. shells[0] is n's own "subquery" value); an
+// empty slice means n itself was not parenthesized. A shell that lacks a
+// map-typed "this" stops the peel (defensive: never seen from polyglot).
+func subqueryShells(n map[string]any) (inner map[string]any, shells []map[string]any) {
+	for {
+		shell, ok := n["subquery"].(map[string]any)
+		if !ok {
+			return n, shells
+		}
+		this, ok := shell["this"].(map[string]any)
+		if !ok {
+			return n, shells
+		}
+		shells = append(shells, shell)
+		n = this
+	}
+}
+
+// rewrapInSubqueryShells re-nests body inside shells (outermost first, as
+// returned by subqueryShells) by threading it in as the innermost shell's
+// "this" and working outward, returning the outermost {"subquery": …} node
+// ready to splice back in place of the original parenthesized query/as_select
+// value. A shell is the exact map subqueryShells peeled (freshly decoded for
+// this call, never shared), so mutating its "this" key in place is safe. An
+// empty shells slice returns body unchanged (the original was not
+// parenthesized).
+func rewrapInSubqueryShells(body map[string]any, shells []map[string]any) map[string]any {
+	for i := len(shells) - 1; i >= 0; i-- {
+		shells[i]["this"] = body
+		body = map[string]any{"subquery": shells[i]}
+	}
+	return body
+}
+
 // ExtractInsertBody returns the SELECT body of an INSERT … SELECT as a
-// standalone statement AST (insert.query), or ok=false for VALUES / FORMAT.
+// standalone statement AST (insert.query, peeled of any parenthesization
+// wrapper), or ok=false for VALUES / FORMAT.
 //
 // Empirically verified (spec 2026-09-26 T4 Step 1): insert.query is
 // {"select":…} (or union/intersect/except) for INSERT … SELECT, nil for
 // VALUES, and {"command":{"this":"FORMAT <fmt>"}} for a FORMAT data clause —
-// isReadBody tells the last two apart from a genuine read body.
+// isReadBody tells the last two apart from a genuine read body. A
+// parenthesized body (`INSERT INTO t (SELECT …)`) is polyglot's
+// {"subquery":{"this":{"select":…}, …}} wrapper around the same read body
+// (verified via probe); subqueryShells peels it so the returned AST is
+// always a bare read-body statement the SELECT pipeline can consume.
+// SetInsertBody re-peels the ORIGINAL (still-wrapped) ast to recover the same
+// shell(s) and rewraps the rewritten body in them, so the generated SQL keeps
+// its parentheses.
 func ExtractInsertBody(ast AST) (AST, bool, error) {
 	kind, body, _, err := bodyOf(ast)
 	if err != nil {
@@ -616,10 +664,14 @@ func ExtractInsertBody(ast AST) (AST, bool, error) {
 		return nil, false, nil
 	}
 	q, ok := body["query"].(map[string]any)
-	if !ok || !isReadBody(q) {
-		return nil, false, nil // nil (VALUES) or a FORMAT command node, not a SELECT
+	if !ok {
+		return nil, false, nil // nil (VALUES)
 	}
-	b, err := json.Marshal(q)
+	inner, _ := subqueryShells(q)
+	if !isReadBody(inner) {
+		return nil, false, nil // a FORMAT command node, not a SELECT
+	}
+	b, err := json.Marshal(inner)
 	if err != nil {
 		return nil, false, fmt.Errorf("engine: encode insert body: %w", err)
 	}
@@ -627,8 +679,11 @@ func ExtractInsertBody(ast AST) (AST, bool, error) {
 }
 
 // SetInsertBody replaces insert.query with the rewritten body and re-encodes
-// the whole statement. It errors on a non-insert kind so a caller cannot
-// silently splice a body onto the wrong node.
+// the whole statement. When the ORIGINAL insert.query was parenthesized
+// (ExtractInsertBody peeled a subquery shell), the rewritten body is
+// re-wrapped in the same shell(s) first, so the generated SQL keeps its
+// parentheses. It errors on a non-insert kind so a caller cannot silently
+// splice a body onto the wrong node.
 func SetInsertBody(ast AST, body AST) (AST, error) {
 	kind, b, root, err := bodyOf(ast)
 	if err != nil {
@@ -641,6 +696,11 @@ func SetInsertBody(ast AST, body AST) (AST, error) {
 	if err := json.Unmarshal(body, &node); err != nil {
 		return nil, fmt.Errorf("engine: decode insert body: %w", err)
 	}
+	if q, ok := b["query"].(map[string]any); ok {
+		if _, shells := subqueryShells(q); len(shells) > 0 {
+			node = rewrapInSubqueryShells(node, shells)
+		}
+	}
 	b["query"] = node
 	out, err := json.Marshal(root)
 	if err != nil {
@@ -650,10 +710,14 @@ func SetInsertBody(ast AST, body AST) (AST, error) {
 }
 
 // ExtractCreateSelectBody returns a CREATE TABLE … AS SELECT's embedded body
-// as a standalone statement AST (create_table.as_select), or ok=false when
-// absent. Empirically verified (Step 1): `EMPTY AS SELECT` carries no
-// as_select at all — polyglot drops the body — so there is nothing to
-// rewrite or report for that form.
+// as a standalone statement AST (create_table.as_select, peeled of any
+// parenthesization wrapper), or ok=false when absent. Empirically verified
+// (Step 1): `EMPTY AS SELECT` carries no as_select at all — polyglot drops
+// the body — so there is nothing to rewrite or report for that form. A
+// parenthesized body (`AS (SELECT …)`, and further nesting like
+// `AS ((SELECT …))`) is polyglot's {"subquery":{"this":…, …}} wrapper
+// (verified via probe, including the double-nested case); subqueryShells
+// peels it exactly like ExtractInsertBody.
 func ExtractCreateSelectBody(ast AST) (AST, bool, error) {
 	kind, body, _, err := bodyOf(ast)
 	if err != nil {
@@ -663,10 +727,14 @@ func ExtractCreateSelectBody(ast AST) (AST, bool, error) {
 		return nil, false, nil
 	}
 	q, ok := body["as_select"].(map[string]any)
-	if !ok || !isReadBody(q) {
+	if !ok {
 		return nil, false, nil
 	}
-	b, err := json.Marshal(q)
+	inner, _ := subqueryShells(q)
+	if !isReadBody(inner) {
+		return nil, false, nil
+	}
+	b, err := json.Marshal(inner)
 	if err != nil {
 		return nil, false, fmt.Errorf("engine: encode create-select body: %w", err)
 	}
@@ -674,8 +742,9 @@ func ExtractCreateSelectBody(ast AST) (AST, bool, error) {
 }
 
 // SetCreateSelectBody replaces create_table.as_select with the rewritten body
-// and re-encodes the whole statement. It errors on a non-create_table kind so
-// a caller cannot silently splice a body onto the wrong node.
+// and re-encodes the whole statement, re-wrapping in the original's
+// subquery shell(s) exactly like SetInsertBody. It errors on a non-create_table
+// kind so a caller cannot silently splice a body onto the wrong node.
 func SetCreateSelectBody(ast AST, body AST) (AST, error) {
 	kind, b, root, err := bodyOf(ast)
 	if err != nil {
@@ -687,6 +756,11 @@ func SetCreateSelectBody(ast AST, body AST) (AST, error) {
 	var node map[string]any
 	if err := json.Unmarshal(body, &node); err != nil {
 		return nil, fmt.Errorf("engine: decode create-select body: %w", err)
+	}
+	if q, ok := b["as_select"].(map[string]any); ok {
+		if _, shells := subqueryShells(q); len(shells) > 0 {
+			node = rewrapInSubqueryShells(node, shells)
+		}
 	}
 	b["as_select"] = node
 	out, err := json.Marshal(root)

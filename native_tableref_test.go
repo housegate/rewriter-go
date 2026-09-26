@@ -451,6 +451,30 @@ func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
 			wantAcc: []string{"db1.n", "db1.t"}},
 		{name: "ctas into active target still refused", sql: "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o", si: true,
 			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "accepts writes only through the signed statement lane"},
+		// Fix round 1: a PARENTHESIZED embedded body (`AS (SELECT …)` /
+		// `INSERT INTO t (SELECT …)`) is polyglot's {"subquery":{"this":…, …}}
+		// wrapper around the same read body, not a bare {"select":…} —
+		// isReadBody saw only "subquery" and rejected it, so
+		// ExtractInsertBody/ExtractCreateSelectBody returned has=false and
+		// rewriteEmbeddedBody passed the statement through UNCHANGED: an SI
+		// source that must be refused was silently forwarded as Success
+		// instead. These rows cover both statements, SI and non-SI, in the
+		// paren form (subqueryShells in internal/engine/writes.go peels the
+		// wrapper; see the engine-level ..._paren tests in writes_test.go).
+		{name: "insert select own paren", sql: "INSERT INTO db1.o (SELECT * FROM db1.p)", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.o", "db1.p"}},
+		{name: "insert select active source paren", sql: "INSERT INTO db1.o (SELECT * FROM db1.t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" (SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t")`, wantAcc: []string{"db1.o", "db1.t"}},
+		// CTAS's generator unconditionally wraps as_select in an extra paren
+		// layer on every Generate call (see internal/engine/writes_test.go's
+		// TestCreateSelectBody_extractRewriteSet note), so a singly-
+		// parenthesized original renders with TWO layers here — matching a
+		// plain parse+Generate round trip of the same SQL with no rewriting
+		// at all (verified via probe).
+		{name: "ctas own paren with comment", sql: "CREATE TABLE db1.n ENGINE = Memory AS (SELECT * FROM db1.p) COMMENT 'x'", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS ((SELECT * FROM phys."db1.p" "db1.p")) COMMENT 'x'`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas active source paren", sql: "CREATE TABLE db1.n ENGINE = Memory AS (SELECT * FROM db1.t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS ((SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t"))`, wantAcc: []string{"db1.n", "db1.t"}},
 	})
 
 	// The signed lane's contract (spec §2): "INSERT remains an ordinary
