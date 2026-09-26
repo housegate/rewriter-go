@@ -41,6 +41,15 @@ import (
 // database named directly in a lookup's argument (e.g. joinGet('phys.`x`',
 // …)) never reaches here: Task 4's preflight (CollectDatabaseReferences via
 // collectStringLookupDatabases) already refused it before any handler ran.
+//
+// Task 7 fix round 1 finding 2: PreflightTableReferences now ALSO refuses
+// every joinGet/dictGet-family call statement-wide (SELECT bodies included,
+// via engine.StringLookupCalls), before rewriteSelectCore ever runs — so by
+// the time this function's own joinGet/dictGet branch below would fire, the
+// preflight has already refused the statement with the identical message.
+// That branch is kept as a defensive, harmless second layer rather than
+// removed: nothing currently relies on it firing, but nothing is wrong if it
+// does.
 func rewriteStringLookups(ast engine.AST, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (engine.AST, bool, error) {
 	if sel.Mode != nameresolve.ModeDynamic {
 		return ast, false, nil

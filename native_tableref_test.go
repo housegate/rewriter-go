@@ -624,6 +624,73 @@ func TestTableRef_StringLookupsAreResolvedOrRefused(t *testing.T) {
 			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "db1.t" does not resolve`},
 		{name: "hasColumnInTable non-literal db refused", sql: "SELECT hasColumnInTable(concat('db', '1'), 'j', 'v')",
 			wantCode: pb.RewriteCode_InvalidRewriteRequest},
+		// Task 7 fix round 1 finding 2: the joinGet/dictGet-family refusal and
+		// hasColumnInTable's "outside a SELECT body" refusal both run
+		// statement-wide in PreflightTableReferences, not just inside
+		// rewriteSelectCore's SELECT-body handling. Measured directly: real
+		// ClickHouse executes `ALTER TABLE t UPDATE a = joinGet(...)` reading
+		// a Join table from another database, so these four opaque/column
+		// positions must not pass through unrefused.
+		{name: "joinGet in ALTER UPDATE assignment (opaque mutation)",
+			sql:      "ALTER TABLE db1.o UPDATE a = joinGet('default.j','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "dictHas in ALTER DELETE predicate (opaque mutation)",
+			sql:      "ALTER TABLE db1.o DELETE WHERE dictHas('db1.d',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.d" does not resolve`},
+		{name: "hasColumnInTable in ALTER UPDATE assignment refused, not rewritten",
+			sql:      "ALTER TABLE db1.o UPDATE a = hasColumnInTable('default','x','v') WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "joinGet in CREATE TABLE column DEFAULT",
+			sql:      "CREATE TABLE db1.n (a String DEFAULT joinGet('default.j','v',1)) ENGINE = Memory",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+	})
+}
+
+// TestTableRef_StringLookupOrderIsDeterministic pins Task 7 fix round 1
+// finding 1: collectStringLookupCalls/rewriteStringLookupCalls used to
+// recurse with `for _, v := range n` over a decoded map[string]any, whose Go
+// range order is randomized per the language spec — measured over 200 runs,
+// a statement with four hasColumnInTable calls produced 24 distinct accessed
+// orders, and one with joinGet/dictHas/dictGet produced three distinct
+// first-refusal messages. Sorted-key iteration (references.go's
+// sortedMapKeys) fixes this: run with `-count=20` to prove it, not just
+// `-count=1`.
+func TestTableRef_StringLookupOrderIsDeterministic(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "four hasColumnInTable calls, stable accessed order",
+			sql:      "SELECT hasColumnInTable('db1','a','v'), hasColumnInTable('db1','b','v'), hasColumnInTable('db1','c','v'), hasColumnInTable('db1','d','v')",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL: "SELECT hasColumnInTable('phys', 'db1.a', 'v'), hasColumnInTable('phys', 'db1.b', 'v'), " +
+				"hasColumnInTable('phys', 'db1.c', 'v'), hasColumnInTable('phys', 'db1.d', 'v')",
+			wantAcc: []string{"db1.a", "db1.b", "db1.c", "db1.d"}},
+		{name: "mixed joinGet/dictHas/dictGet, stable first refusal",
+			sql:      "SELECT joinGet('db1.j','v',1), dictHas('db1.d',1), dictGet('db1.g','v',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+	})
+}
+
+// TestTableRef_DescribeFunctionTargetIsClassified pins Task 7 fix round 1
+// finding 3: ParseObjectTarget's tokenizer-based name-run extraction stopped
+// at the name token and silently dropped a following "(...)", so
+// `DESCRIBE TABLE mysql('h', 'default', 'u', 'x', 'y')` reported
+// Table="mysql" and RewriteDescribe passed the whole statement through
+// unchanged as Success — neither the T5 table-function allowlist nor the
+// protected-database check ever saw it. ParseObjectTargetFunctionCall now
+// detects this shape and PreflightTableReferences classifies it
+// unconditionally (both SI states — "merge" stays refused even under
+// contract V2, since no other handler defers this check for an active SI
+// surface the way SELECT/write dispatch does).
+func TestTableRef_DescribeFunctionTargetIsClassified(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "DESCRIBE mysql refused", sql: "DESCRIBE TABLE mysql('h','default','u','x','y')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function mysql is not accepted"},
+		{name: "DESCRIBE remote refused", sql: "DESCRIBE TABLE remote('localhost','default','secret')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function remote is not accepted"},
+		{name: "DESCRIBE unknown function refused", sql: "DESCRIBE TABLE frobnicate('x')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function frobnicate is not recognised"},
+		{name: "DESCRIBE merge refused even under V2", sql: "DESCRIBE TABLE merge('hg_safe','db1__t')", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function merge is not accepted"},
+		{name: "DESCRIBE numbers stays allowed", sql: "DESCRIBE TABLE numbers(10)", wantCode: pb.RewriteCode_Success},
 	})
 }
 
@@ -641,5 +708,12 @@ func TestTableRef_UnmodelledClassesAreRefusedWithoutSI(t *testing.T) {
 		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET max_threads = 1"},
 		{name: "set refused under V2", sql: "SET max_threads = 1", si: true, wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "select 1", sql: "SELECT 1", wantCode: pb.RewriteCode_Success},
+		// Task 7 fix round 1 finding 4: the SET carve-out must admit only a
+		// settings assignment, not every statement starting with the SET
+		// keyword. SET ROLE / SET DEFAULT ROLE are access-management
+		// statements this repo does not model.
+		{name: "set role refused", sql: "SET ROLE r1", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "set default role refused", sql: "SET DEFAULT ROLE r1 TO u1", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "set tab-separated setting still passes", sql: "SET\tmax_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET\tmax_threads = 1"},
 	})
 }

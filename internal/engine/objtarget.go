@@ -80,3 +80,182 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 	}
 	return out, nil
 }
+
+// ParseObjectTargetFunctionCall detects an EXISTS / SHOW CREATE / DESCRIBE
+// statement whose target is a function call rather than a plain [db.]name
+// (spec 2026-09-26 T5, Task 7 fix round 1 finding 3). ParseObjectTarget's own
+// name-run extraction stops at the name token and silently drops a following
+// "(...)", so e.g. `DESCRIBE TABLE mysql('h', 'default', 'u', 'x', 'y')`
+// reports Table="mysql" and (having matched none of RewriteDescribe's SI/
+// reject conditions) passes the whole statement through unchanged: neither
+// the T5 table-function allowlist nor the protected-database check ever sees
+// it. ok=false for anything that is not this exact shape (a bare name, one
+// of the three verbs not present at all, or an unterminated call).
+//
+// argDatabases lists, for each top-level call argument that decodes as a
+// single string literal or a (possibly db.name-qualified) identifier, the
+// database half a protected-database check should consult: the whole
+// literal/identifier text when it names no '.', or the text before the
+// first '.' when it does (mirroring stringLookupDatabase's own convention).
+// An argument of any other shape (nested call, number, expression, ...)
+// contributes nothing — it is not a namespace-bearing candidate this policy
+// classifies.
+func ParseObjectTargetFunctionCall(e Engine, sql string) (verb ObjectVerb, name string, argDatabases []string, ok bool, err error) {
+	// Cheap prefix gate, checked BEFORE tokenizing (mirrors
+	// classifyWriteCommand's own precedent): PreflightTableReferences calls
+	// this for every dynamic-mode statement regardless of kind, and
+	// tokenizing is neither free nor error-free for statements this function
+	// was never going to classify anyway — the two tests this guards were
+	// measured directly: a fake Engine whose Tokenize is unavailable must not
+	// turn an unrelated ordinary statement into a hard failure, and a
+	// Tokenize-call-counting test must not see an extra call for a decoy
+	// statement this position never applies to.
+	u := strings.ToUpper(strings.TrimSpace(sql))
+	if !strings.HasPrefix(u, "EXISTS") && !strings.HasPrefix(u, "SHOW") &&
+		!strings.HasPrefix(u, "DESCRIBE") && !strings.HasPrefix(u, "DESC") {
+		return VerbNone, "", nil, false, nil
+	}
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return VerbNone, "", nil, false, err
+	}
+	if len(toks) == 0 {
+		return VerbNone, "", nil, false, nil
+	}
+	i := 0
+	switch strings.ToUpper(toks[0].Text) {
+	case "EXISTS":
+		verb, i = VerbExists, 1
+	case "SHOW":
+		if len(toks) < 2 || !strings.EqualFold(toks[1].Text, "CREATE") {
+			return VerbNone, "", nil, false, nil
+		}
+		verb, i = VerbShowCreate, 2
+	case "DESCRIBE", "DESC":
+		verb, i = VerbDescribe, 1
+	default:
+		return VerbNone, "", nil, false, nil
+	}
+	if i < len(toks) && strings.EqualFold(toks[i].Text, "TEMPORARY") {
+		i++
+	}
+	if i < len(toks) {
+		switch strings.ToUpper(toks[i].Text) {
+		case "TABLE", "DATABASE", "VIEW", "DICTIONARY":
+			i++
+		}
+	}
+	// The function-name position accepts any identifier-shaped token TEXT,
+	// not just isNameTok's VAR/QUOTED_IDENTIFIER: several of the exact names
+	// T5 must classify here are lexer keywords in this tokenizer, not plain
+	// VAR tokens — measured directly, "merge" (used by both a table function
+	// and a table engine) tokenizes as token_type "MERGE", so `DESCRIBE TABLE
+	// merge('hg_safe', 'db1__t')` was silently falling through unclassified
+	// before this check was widened.
+	if i >= len(toks) || !looksLikeBareIdentifierText(toks[i].Text) {
+		return VerbNone, "", nil, false, nil
+	}
+	name = toks[i].Text
+	i++
+	if i >= len(toks) || toks[i].TokenType != "L_PAREN" {
+		return VerbNone, "", nil, false, nil // a plain [db.]name target, not a function call
+	}
+	argDatabases, ok = objectTargetCallArgDatabases(toks, i)
+	if !ok {
+		return VerbNone, "", nil, false, nil
+	}
+	return verb, name, argDatabases, true, nil
+}
+
+// looksLikeBareIdentifierText reports whether s is shaped like an unquoted
+// SQL identifier — a letter or underscore, then letters/digits/underscores —
+// regardless of which token type the tokenizer assigned it. Some table
+// function/engine names this policy must classify (e.g. "merge") are lexer
+// keywords here, not plain VAR tokens; isNameTok's TokenType check misses
+// them, but their Text is still an ordinary identifier spelling.
+func looksLikeBareIdentifierText(s string) bool {
+	for i, r := range s {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			continue
+		case r >= '0' && r <= '9' && i > 0:
+			continue
+		default:
+			return false
+		}
+	}
+	return s != ""
+}
+
+// objectTargetCallArgDatabases scans the token stream from a call's opening
+// "(" (at toks[openIdx]) to its matching ")", splitting on top-level commas
+// (paren depth 0 relative to the call) and reporting each argument's
+// database-check candidate per ParseObjectTargetFunctionCall's doc comment.
+// ok=false means the call never closes (malformed input).
+func objectTargetCallArgDatabases(toks []rawToken, openIdx int) (out []string, ok bool) {
+	depth := 0
+	groupStart := openIdx + 1
+	addGroup := func(group []rawToken) {
+		switch {
+		case len(group) == 1 && group[0].TokenType == "STRING":
+			out = append(out, firstDotSegment(group[0].Text))
+		case len(group) == 1 && isNameTok(group[0].TokenType):
+			out = append(out, group[0].Text)
+		case len(group) == 3 && isNameTok(group[0].TokenType) && group[1].TokenType == "DOT" && isNameTok(group[2].TokenType):
+			out = append(out, group[0].Text)
+		}
+	}
+	for i := openIdx + 1; i < len(toks); i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			depth++
+		case "R_PAREN":
+			if depth == 0 {
+				addGroup(toks[groupStart:i])
+				return out, true
+			}
+			depth--
+		case "COMMA":
+			if depth == 0 {
+				addGroup(toks[groupStart:i])
+				groupStart = i + 1
+			}
+		}
+	}
+	return nil, false
+}
+
+// firstDotSegment returns s up to (not including) its first '.', or s
+// unchanged when it names no '.'.
+func firstDotSegment(s string) string {
+	if idx := strings.IndexByte(s, '.'); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
+
+// IsSessionSettingAssignment reports whether text (the raw SQL of a
+// `command` node) is a session settings assignment: SET <name> = … (spec
+// 2026-09-26 T7, Task 7 fix round 1 finding 4). Tokenized rather than matched
+// against a literal "SET " prefix so any whitespace between SET and the
+// setting name qualifies — a tab, not just one ASCII space. SET ROLE … and
+// SET DEFAULT ROLE … TO … are access-management statements this repo does
+// not model, not settings assignments, and must not qualify even though they
+// share the SET keyword: the token right after SET must be an identifier
+// that is neither ROLE nor DEFAULT, and the token after THAT must be "=".
+func IsSessionSettingAssignment(e Engine, text string) bool {
+	toks, err := tokenizeRaw(e, text)
+	if err != nil || len(toks) < 3 {
+		return false
+	}
+	if !strings.EqualFold(toks[0].Text, "SET") {
+		return false
+	}
+	if !isNameTok(toks[1].TokenType) {
+		return false
+	}
+	if strings.EqualFold(toks[1].Text, "ROLE") || strings.EqualFold(toks[1].Text, "DEFAULT") {
+		return false
+	}
+	return toks[2].TokenType == "EQ" || toks[2].Text == "="
+}

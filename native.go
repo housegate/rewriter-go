@@ -277,7 +277,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		finalize(resp, ast, sql, ec, siVersion, e, selection)
 		return resp, nil
 	}
-	if selection.Mode == nameresolve.ModeDynamic && !isSessionSet(ast, sql) {
+	if selection.Mode == nameresolve.ModeDynamic && !isSessionSet(e, ast) {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = engine.UnsupportedStatementMessage
 		finalize(resp, ast, sql, ec, siVersion, e, selection)
@@ -291,16 +291,23 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	return resp, nil
 }
 
-// isSessionSet reports a top-level SET statement. Measured 2026-09-26: the
-// pinned polyglot renders `SET max_threads = 1` as
-// {"command": {"this": "SET max_threads = 1"}}, so the check is the command text.
-func isSessionSet(ast engine.AST, sql string) bool {
+// isSessionSet reports a top-level settings-assignment SET statement.
+// Measured 2026-09-26: the pinned polyglot renders `SET max_threads = 1` as
+// {"command": {"this": "SET max_threads = 1"}}, so the check reads the
+// command text. Task 7 fix round 1 finding 4: the carve-out must admit only
+// a settings assignment, not every statement that starts with the SET
+// keyword — SET ROLE r1 and SET DEFAULT ROLE r1 TO u1 are access-management
+// statements this repo does not model and must still be refused.
+// engine.IsSessionSettingAssignment tokenizes the text (whitespace-aware, so
+// `SET\tmax_threads = 1` qualifies too) and requires the token after SET to
+// be an identifier that is neither ROLE nor DEFAULT, followed by "=".
+func isSessionSet(e engine.Engine, ast engine.AST) bool {
 	kind, _ := engine.NodeKind(ast)
 	if kind != engine.NodeCommand {
 		return false
 	}
 	text, _ := engine.CommandSQL(ast)
-	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(text)), "SET ")
+	return engine.IsSessionSettingAssignment(e, text)
 }
 
 func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {
@@ -394,12 +401,6 @@ func classifyCommand(sql string) pb.StatementType {
 		return pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES
 	case strings.HasPrefix(u, "SHOW TABLES"), strings.HasPrefix(u, "SHOW"):
 		return pb.StatementType_STATEMENT_TYPE_SHOW_TABLES
-	case strings.HasPrefix(u, "SET "):
-		// A session SET carries no statement type of its own (spec 2026-09-26
-		// T7); isSessionSet recognizes the same prefix for doRewrite's
-		// unmodelled-tail carve-out. Listed explicitly so it reads as a
-		// recognized class, not lumped in with a genuinely unclassified one.
-		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	default:
 		return pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	}

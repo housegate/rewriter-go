@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -314,14 +315,35 @@ func collectStringLookupCalls(node any, out *[]StringLookup) {
 				*out = append(*out, decodeStringLookupCall(name, args))
 			}
 		}
-		for _, v := range n {
-			collectStringLookupCalls(v, out)
+		for _, k := range sortedMapKeys(n) {
+			collectStringLookupCalls(n[k], out)
 		}
 	case []any:
 		for _, v := range n {
 			collectStringLookupCalls(v, out)
 		}
 	}
+}
+
+// sortedMapKeys returns n's keys in sorted order. json.Unmarshal decodes a
+// JSON object into a plain Go map, whose range iteration order is randomized
+// per the language spec; collectStringLookupCalls/rewriteStringLookupCalls
+// walk a map's values to reach nested "function" nodes, so without a fixed
+// order the reported/rewritten position of a call among several siblings in
+// one statement would vary from run to run (Task 7 fix round 1 finding 1,
+// measured over 200 runs: up to 24 distinct accessed orders for one
+// statement, and up to 3 distinct first-refusal messages for another). Sorted
+// key order is a deterministic — not necessarily source-text — order, which
+// is sufficient here: RewriteStringLookups's decide is a pure function of the
+// call it receives (see its own doc comment), so nothing downstream depends
+// on this order matching document order, only on it being STABLE.
+func sortedMapKeys(n map[string]any) []string {
+	keys := make([]string, 0, len(n))
+	for k := range n {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // decodeStringLookupCall decodes one already-matched (IsStringLookup, len(args)>0)
@@ -403,8 +425,8 @@ func rewriteStringLookupCalls(node any, decide func(StringLookup) (string, bool)
 				}
 			}
 		}
-		for _, v := range n {
-			rewriteStringLookupCalls(v, decide)
+		for _, k := range sortedMapKeys(n) {
+			rewriteStringLookupCalls(n[k], decide)
 		}
 	case []any:
 		for _, v := range n {
@@ -434,4 +456,120 @@ func applyStringLookupReplacement(name string, args []any, replacement string) [
 		out[0] = litStr(replacement)
 	}
 	return out
+}
+
+// CollectColumnDefinitionStringLookups returns every string-lookup call in a
+// CREATE TABLE's own column definitions — DEFAULT / MATERIALIZED / ALIAS /
+// EPHEMERAL expressions (spec 2026-09-26 T6, Task 7 fix round 1 finding 2) —
+// in column-then-key order (columns in declaration order, then default,
+// materialized_expr, alias_expr, ephemeral for each column; deterministic by
+// construction, no sorting needed). ok=false (nil, nil) for anything that is
+// not a create_table node. Deliberately narrower than StringLookupCalls: a
+// CREATE TABLE ... AS SELECT's embedded body is a different sub-tree
+// (as_select) that rewriteSelectCore owns and rewrites hasColumnInTable
+// inside — this collector must never also see that body, or its caller could
+// not tell "found in a column expression" (always refuse hasColumnInTable
+// here) apart from "found in the AS SELECT body" (rewrite it there instead).
+func CollectColumnDefinitionStringLookups(ast AST) ([]StringLookup, error) {
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode create table columns: %w", err)
+	}
+	body, ok := root[NodeCreateTable].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	cols, _ := body["columns"].([]any)
+	var out []StringLookup
+	for _, c := range cols {
+		col, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"default", "materialized_expr", "alias_expr", "ephemeral"} {
+			collectStringLookupCalls(col[key], &out)
+		}
+	}
+	return out, nil
+}
+
+// CollectAlterMutationStringLookups detects an ALTER TABLE ... UPDATE/DELETE
+// mutation — opaque in polyglot, either a command node classifyWriteCommand
+// reports as CmdAlterUpdate or an alter_table node whose sole action is an
+// unstructured Raw UPDATE/DELETE tail — and returns the string-lookup calls
+// in its assignment/predicate expressions (spec 2026-09-26 T6, Task 7 fix
+// round 1 finding 2): the joinGet/dictGet-family refusal and the
+// hasColumnInTable "outside a SELECT body" refusal must reach these
+// positions too, not just an embedded SELECT, which this opaque shape has
+// none of. Reparses the mutation tail as an equivalent ordinary UPDATE/DELETE
+// probe statement against a sentinel target, mirroring
+// collectAlterMutationSurface's own technique, and walks the structured
+// result for string-lookup calls (deterministic column-then-key order: SET
+// assignments in order, then the predicate).
+//
+// Fails open (nil, nil) for anything that is not this exact opaque mutation
+// shape, or whose tail this probe cannot cleanly reparse: this collector
+// feeds an ADDITIONAL guard layered on top of the table-reference policy and
+// must never turn an unrelated parse/tokenize hiccup into a hard failure for
+// a statement that carries no lookup to refuse in the first place — the
+// stricter round-trip proof collectAlterMutationSurface itself applies (used
+// only under active storage integrity, where a probe mismatch must fail
+// closed) is deliberately not reproduced here.
+func CollectAlterMutationStringLookups(e Engine, ast AST, sql string) ([]StringLookup, error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil || body == nil {
+		return nil, nil
+	}
+	switch kind {
+	case NodeCommand:
+		raw, _ := body["this"].(string)
+		if classifyWriteCommand(raw) != CmdAlterUpdate {
+			return nil, nil
+		}
+	case NodeAlterTable:
+		if !alterBodyHasMutation(body) {
+			return nil, nil
+		}
+	default:
+		return nil, nil
+	}
+	if strings.TrimSpace(sql) == "" {
+		return nil, nil
+	}
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, nil
+	}
+	mkind, tailStart, ok := alterMutationTail(toks)
+	if !ok || tailStart < 0 || tailStart > len(sql) {
+		return nil, nil
+	}
+	tail := strings.TrimSpace(sql[tailStart:])
+	if tail == "" {
+		return nil, nil
+	}
+	probe := "UPDATE " + mutationProbeTable + " SET " + tail
+	if mkind == alterMutationDelete {
+		probe = "DELETE FROM " + mutationProbeTable + " " + tail
+	}
+	probeAST, err := e.ParseOne(probe)
+	if err != nil {
+		return nil, nil
+	}
+	_, probeBody, _, err := bodyOf(probeAST)
+	if err != nil || probeBody == nil {
+		return nil, nil
+	}
+	var out []StringLookup
+	if assignments, ok := probeBody["set"].([]any); ok {
+		for _, rawAssignment := range assignments {
+			assignment, ok := rawAssignment.([]any)
+			if !ok || len(assignment) != 2 {
+				continue
+			}
+			collectStringLookupCalls(assignment[1], &out)
+		}
+	}
+	collectStringLookupCalls(probeBody["where_clause"], &out)
+	return out, nil
 }

@@ -76,6 +76,85 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 			return resp, true, nil
 		}
 	}
+	// T5 + T3 for a DESCRIBE / EXISTS / SHOW CREATE target that is a function
+	// call, not a plain [db.]name (Task 7 fix round 1 finding 3):
+	// ParseObjectTarget's tokenizer-based name-run extraction silently drops
+	// everything from "(" onward, so e.g. `DESCRIBE TABLE mysql('h', ...)`
+	// reported Table="mysql" and fell through RewriteDescribe's existing
+	// pass-through-unchanged branch — neither the T5 allowlist nor the
+	// protected-database check ever saw it. Unconditional (both SI states):
+	// unlike SELECT/write dispatch, no later handler defers this check for
+	// an active SI surface, so there is no other opportunity to catch it.
+	if _, fnName, argDBs, fok, ferr := engine.ParseObjectTargetFunctionCall(e, sql); ferr != nil {
+		return nil, false, ferr
+	} else if fok {
+		switch engine.ClassifyTableFunction(fnName) {
+		case engine.TableFunctionRefused:
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			rejectUnsupported(resp, engine.TableFunctionRefusedMessage(fnName))
+			resp.SqlAfterRewrite = sql
+			return resp, true, nil
+		case engine.TableFunctionUnknown:
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			rejectUnsupported(resp, engine.TableFunctionUnknownMessage(fnName))
+			resp.SqlAfterRewrite = sql
+			return resp, true, nil
+		}
+		for _, db := range argDBs {
+			if nameresolve.ProtectedDatabase(db, sel.Dynamic) {
+				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+				recordAccessedDatabase(resp, db, sel.Dynamic)
+				rejectInvalid(resp, nameresolve.ProtectedDatabaseRejectMessage(db))
+				resp.SqlAfterRewrite = sql
+				return resp, true, nil
+			}
+		}
+	}
+	// T6 (spec 2026-09-26, controller ruling 2 / Task 7 fix round 1 finding
+	// 2): joinGet/dictGet-family calls are refused statement-wide, wherever
+	// they appear — SELECT bodies, INSERT/CTAS/VIEW embedded bodies,
+	// structured UPDATE/DELETE, CREATE TABLE column DEFAULT/MATERIALIZED/
+	// ALIAS/EPHEMERAL expressions, and the opaque ALTER TABLE …
+	// UPDATE/DELETE mutation shape — run after the protected-database step
+	// so a protected name still reports its own message first (e.g.
+	// joinGet('phys.`x`', …)). This is a strict superset of what
+	// rewriteSelectCore's own (still-present, now largely redundant but
+	// harmless) joinGet/dictGet handling reaches, since StringLookupCalls
+	// walks the whole original ast structurally, embedded SELECT bodies
+	// included.
+	//
+	// hasColumnInTable is rewritten only inside a SELECT body
+	// (rewriteSelectCore owns that, reached through StringLookupCalls too but
+	// filtered out below); everywhere else — a CREATE TABLE column
+	// expression, or an ALTER mutation — it is refused with the same
+	// message, since neither position has a rewrite pipeline of its own.
+	generalLookups, err := engine.StringLookupCalls(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, call := range generalLookups {
+		if isHasColumnInTable(call.Function) {
+			continue
+		}
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectInvalid(resp, stringLookupUnresolvedMessage(call))
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
+	alterLookups, err := engine.CollectAlterMutationStringLookups(e, ast, sql)
+	if err != nil {
+		return nil, false, err
+	}
+	columnLookups, err := engine.CollectColumnDefinitionStringLookups(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, call := range append(alterLookups, columnLookups...) {
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectInvalid(resp, stringLookupUnresolvedMessage(call))
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 	return nil, false, nil
 }
 
