@@ -513,6 +513,20 @@ func decodeNamespaceSingleDetail(source NamespaceRefSource, name string, arg any
 		detail.ref.UsesCurrentDatabase = true
 		return detail
 	}
+	// A qualified `column` node (e.g. an IN-table operand `db.\`table.with.dots\``)
+	// already carries its database/table split structurally. Decode it directly
+	// instead of round-tripping through tableFunctionArgValue's single joined
+	// "db.table" string and exactFunctionQualified's dot-count heuristic, which
+	// cannot tell a genuine qualifier from a backtick-quoted table name that
+	// itself contains a literal '.' (spec 2026-09-26 T3/T4).
+	if target, origin, ok := qualifiedColumnArgTarget(arg); ok {
+		detail.ref.Target = target
+		detail.ref.Resolved = true
+		detail.ref.UsesCurrentDatabase = false
+		detail.databaseOrigin = origin
+		detail.tableOrigin = origin
+		return detail
+	}
 	value, origin, ok := tableFunctionArgValue(arg)
 	if !ok {
 		return detail
@@ -528,6 +542,34 @@ func decodeNamespaceSingleDetail(source NamespaceRefSource, name string, arg any
 	detail.ref.Target.Table = value
 	detail.tableOrigin = origin
 	return detail
+}
+
+// qualifiedColumnArgTarget recovers an already-split (database, table) pair
+// directly from a qualified `column` node (`{"column":{"name":...,"table":...}}`),
+// the shape polyglot uses for a bare `db.table` reference such as an IN-table
+// operand. Returns ok=false for anything else, including an unqualified
+// column (whose bare name is decided by the caller's existing single-string
+// path) — a `dot`-chain or literal-string argument keeps its existing
+// dot-count-based split, which is this function's only known limitation
+// (inherent to an opaque string with no structural database/table boundary).
+func qualifiedColumnArgTarget(arg any) (TableTarget, namespaceValueOrigin, bool) {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	col, ok := m["column"].(map[string]any)
+	if !ok {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	if unresolvedIdentifierNode(col["name"]) || unresolvedIdentifierNode(col["table"]) {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	name := identName(col["name"])
+	table := identName(col["table"])
+	if name == "" || table == "" {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	return TableTarget{DB: table, Table: name}, namespaceValueIdentifier, true
 }
 
 func decodeNamespacePair(source NamespaceRefSource, name string, args []any, first int) NamespaceRef {

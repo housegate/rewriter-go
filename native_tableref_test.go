@@ -152,3 +152,142 @@ func TestTableRef_ValueAndColumnParametersStayAllowed(t *testing.T) {
 			wantSQL: "ALTER TABLE phys.`db1.o` UPDATE a = {c:Identifier} WHERE 1"},
 	})
 }
+
+func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
+	var cases []tablerefCase
+	for _, db := range []string{"phys", "hg_safe", "hg_unsafe", "hg_promote"} {
+		msg := "protected database " + db + " is not addressable"
+		for _, shape := range []string{
+			"SELECT * FROM %s.`db2.x`",
+			"SELECT * FROM db1.o AS a JOIN %s.`db2.x` AS b USING (a)",
+			"SELECT * FROM (SELECT * FROM %s.`db2.x`)",
+			"WITH c AS (SELECT * FROM %s.`db2.x`) SELECT * FROM c",
+			"SELECT * FROM db1.o WHERE a IN %s.`db2.x`",
+			"SELECT * FROM db1.o WHERE a IN (%s.`db2.x`)",
+			"SELECT * FROM db1.o WHERE (a, b) IN %s.`db2.x`",
+			"SELECT * FROM db1.o WHERE in(a, %s.`db2.x`)",
+			"SELECT * FROM db1.o WHERE a GLOBAL IN %s.`db2.x`",
+			"INSERT INTO db1.o SELECT * FROM %s.`db2.x`",
+			"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM %s.`db2.x`",
+			"CREATE VIEW db1.v AS SELECT * FROM %s.`db2.x`",
+			"CREATE MATERIALIZED VIEW db1.mv TO %s.`db2.x` AS SELECT * FROM db1.o",
+			"INSERT INTO %s.`db2.x` VALUES (1)",
+			"DROP TABLE %s.`db2.x`",
+			"CREATE TABLE %s.`db2.x` (a UInt64) ENGINE = Memory",
+			"CREATE TABLE db1.n AS %s.`db2.x`",
+			"RENAME TABLE %s.`db2.x` TO db1.z",
+			"EXISTS TABLE %s.`db2.x`",
+			"SHOW CREATE TABLE %s.`db2.x`",
+			"DESCRIBE TABLE %s.`db2.x`",
+			"SHOW TABLES FROM %s",
+			"USE %s",
+			"CREATE DATABASE %s",
+			"DROP DATABASE %s",
+			"SELECT * FROM merge('%s', 'db2')",
+			"SELECT * FROM remote('127.0.0.1:9000', '%s', 'db2.x')",
+			"CREATE TABLE db1.n (a UInt64) ENGINE = Merge('%s', '^db2')",
+			"SELECT joinGet('%s.`db2.x`', 'v', 1)",
+		} {
+			sql := strings.ReplaceAll(shape, "%s", db)
+			// Under the active SI surface the hg_* names keep their existing
+			// SI messages; the code is still a rejection.
+			//
+			// Two deviations from the brief's starting assumption, found by
+			// running this test (see task-4 report "corpus cases that
+			// changed" / self-review for the full writeup):
+			//
+			//  1. siHandlerBlindShapes: the joinGet shape's database
+			//     qualifier is a string-lookup argument, and the parenthesized
+			//     IN shape is not is_field-tagged -- no existing SI handler in
+			//     this repo classifies either position as a table reference,
+			//     so nothing downstream would otherwise reject them.
+			//     PreflightTableReferences now rejects a protected hit there
+			//     unconditionally too (engine.CollectSIHandlerBlindDatabaseReferences),
+			//     with the preflight's own generic message/code rather than an
+			//     SI handler's. Ruling 3 anticipated adjusting the *code* per
+			//     observed handler behaviour for an SI-owned row; this is the
+			//     same kind of adjustment for a position no handler covers at
+			//     all.
+			//  2. writeSideShapes: every non-plain-SELECT-read shape (INSERT/
+			//     CREATE/DROP/RENAME/EXISTS/SHOW/USE/CREATE-DROP-DATABASE/the
+			//     ENGINE=Merge(...) table-engine form) answers
+			//     UnsupportedStatement under active SI, not RewriteError --
+			//     pre-existing, corpus-pinned SI dispatch this task does not
+			//     touch. A plain SELECT read (including CREATE VIEW's body)
+			//     keeps rejectCodeFor's RewriteError default.
+			isSIHandlerBlind := strings.Contains(shape, "joinGet") || strings.Contains(shape, "IN (%s.")
+			isWriteSide := siWriteSideShapes[shape]
+			for _, si := range []bool{false, true} {
+				want := msg
+				wantCode := rejectCodeFor(db, si)
+				if si && db != "phys" && !isSIHandlerBlind {
+					want = "storage-integrity"
+					if isWriteSide {
+						wantCode = pb.RewriteCode_UnsupportedStatement
+					}
+				}
+				if isSIHandlerBlind {
+					wantCode = pb.RewriteCode_InvalidRewriteRequest
+				}
+				cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantMsg: want,
+					wantCode: wantCode})
+			}
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// rejectCodeFor: the protected rule answers InvalidRewriteRequest; an SI-owned
+// hg_* rejection keeps whatever code the SI handler uses today, so only the
+// non-Success property is asserted for those by comparing against the
+// engine's own answer at the first green run. Start strict and relax per case.
+func rejectCodeFor(db string, si bool) pb.RewriteCode {
+	if si && db != "phys" {
+		return pb.RewriteCode_RewriteError // most SI SELECT-side messages; write-side ones use UnsupportedStatement
+	}
+	return pb.RewriteCode_InvalidRewriteRequest
+}
+
+// siWriteSideShapes: observed at the first green run (see rejectCodeFor's
+// comment) -- every one of these non-plain-SELECT-read shapes answers
+// UnsupportedStatement under active SI for a protected hg_* database, not
+// RewriteError. Pre-existing, corpus-pinned SI dispatch; this task does not
+// touch it, only records which shapes hit it.
+var siWriteSideShapes = map[string]bool{
+	"INSERT INTO db1.o SELECT * FROM %s.`db2.x`":                           true,
+	"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM %s.`db2.x`":       true,
+	"CREATE MATERIALIZED VIEW db1.mv TO %s.`db2.x` AS SELECT * FROM db1.o": true,
+	"INSERT INTO %s.`db2.x` VALUES (1)":                                    true,
+	"DROP TABLE %s.`db2.x`":                                                true,
+	"CREATE TABLE %s.`db2.x` (a UInt64) ENGINE = Memory":                   true,
+	"CREATE TABLE db1.n AS %s.`db2.x`":                                     true,
+	"RENAME TABLE %s.`db2.x` TO db1.z":                                     true,
+	"EXISTS TABLE %s.`db2.x`":                                              true,
+	"SHOW CREATE TABLE %s.`db2.x`":                                         true,
+	"DESCRIBE TABLE %s.`db2.x`":                                            true,
+	"SHOW TABLES FROM %s":                                                  true,
+	"USE %s":                                                               true,
+	"CREATE DATABASE %s":                                                   true,
+	"DROP DATABASE %s":                                                     true,
+	"CREATE TABLE db1.n (a UInt64) ENGINE = Merge('%s', '^db2')":           true,
+}
+
+func TestTableRef_ProtectedNameAsColumnOrAliasIsAllowed(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "column named phys", sql: "SELECT phys FROM db1.o", wantCode: pb.RewriteCode_Success},
+		{name: "alias named hg_safe", sql: "SELECT a AS hg_safe FROM db1.o", wantCode: pb.RewriteCode_Success},
+	})
+}
+
+func TestTableRef_ProtectedLogicalContextIsRefused(t *testing.T) {
+	e := newEngine(t)
+	dyn := tablerefDynamic(false)
+	dyn.UpstreamLogicalDatabaseInContext = "phys"
+	resp, err := doRewrite(e, "SELECT * FROM o", []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest || resp.GetMessage() != "protected database phys is not addressable" {
+		t.Fatalf("resp = %s %q", resp.GetCode(), resp.GetMessage())
+	}
+}

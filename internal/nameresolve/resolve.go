@@ -550,6 +550,14 @@ func ApplyDynamic(db, table string, a *pb.RewriteTableDynamicArgs) Outcome {
 	if logical == "" {
 		return Outcome{Status: StatusInvalid, RejectReason: "unqualified target and no upstream_logical_database_in_context"}
 	}
+	// Defensive: PreflightTableReferences (spec 2026-09-26 T3, Task 4) already
+	// rejects a protected logical context before any handler that resolves
+	// through ApplyDynamic runs. This only matters for a caller that reaches
+	// Resolve/ApplyDynamic directly, e.g. an unqualified table falling back to
+	// a protected upstream_logical_database_in_context.
+	if ProtectedDatabase(logical, a) {
+		return Outcome{Status: StatusInvalid, RejectReason: ProtectedDatabaseRejectMessage(logical)}
+	}
 	physical, ok := resolvePhysicalDatabase(logical, a)
 	if !ok {
 		return Outcome{Status: StatusInvalid, RejectReason: "logical db " + logical + " not in database_map and not a known physical database"}

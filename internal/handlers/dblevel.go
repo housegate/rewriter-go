@@ -223,6 +223,14 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(origin))
 		return resp, true, nil
 	}
+	// Defensive: PreflightTableReferences (spec 2026-09-26 T3, Task 4) already
+	// rejects a protected USE target before RewriteDBLevel ever runs. This only
+	// matters for a caller that invokes RewriteDBLevel directly.
+	if nameresolve.ProtectedDatabase(origin, dyn) {
+		recordAccessedDatabase(resp, origin, dyn)
+		rejectDBInvalid(resp, nameresolve.ProtectedDatabaseRejectMessage(origin))
+		return resp, true, nil
+	}
 	physical, ok := nameresolve.ResolvePhysicalDatabase(origin, dyn)
 	if !ok {
 		rejectDBInvalid(resp, "USE target '"+origin+"' is not in database_map and not a known physical database; user does not have this database")
