@@ -200,10 +200,9 @@ func OpaqueTextDatabases(e Engine, text string) (dbs []string, ok bool) {
 
 // OpaqueTextIsUngoverned reports whether an opaque ALTER text carries a read
 // the rewriter cannot govern (spec 2026-09-26 R2), so the caller must refuse
-// the statement: a subquery (a SELECT or WITH keyword), an IN / NOT IN /
-// GLOBAL IN / GLOBAL NOT IN operand or callable IN-family argument that is an
-// identifier, a quoted identifier, a parameter, or a parenthesis opening one
-// of those (a table operand), an Identifier parameter anywhere, or one of the
+// the statement: a subquery (a SELECT or WITH keyword), an IN-family
+// occurrence whose operand region is not literal-only (OpaqueInRefusedAt), an
+// Identifier parameter anywhere, or one of the
 // cross-table partition actions (FETCH PARTITION|PART, ATTACH / REPLACE
 // PARTITION|PART … FROM, MOVE PARTITION|PART … TO TABLE). ALTER TABLE …
 // MODIFY QUERY always carries a SELECT, so it is always refused (spec
@@ -221,7 +220,7 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 		return opaqueProjectionIsUngoverned(toks)
 	}
 	for i, tok := range toks {
-		if OpaqueInTableAt(toks, i) {
+		if OpaqueInRefusedAt(toks, i) {
 			return true
 		}
 		if !opaqueKeyword(tok) {
@@ -261,91 +260,89 @@ func isCallableInName(tok rawToken) bool {
 	return ok
 }
 
-// OpaqueInTableAt is the one IN rule every opaque-text scanner applies at
-// toks[i] (spec 2026-09-26 R2 / R7, residual round 3). It covers every
-// spelling:
-//
-//   - the infix keyword IN (NOT IN / GLOBAL [NOT] IN end in the same token)
-//     whose operand is an identifier, quoted identifier, parameter, or any
-//     number of opening parentheses followed by one of those;
-//   - the callable form — the IN keyword immediately followed by "(" (`in(`,
-//     `IN(`: bare `in` lexes as the keyword) as well as every IN-family
-//     function name (in, notIn, globalIn, globalNotIn, nullIn, notNullIn,
-//     globalNullIn, globalNotNullIn and their IgnoreSet aliases) as a VAR or
-//     QUOTED_IDENTIFIER in any case — whose SECOND top-level argument is such
-//     an operand. The tokenizer has already dropped comments and whitespace.
-//
-// An IN keyword followed by "(" is the callable form when it starts an
-// expression (the previous token does not end an operand) and the infix form
-// otherwise, so `a IN (1, 2)` and `in(a, (1, 2))` both pass. A subquery
-// operand counts as a table read. An unterminated call is a table operand
-// (fail closed).
-func OpaqueInTableAt(toks []rawToken, i int) bool {
+// OpaqueInRefusedAt is the one IN rule every opaque-text scanner applies at
+// toks[i] (spec 2026-09-26 R2 / R7, residual round 4: the operand-region
+// rule). An IN-family occurrence is the IN keyword (alone or after NOT /
+// GLOBAL / GLOBAL NOT, and the keyword-lexed callable `in(`) or an IN-family
+// function name (in, notIn, globalIn, globalNotIn, nullIn, notNullIn,
+// globalNullIn, globalNotNullIn and their IgnoreSet aliases) as a VAR or
+// QUOTED_IDENTIFIER in any case. Its operand region is the bracket group
+// ("(" … ")" or "[" … "]") that immediately follows it — the tokenizer has
+// already dropped comments and whitespace — or, when no bracket follows, the
+// single next token; a `tuple(` / `array(` literal constructor contributes its
+// argument group. The occurrence is refused unless every token of the region is
+// a NUMBER, STRING, NULL, TRUE, FALSE, comma, sign or bracket. Nothing about
+// the token before the occurrence matters: there is no infix / callable
+// classification, so `a IN (1, 2)`, `in(42, (1, 2))` and `in(42, [1, 2])`
+// pass while `in(a, (1, 2))` and `a IN (1, b)` are refused. A missing or
+// unterminated region is refused (fail closed); a region nested in another
+// is covered by the outer one. The one exception is the IN PARTITION clause
+// keyword (unquoted PARTITION after IN), which ClickHouse never parses as an
+// IN operand: measured on 26.8, `a IN partition` is a syntax error in every
+// expression position.
+func OpaqueInRefusedAt(toks []rawToken, i int) bool {
 	tok := toks[i]
-	inKeyword := tok.TokenType != "STRING" && tok.TokenType != "QUOTED_IDENTIFIER" && tok.TokenType != "VAR" &&
-		strings.EqualFold(tok.Text, "IN")
-	if inKeyword && !(i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" && !opaqueOperandEndsBefore(toks, i)) {
-		// Infix IN: its right operand.
-		return opaqueInOperandIsTable(toks, i+1)
-	}
-	if !(inKeyword || isCallableInName(tok)) || i+1 >= len(toks) || toks[i+1].TokenType != "L_PAREN" {
+	inKeyword := tok.TokenType == "IN"
+	if !inKeyword && !isCallableInName(tok) {
 		return false
 	}
-	groups, ok := rawCallArgGroups(toks, i+1)
+	next := i + 1
+	if next >= len(toks) {
+		return true
+	}
+	if inKeyword && opaqueKeyword(toks[next]) && strings.EqualFold(toks[next].Text, "PARTITION") {
+		return false // … IN PARTITION p: the partition clause, not an IN operand
+	}
+	region, ok := opaqueInOperandRegion(toks, next)
 	if !ok {
 		return true
 	}
-	return len(groups) >= 2 && opaqueInOperandIsTable(groups[1], 0)
-}
-
-// opaqueOperandEndsBefore reports whether the token before toks[i] ends an
-// operand — so an IN keyword at i is the infix operator, not a call: an
-// identifier, literal, closing bracket, or the NOT / GLOBAL of NOT IN /
-// GLOBAL IN.
-func opaqueOperandEndsBefore(toks []rawToken, i int) bool {
-	if i == 0 {
-		return false
-	}
-	prev := toks[i-1]
-	switch prev.TokenType {
-	case "VAR", "QUOTED_IDENTIFIER", "NUMBER", "STRING", "R_PAREN", "R_BRACKET", "R_BRACE":
-		return true
-	}
-	switch strings.ToUpper(prev.Text) {
-	case "NOT", "GLOBAL", "NULL", "TRUE", "FALSE":
-		return true
+	for _, t := range region {
+		if !opaqueInLiteralToken(t) {
+			return true
+		}
 	}
 	return false
 }
 
-// opaqueInOperandIsTable reports whether the tokens starting at i form a table
-// operand: a (possibly qualified) identifier that is not itself a function
-// call, a brace parameter, or any number of opening parentheses followed by one
-// of those.
-func opaqueInOperandIsTable(toks []rawToken, i int) bool {
-	for i < len(toks) && toks[i].TokenType == "L_PAREN" {
+// opaqueInOperandRegion returns the operand region starting at toks[i]: the
+// bracket group opening there, the argument group of a `tuple(` / `array(`
+// literal constructor, or the single token. ok=false for an unterminated
+// group.
+func opaqueInOperandRegion(toks []rawToken, i int) (region []rawToken, ok bool) {
+	if toks[i].TokenType == "VAR" && (strings.EqualFold(toks[i].Text, "tuple") || strings.EqualFold(toks[i].Text, "array")) &&
+		i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
 		i++
 	}
-	if i >= len(toks) {
-		return false
-	}
-	if opaqueKeyword(toks[i]) && (strings.EqualFold(toks[i].Text, "SELECT") || strings.EqualFold(toks[i].Text, "WITH")) {
-		return true // a subquery operand reads a table
-	}
-	switch {
-	case toks[i].TokenType == "L_BRACE":
-		return true
-	case isNameTok(toks[i].TokenType):
-		if strings.EqualFold(toks[i].Text, "PARTITION") && toks[i].TokenType == "VAR" {
-			return false // … IN PARTITION p
-		}
-		if i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
-			return false // a function call is a value
-		}
-		return true
+	switch toks[i].TokenType {
+	case "L_PAREN", "L_BRACKET":
 	default:
-		return false
+		return toks[i : i+1], true
 	}
+	depth := 0
+	for j := i; j < len(toks); j++ {
+		switch toks[j].TokenType {
+		case "L_PAREN", "L_BRACKET":
+			depth++
+		case "R_PAREN", "R_BRACKET":
+			depth--
+			if depth == 0 {
+				return toks[i : j+1], true
+			}
+		}
+	}
+	return nil, false
+}
+
+// opaqueInLiteralToken reports a token an IN operand region may hold: a
+// literal, a comma, a sign or a bracket.
+func opaqueInLiteralToken(tok rawToken) bool {
+	switch tok.TokenType {
+	case "NUMBER", "STRING", "NULL", "TRUE", "FALSE", "COMMA", "DASH", "PLUS",
+		"L_PAREN", "R_PAREN", "L_BRACKET", "R_BRACKET":
+		return true
+	}
+	return false
 }
 
 // opaqueActionSegments splits a token stream into its top-level
@@ -421,7 +418,7 @@ func opaqueProjectionBody(toks []rawToken) bool {
 func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 	selects := 0
 	for i, tok := range toks {
-		if OpaqueInTableAt(toks, i) {
+		if OpaqueInRefusedAt(toks, i) {
 			return true
 		}
 		if !opaqueKeyword(tok) {
@@ -572,7 +569,8 @@ func OpaqueInsertQueryText(ast AST) (string, bool, error) {
 // OpaqueInsertQueryIsUngoverned reports whether an opaque INSERT query text
 // (OpaqueInsertQueryText) can read a table the rewriter does not see (spec
 // 2026-09-26 R5 / R2): a FROM / JOIN / WITH keyword, more than one SELECT (a
-// subquery), a table-operand IN or callable IN, a lookup-family call, or an
+// subquery), an IN-family occurrence whose operand region is not
+// literal-only (OpaqueInRefusedAt), a lookup-family call, or an
 // Identifier parameter. `SETTINGS … SELECT 1`, `SETTINGS … VALUES (…)` and
 // `FORMAT …` pass. A tokenizer failure is ungoverned.
 func OpaqueInsertQueryIsUngoverned(e Engine, text string) bool {
@@ -585,7 +583,7 @@ func OpaqueInsertQueryIsUngoverned(e Engine, text string) bool {
 	}
 	selects := 0
 	for i, tok := range toks {
-		if OpaqueInTableAt(toks, i) {
+		if OpaqueInRefusedAt(toks, i) {
 			return true
 		}
 		if tok.TokenType != "STRING" && IsStringLookup(tok.Text) && i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {

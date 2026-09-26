@@ -1679,3 +1679,67 @@ func TestTableRef_Residual3SettingsBackstopNeedsAssignment(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// residual4DefectSQL is every ClickHouse-26.8-confirmed cross-tenant read that
+// residual round 4 closes: a keyword-lexed left operand (or the END of a CASE)
+// before IN, and the callable in( after a NOT / GLOBAL prefix.
+var residual4DefectSQL = []string{
+	"ALTER TABLE db1.o UPDATE a = 1 WHERE date IN (`db2.x`)",
+	"ALTER TABLE db1.o UPDATE a = 1, b = 2 WHERE key IN (`db2.x`)",
+	"ALTER TABLE db1.o UPDATE a = date IN (`db2.x`) WHERE 1",
+	"ALTER TABLE db1.o DELETE WHERE date IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE key IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE timestamp IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE CASE WHEN a THEN 1 END IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE 1, UPDATE a = 1 WHERE key IN (`db2.x`)",
+	"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE date IN (`db2.x`)",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT date IN (`db2.x`)",
+	"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE date IN (`db2.x`))",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT CASE WHEN 1 THEN 42 END IN (`db2.x`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (CASE WHEN 1 THEN 42 END IN (`db2.x`))",
+	"ALTER TABLE db1.o DELETE WHERE not in(42, `db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE NOT in(42, `db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE (NOT in(42, `db2.x`))",
+	"ALTER TABLE db1.o DELETE WHERE GLOBAL in(42, `db2.x`)",
+	"ALTER TABLE db1.o UPDATE a = 1 WHERE not in(1, `db2.x`)",
+	"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE not in(1, `db2.x`)",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 MATERIALIZED not in(1, `db2.x`)",
+	"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE not in(1, `db2.x`))",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT not in(1, `db2.x`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (not in(1, `db2.x`))",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (not in(1, `db2.x`))",
+}
+
+// TestTableRef_Residual4OperandRegion pins residual round 4: every IN-family
+// occurrence in opaque text is refused unless its operand region (the bracket
+// group after it, or the single next token) is literal-only, whatever token
+// precedes it. The accepted cost (a column inside the region) is refused; a
+// literal region passes.
+func TestTableRef_Residual4OperandRegion(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range residual4DefectSQL {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, sql := range []string{
+			"ALTER TABLE db1.o DELETE WHERE in(a, (1, 2))",
+			"ALTER TABLE db1.o DELETE WHERE a IN (1, b)",
+			"ALTER TABLE db1.o DELETE WHERE a IN (b, 1)",
+		} {
+			cases = append(cases, tablerefCase{name: "cost/" + sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"ALTER TABLE db1.o DELETE WHERE a IN (1, 2)", `ALTER TABLE phys."db1.o" DELETE WHERE a IN(1, 2)`},
+			{"ALTER TABLE db1.o DELETE WHERE in(42, [1, 2])", ""},
+			{"ALTER TABLE db1.o DELETE WHERE a NOT IN ('x', 'y')", ""},
+			{"ALTER TABLE db1.o DELETE WHERE date IN (1, 2)", ""},
+			{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT not in(1, (1, 2))", ""},
+		} {
+			cases = append(cases, tablerefCase{name: "literal/" + c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{"db1.o"}})
+		}
+	}
+	runTablerefCases(t, cases)
+}

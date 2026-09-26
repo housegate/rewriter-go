@@ -324,7 +324,8 @@ func showBodyStart(toks []rawToken) int {
 // trailing clauses after the SHOW target (WHERE / LIKE / ILIKE / LIMIT / …),
 // a SELECT or WITH keyword, a name followed by "(" (a function call — table
 // functions and lookups included; a keyword-tokenized call such as IF( is not
-// a name), an IN table operand, an Identifier parameter or a quoted dotted
+// a name), an IN-family occurrence whose operand region is not literal-only
+// (OpaqueInRefusedAt), an Identifier parameter or a quoted dotted
 // name. The target itself (a database may be named `select`) is not scanned. Literals, plain identifiers and operators pass (`LIMIT 5`). A
 // tokenizer failure is ungoverned.
 func ShowBodyIsUngoverned(e Engine, info DBLevelInfo, sql string) bool {
@@ -349,7 +350,7 @@ func ShowBodyIsUngoverned(e Engine, info DBLevelInfo, sql string) bool {
 		if tok.TokenType == "L_BRACE" {
 			return true
 		}
-		if OpaqueInTableAt(toks, i) {
+		if OpaqueInRefusedAt(toks, i) {
 			return true
 		}
 	}
