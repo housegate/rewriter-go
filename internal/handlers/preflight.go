@@ -22,6 +22,8 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 	if sel.Mode != nameresolve.ModeDynamic {
 		return nil, false, nil
 	}
+	// T2: an Identifier parameter in any database or table position — for an
+	// opaque command node, anywhere in its text.
 	hit, err := engine.TablePositionParameter(e, ast, sql)
 	if err != nil {
 		return nil, false, err
@@ -29,6 +31,28 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 	if hit {
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectInvalid(resp, engine.IdentifierParameterMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
+	// T7 before T3 (spec 2026-09-26 §5, R8): a command node of a class no
+	// handler models is refused before its names are examined. With the SI
+	// surface inactive the refusal is "statement is not supported" here; with
+	// it active the SI pipeline owns it (an SI object is named by the SI
+	// write preflight or the final-response annotation, everything else gets
+	// the SI catch-all), so the rest of this preflight is skipped.
+	if kind, kerr := engine.NodeKind(ast); kerr != nil {
+		return nil, false, kerr
+	} else if kind == engine.NodeCommand && !commandClassModelled(e, ast, sql, sel) {
+		if nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+			return nil, false, nil
+		}
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		if targets, _, rerr := engine.RawTableRefs(e, ast); rerr == nil {
+			for _, tt := range targets {
+				recordAccessedWrite(resp, tt, sel)
+			}
+		}
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
@@ -367,4 +391,41 @@ func CheckSessionSet(e engine.Engine, text string) (isSet, refused bool, code pb
 		return true, true, pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
 	}
 	return true, false, pb.RewriteCode_Success, ""
+}
+
+// commandClassModelled reports whether a `command` node belongs to a class a
+// handler models (spec 2026-09-26 T7, R8): EXISTS / SHOW CREATE / DESCRIBE,
+// USE / SHOW …, RENAME / EXCHANGE TABLE, ALTER TABLE … UPDATE, GRANT / REVOKE
+// / ATTACH GRANT, and — only while the SI surface is inactive — a session
+// SET. Every other class (DETACH, ATTACH, OPTIMIZE, KILL, EXPLAIN, SYSTEM,
+// CHECK, CREATE USER, …) is unmodelled. A text the tokenizer cannot read is
+// unmodelled too (fail closed).
+func commandClassModelled(e engine.Engine, ast engine.AST, sql string, sel nameresolve.Selection) bool {
+	target, err := engine.ParseObjectTarget(e, sql)
+	if err != nil {
+		return false
+	}
+	if target.Verb != engine.VerbNone {
+		return true
+	}
+	if info, err := engine.ParseDBLevel(e, sql); err != nil {
+		return false
+	} else if info.Kind != engine.DBNone {
+		return true
+	}
+	if info, err := engine.InspectWrite(ast); err != nil {
+		return false
+	} else if info.Sub == engine.CmdRename || info.Sub == engine.CmdExchange || info.Sub == engine.CmdAlterUpdate {
+		return true
+	}
+	if gp, err := engine.ParseGrant(e, sql); err != nil {
+		return false
+	} else if gp.IsGrantVerb {
+		return true
+	}
+	if nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+		return false
+	}
+	_, isSet, _ := engine.SessionSettingAssignments(e, sql)
+	return isSet
 }

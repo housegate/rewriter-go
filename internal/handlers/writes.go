@@ -663,7 +663,14 @@ func dispatchCommand(e engine.Engine, ast engine.AST, sql string, info engine.Wr
 		for _, tt := range targets {
 			recordAccessedWrite(resp, tt, sel)
 		}
-		rejectUnsupported(resp, "statement is not supported")
+		msg := engine.UnsupportedStatementMessage
+		if sel.Mode == nameresolve.ModeDynamic && nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+			// An unmodelled class under the SI surface gets the SI catch-all
+			// (spec 2026-09-26 R8), like SYSTEM / CHECK; an SI object it names
+			// was already refused by the SI write preflight.
+			msg = nameresolve.StorageIntegrityUnmodelledMessage
+		}
+		rejectUnsupported(resp, msg)
 		return resp, true, nil
 	default: // CmdNone: USE/SHOW/GRANT/REVOKE/EXISTS — not a write this phase handles
 		return nil, false, nil

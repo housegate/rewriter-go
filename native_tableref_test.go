@@ -1240,3 +1240,50 @@ func TestTableRef_DescribeAndShowTargets(t *testing.T) {
 	)
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_CommandPrecedence pins spec 2026-09-26 R8 (final review
+// Important 1): for a command node the T2 scan of the whole text runs first,
+// then the unmodelled-class refusal, then the protected-database check. With
+// the SI surface active every unmodelled class answers with the SI catch-all.
+func TestTableRef_CommandPrecedence(t *testing.T) {
+	const paramMsg = "query parameters are not supported in a database or table position"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		unmodelled := "statement is not supported"
+		if si {
+			unmodelled = StorageIntegrityUnmodelledMessage
+		}
+		for _, sql := range []string{
+			"EXPLAIN SELECT * FROM {p:Identifier}",
+			"KILL QUERY WHERE query_id = {p:Identifier}",
+			"SYSTEM SYNC REPLICA {p:Identifier}",
+			"DETACH TABLE {p:Identifier}",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: paramMsg, wantSQL: sql})
+		}
+		for _, c := range []struct {
+			sql string
+			acc []string
+		}{
+			{"DETACH TABLE phys.x", []string{"phys.x"}},
+			{"OPTIMIZE TABLE phys.x", []string{"phys.x"}},
+			{"ATTACH TABLE db1.x", []string{"db1.x"}},
+			{"KILL QUERY WHERE query_id = 'x'", nil},
+			{"EXPLAIN SELECT * FROM db1.o", nil},
+			{"CHECK TABLE phys.x", nil},
+		} {
+			acc := c.acc
+			if acc == nil {
+				acc = []string{}
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unmodelled, wantSQL: c.sql, wantAcc: acc})
+		}
+		// A modelled command class still gets the protected-database check.
+		cases = append(cases, tablerefCase{name: "rename_protected", si: si,
+			sql:      "RENAME TABLE phys.x TO db1.z",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"})
+	}
+	runTablerefCases(t, cases)
+}

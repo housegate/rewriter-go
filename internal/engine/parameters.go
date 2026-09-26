@@ -3,7 +3,6 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // IdentifierParameterMessage is the cross-engine rejection text (spec T2).
@@ -87,107 +86,18 @@ func TablePositionParameter(e Engine, ast AST, sql string) (bool, error) {
 	return info.ParameterTarget, nil
 }
 
-// commandTextParameterHit applies the position-scoped T2 policy to an opaque
-// `command` node, dispatched by command class so a column/value-position
-// parameter in a class that also carries one (ALTER ... UPDATE's assignments)
-// is never refused:
-//
-//   - EXISTS / SHOW CREATE / DESCRIBE (ParseObjectTarget's Verb != VerbNone):
-//     these carry nothing but the target — no WHERE, no assignment list — so
-//     the whole text is scanned. Deliberately NOT ParseObjectTarget's own
-//     DB/Table fields: those mis-extract a qualified parameter target instead
-//     of reporting it (measured: "SHOW CREATE TABLE db1.{p:Identifier}"
-//     resolves Table="db1" and silently drops the ".{p:Identifier}" suffix,
-//     because its name-run grammar requires BOTH sides of a dot to be a name
-//     token and falls back to treating the qualifier alone as a bare name
-//     when the second side isn't one). ParseObjectTarget here answers only
-//     "is this one of these three verbs", not "where is the parameter".
-//   - USE / SHOW ... FROM|IN (ParseDBLevel's Kind != DBNone): reuses its
-//     existing HasDBClause/DBResolved/DB extraction — an explicit clause that
-//     did not resolve to a plain name is the parameter shape. Checked AFTER
-//     ParseObjectTarget: ParseDBLevel classifies ANY leading "SHOW ..." as
-//     DBShow regardless of what follows, so "SHOW CREATE ..." must be routed
-//     to the whole-text scan above first or it is wrongly treated as a
-//     database-target statement whose (never populated for CREATE) DB clause
-//     looks clean.
-//   - RENAME TABLE / EXCHANGE TABLES (InspectWrite's Sub == CmdRename /
-//     CmdExchange): whole text scanned, same reasoning as EXISTS/DESCRIBE —
-//     both carry only names after the TABLE/TABLES keyword.
-//   - ALTER ... UPDATE (Sub == CmdAlterUpdate): the whole text — its
-//     assignment / predicate tail is opaque, so a parameter anywhere in it is
-//     refused (spec 2026-09-26 R2).
-//   - Every other command class (SET, SYSTEM, KILL, CHECK, EXPLAIN, CREATE
-//     USER, GRANT, REVOKE, the CmdBareReject family, CmdNone, ...) is NOT
-//     text-scanned here at all: this policy only refuses table/database
-//     positions this switch can name, and Task 7 separately refuses those
-//     classes as unmodelled statements.
-//
-// sql must be the caller's original source text (the same argument doRewrite
-// passes to every other command-node handler), never CommandSQL(ast): measured
-// on rewriter-go v0.13.0, RENAME's command.this reprint pads a space inside an
-// embedded Identifier-typed brace parameter ("db1.{p:Identifier}" round-trips
-// as "db1.{ p:Identifier }"), which the original source text never has.
-func commandTextParameterHit(e Engine, ast AST, sql string) (bool, error) {
-	objTarget, err := ParseObjectTarget(e, sql)
-	if err != nil {
-		return true, nil // tokenizer error: fail closed, not a propagated Go error
-	}
-	if objTarget.Verb != VerbNone {
-		return IdentifierParameterInText(e, sql), nil
-	}
-	dbInfo, err := ParseDBLevel(e, sql)
-	if err != nil {
-		return true, nil
-	}
-	if dbInfo.Kind != DBNone {
-		return dbLevelHoldsParameter(dbInfo), nil
-	}
-	info, err := InspectWrite(ast)
-	if err != nil {
-		return false, err
-	}
-	switch info.Sub {
-	case CmdRename, CmdExchange:
-		return IdentifierParameterInText(e, sql), nil
-	case CmdAlterUpdate:
-		// The whole mutation text: an Identifier parameter in the opaque
-		// assignment / predicate tail is refused too (spec 2026-09-26 R2).
-		return IdentifierParameterInText(e, sql), nil
-	default:
-		return false, nil
-	}
-}
-
-// dbLevelHoldsParameter reads a USE/SHOW ... FROM|IN (and, for the COLUMNS/
-// INDEX family, SHOW ... FROM <table> [FROM <database>]) target for an
-// explicit but unresolved shape: ParseDBLevel only ever populates DB/ShowTable
-// when the subsequent token(s) resolved to a plain name (see ParseDBLevel's
-// USE branch, parseShowTableThenDatabase, and parsedIdentifierAt), so an
-// explicit clause that stayed unresolved is the Identifier-parameter shape.
-// DB/ShowTable containing '{' guards any future ParseDBLevel change that
-// starts echoing the raw span into one of them instead of leaving it empty.
-func dbLevelHoldsParameter(info DBLevelInfo) bool {
-	switch info.Kind {
-	case DBUse:
-		return info.DB == "" || strings.Contains(info.DB, "{")
-	case DBShow:
-		if info.HasDBClause && !info.DBResolved {
-			return true
-		}
-		// The COLUMNS/INDEX family's FIRST FROM/IN clause names a TABLE, kept
-		// in ShowTable/ShowTableResolved rather than DB/DBResolved (dblevel.go's
-		// parseShowTableThenDatabase) — checked independently of the database
-		// clause above, since either can carry the parameter on its own (e.g.
-		// "SHOW COLUMNS FROM {p:Identifier}" never reaches a database clause at
-		// all, while "SHOW COLUMNS FROM t FROM {d:Identifier}" resolves the
-		// table and leaves only the database clause unresolved).
-		if info.HasTableClause && !info.ShowTableResolved {
-			return true
-		}
-		return strings.Contains(info.DB, "{") || strings.Contains(info.ShowTable, "{")
-	default:
-		return false
-	}
+// commandTextParameterHit applies T2 to an opaque `command` node (spec
+// 2026-09-26 R8): the whole text is scanned, whatever the command class, so an
+// Identifier parameter anywhere in it — a target, an ALTER … UPDATE tail, an
+// EXPLAIN body — is refused with the T2 message before the unmodelled-class
+// and protected-database checks run. sql must be the caller's original source
+// text, never CommandSQL(ast): measured on rewriter-go v0.13.0, a command's
+// reprint pads a space inside an embedded Identifier-typed brace parameter
+// ("db1.{p:Identifier}" round-trips as "db1.{ p:Identifier }"); the
+// token-based scan tolerates that, but the original text is the one
+// ClickHouse executes.
+func commandTextParameterHit(e Engine, _ AST, sql string) (bool, error) {
+	return IdentifierParameterInText(e, sql), nil
 }
 
 // commandScanSentinel is appended (on its own line) to the text IdentifierParameterInText

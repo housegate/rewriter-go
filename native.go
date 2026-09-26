@@ -129,14 +129,11 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 	return r
 }
 
-// StorageIntegrityUnmodelledMessage is returned when a request activates the
-// storage-integrity surface (a V1 request with a non-empty tables map, or any
-// V2 request) and execution reaches the unmodelled-statement pass-through.
-// The rewriter cannot prove such a statement is harmless to the
-// protocol-owned namespaces, so it refuses to forward it (Spec I D1).
+// StorageIntegrityUnmodelledMessage is the SI-active refusal of an
+// unmodelled statement class (nameresolve.StorageIntegrityUnmodelledMessage).
 // Enumerated classes replace this text with a more specific one; see
 // handlers.AnnotateStorageIntegrityReject.
-const StorageIntegrityUnmodelledMessage = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+const StorageIntegrityUnmodelledMessage = nameresolve.StorageIntegrityUnmodelledMessage
 
 // StorageIntegrityContractMessage rejects an active storage-integrity request
 // whose contract_version this engine does not implement.
