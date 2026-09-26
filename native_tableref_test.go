@@ -1306,3 +1306,23 @@ func TestTableRef_BareIdentifierInOperand(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_LookupNonLiteralTarget pins spec 2026-09-26 R10 (final review
+// Important 5): a non-literal first argument reports target "" on every path,
+// the structured walk and the command-text / Raw-action scan alike.
+func TestTableRef_LookupNonLiteralTarget(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"SELECT dictGet(currentDatabase() || '.d', 'v', 1)", `dictGet target "" does not resolve`},
+			{"ALTER TABLE db1.o UPDATE b = dictGet(currentDatabase() || '.d', 'v', 1) WHERE 1", `dictGet target "" does not resolve`},
+			{"ALTER TABLE db1.o DELETE WHERE dictGet(concat('db1', '.d'), 'v', a) = 1", `dictGet target "" does not resolve`},
+			{"ALTER TABLE db1.o UPDATE b = joinGet(db1.j, 'v', 1) WHERE 1", `joinGet target "db1.j" does not resolve`},
+			{"ALTER TABLE db1.o UPDATE b = hasColumnInTable(currentDatabase(), 'j', 'v') WHERE 1", `hasColumnInTable target "" does not resolve`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: c.msg, wantSQL: c.sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}

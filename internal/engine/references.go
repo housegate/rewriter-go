@@ -705,7 +705,10 @@ func collectRawActionTexts(node any, out *[]string) {
 // or (b)'s raw-text scan) found the call: hasColumnInTable's last two
 // top-level arguments (its db/table pair — an optional leading
 // host[, user[, pw]] shifts the index exactly like stringLookupArgDatabase
-// documents) joined with '.'; every other name's first top-level argument.
+// documents) joined with '.' when both are string literals; every other
+// name's first top-level argument when it is a string literal or a
+// (qualified) name. Any other argument is non-literal and reports Arg ""
+// (spec 2026-09-26 R10), never a token-joined rendering.
 //
 // A backquoted or double-quoted function name — for example a backtick-
 // quoted dictGet or a double-quote-quoted joinGet immediately followed by an
@@ -732,14 +735,25 @@ func lookupCallsInRawTokens(toks []rawToken) []StringLookup {
 		}
 		groups, ok := rawCallArgGroups(toks, i+1)
 		var arg string
+		literal := false
 		if ok {
-			if strings.HasPrefix(strings.ToLower(toks[i].Text), "hascolumnintable") && len(groups) >= 3 {
-				arg = rawArgGroupText(groups[len(groups)-3]) + "." + rawArgGroupText(groups[len(groups)-2])
+			if strings.HasPrefix(strings.ToLower(toks[i].Text), "hascolumnintable") {
+				if len(groups) >= 3 {
+					db, dbOK := rawStringArg(groups[len(groups)-3])
+					table, tableOK := rawStringArg(groups[len(groups)-2])
+					if dbOK && tableOK {
+						arg, literal = db+"."+table, true
+					}
+				}
 			} else if len(groups) > 0 {
-				arg = rawArgGroupText(groups[0])
+				if value, isString := rawStringArg(groups[0]); isString {
+					arg, literal = value, true
+				} else if name, isName := rawQualifiedNameArg(groups[0]); isName {
+					arg = name
+				}
 			}
 		}
-		out = append(out, StringLookup{Function: toks[i].Text, Arg: arg, Literal: true})
+		out = append(out, StringLookup{Function: toks[i].Text, Arg: arg, Literal: literal})
 	}
 	return out
 }
@@ -770,24 +784,35 @@ func rawCallArgGroups(toks []rawToken, openIdx int) (groups [][]rawToken, ok boo
 	return nil, false
 }
 
-// rawArgGroupText renders one argument group as display text — a single
-// literal/identifier token's own text for the common case, or every token's
-// text space-joined for anything else (best-effort; the raw-text scan does
-// not attempt a full expression decode the way the structured-AST path
-// does).
-func rawArgGroupText(group []rawToken) string {
-	if len(group) == 0 {
-		return ""
+// rawStringArg decodes an argument group that is exactly one string literal.
+func rawStringArg(group []rawToken) (string, bool) {
+	if len(group) == 1 && group[0].TokenType == "STRING" {
+		return group[0].Text, true
 	}
-	if len(group) == 1 {
-		return group[0].Text
+	return "", false
+}
+
+// rawQualifiedNameArg decodes an argument group that is exactly a name or a
+// dot-separated name run (`db.table`), joined with "." — the same text the
+// structured path decodes for an unquoted identifier argument. Anything else
+// (an expression, a call) is non-literal: the caller reports target "" on
+// every path (spec 2026-09-26 R10).
+func rawQualifiedNameArg(group []rawToken) (string, bool) {
+	if len(group) == 0 || len(group)%2 == 0 {
+		return "", false
 	}
-	var b strings.Builder
-	for i, t := range group {
-		if i > 0 {
-			b.WriteByte(' ')
+	parts := make([]string, 0, len(group)/2+1)
+	for i, tok := range group {
+		if i%2 == 1 {
+			if tok.TokenType != "DOT" {
+				return "", false
+			}
+			continue
 		}
-		b.WriteString(t.Text)
+		if !isNameTok(tok.TokenType) {
+			return "", false
+		}
+		parts = append(parts, tok.Text)
 	}
-	return b.String()
+	return strings.Join(parts, "."), true
 }
