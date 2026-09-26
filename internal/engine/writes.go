@@ -600,6 +600,112 @@ func SetViewBody(ast AST, body AST) (AST, error) {
 	return AST(out), nil
 }
 
+// ExtractInsertBody returns the SELECT body of an INSERT … SELECT as a
+// standalone statement AST (insert.query), or ok=false for VALUES / FORMAT.
+//
+// Empirically verified (spec 2026-09-26 T4 Step 1): insert.query is
+// {"select":…} (or union/intersect/except) for INSERT … SELECT, nil for
+// VALUES, and {"command":{"this":"FORMAT <fmt>"}} for a FORMAT data clause —
+// isReadBody tells the last two apart from a genuine read body.
+func ExtractInsertBody(ast AST) (AST, bool, error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	if kind != NodeInsert {
+		return nil, false, nil
+	}
+	q, ok := body["query"].(map[string]any)
+	if !ok || !isReadBody(q) {
+		return nil, false, nil // nil (VALUES) or a FORMAT command node, not a SELECT
+	}
+	b, err := json.Marshal(q)
+	if err != nil {
+		return nil, false, fmt.Errorf("engine: encode insert body: %w", err)
+	}
+	return AST(b), true, nil
+}
+
+// SetInsertBody replaces insert.query with the rewritten body and re-encodes
+// the whole statement. It errors on a non-insert kind so a caller cannot
+// silently splice a body onto the wrong node.
+func SetInsertBody(ast AST, body AST) (AST, error) {
+	kind, b, root, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	if kind != NodeInsert {
+		return nil, fmt.Errorf("engine: SetInsertBody on non-insert kind %q", kind)
+	}
+	var node map[string]any
+	if err := json.Unmarshal(body, &node); err != nil {
+		return nil, fmt.Errorf("engine: decode insert body: %w", err)
+	}
+	b["query"] = node
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode insert: %w", err)
+	}
+	return AST(out), nil
+}
+
+// ExtractCreateSelectBody returns a CREATE TABLE … AS SELECT's embedded body
+// as a standalone statement AST (create_table.as_select), or ok=false when
+// absent. Empirically verified (Step 1): `EMPTY AS SELECT` carries no
+// as_select at all — polyglot drops the body — so there is nothing to
+// rewrite or report for that form.
+func ExtractCreateSelectBody(ast AST) (AST, bool, error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, false, err
+	}
+	if kind != NodeCreateTable {
+		return nil, false, nil
+	}
+	q, ok := body["as_select"].(map[string]any)
+	if !ok || !isReadBody(q) {
+		return nil, false, nil
+	}
+	b, err := json.Marshal(q)
+	if err != nil {
+		return nil, false, fmt.Errorf("engine: encode create-select body: %w", err)
+	}
+	return AST(b), true, nil
+}
+
+// SetCreateSelectBody replaces create_table.as_select with the rewritten body
+// and re-encodes the whole statement. It errors on a non-create_table kind so
+// a caller cannot silently splice a body onto the wrong node.
+func SetCreateSelectBody(ast AST, body AST) (AST, error) {
+	kind, b, root, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	if kind != NodeCreateTable {
+		return nil, fmt.Errorf("engine: SetCreateSelectBody on non-create_table kind %q", kind)
+	}
+	var node map[string]any
+	if err := json.Unmarshal(body, &node); err != nil {
+		return nil, fmt.Errorf("engine: decode create-select body: %w", err)
+	}
+	b["as_select"] = node
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode create_table: %w", err)
+	}
+	return AST(out), nil
+}
+
+// isReadBody reports whether a node is a {"select"|"union"|"intersect"|"except": …} statement.
+func isReadBody(n map[string]any) bool {
+	for _, k := range []string{NodeSelect, NodeUnion, NodeIntersect, NodeExcept} {
+		if _, ok := n[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // GenerateInsert generates the rewritten INSERT. Generate() reproduces VALUES
 // tuples (semantically — `(1,'a')` becomes `(1, 'a')`) and keeps `INSERT INTO
 // FUNCTION …`, but it DROPS a `FORMAT <fmt> <payload>` tail (Polyglot folds the

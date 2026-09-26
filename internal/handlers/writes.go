@@ -34,7 +34,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 
 	switch info.Kind {
 	case engine.NodeCreateTable:
-		return dispatchCreateTable(e, ast, info, sel)
+		return dispatchCreateTable(e, ast, sql, info, opts, sel)
 	case engine.NodeDropTable, engine.NodeDropView, engine.NodeTruncate:
 		return dispatchDropLike(e, ast, sql, info, sel, siDrop)
 	case engine.NodeAlterTable:
@@ -46,7 +46,7 @@ func RewriteWrite(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	case engine.NodeCreateView:
 		return dispatchView(e, ast, sql, info, opts, sel)
 	case engine.NodeInsert:
-		return dispatchInsert(e, ast, sql, info, sel)
+		return dispatchInsert(e, ast, sql, info, opts, sel)
 	case engine.NodeCommand:
 		return dispatchCommand(e, ast, sql, info, sel)
 	case engine.NodeRaw:
@@ -210,28 +210,12 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 		return namespaceResp, true, nil
 	}
 
-	// CREATE TABLE AS SELECT and INSERT ... SELECT carry a second read-side
-	// namespace that ordinary write slots do not visit. Fail closed on SI
-	// sources before any statement-specific rewrite can forward a raw physical
-	// read. CREATE VIEW has its own body pipeline, which preserves view-target
-	// metadata and applies the same rejection later.
-	if info.Kind == engine.NodeCreateTable || info.Kind == engine.NodeInsert {
-		embeddedTables, _, err := engine.CollectEmbeddedSelectSources(ast)
-		if err != nil {
-			return nil, false, err
-		}
-		seenSources := map[string]bool{}
-		for _, tt := range embeddedTables {
-			key := qualify(tt.DB, tt.Table)
-			if seenSources[key] {
-				continue
-			}
-			seenSources[key] = true
-			if resp, rejected := inspectTarget(tt, false); rejected {
-				return resp, true, nil
-			}
-		}
-	}
+	// CREATE TABLE AS SELECT and INSERT ... SELECT embedded sources are no
+	// longer preflight-rejected here (spec 2026-09-26 T4, second half): the
+	// body pipeline (rewriteEmbeddedBody, dispatchInsert/dispatchCreateTable)
+	// now routes them through the same SELECT pipeline as a view body, so an
+	// SI source becomes the derived safe/unsafe read the FROM path emits
+	// instead of a blanket reject.
 	return nil, false, nil
 }
 
@@ -366,7 +350,15 @@ func dispatchSingle(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel 
 	return finishStructured(e, ast, info, sel, newWriteResp(stmt))
 }
 
-func dispatchCreateTable(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+// dispatchCreateTable ports the plain-CREATE-TABLE half of C++ handleWriteQuery.
+// It rewrites the create name + clone_source (RoleCreate/RoleCloneSource slots,
+// short-circuiting on a remote/invalid reject like every other structured
+// write), then — for CREATE TABLE ... AS SELECT — runs the embedded body
+// through the same SELECT pipeline a view body uses (rewriteEmbeddedBody),
+// merging its bookkeeping into resp before regenerating (spec 2026-09-26 T4,
+// second half). `EMPTY AS SELECT` carries no as_select at all (Step 1), so the
+// body step is a no-op for that form.
+func dispatchCreateTable(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_CREATE_TABLE)
 	if info.AsTableFunction {
 		rejectUnsupported(resp, "CREATE TABLE AS table_function(...) is not supported")
@@ -378,7 +370,26 @@ func dispatchCreateTable(e engine.Engine, ast engine.AST, info engine.WriteInfo,
 		rejectUnsupported(resp, "CREATE DICTIONARY is not supported")
 		return resp, true, nil
 	}
-	return finishStructured(e, ast, info, sel, resp)
+	rewritten, ok, err := applyStructuredSlots(ast, info, sel, resp)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return resp, true, nil // reject populated by applyStructuredSlots
+	}
+	rewritten, ok, err = rewriteEmbeddedBody(e, rewritten, sql, opts, engine.ExtractCreateSelectBody, engine.SetCreateSelectBody, resp)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return resp, true, nil
+	}
+	out, err := e.Generate(rewritten)
+	if err != nil {
+		return nil, false, err
+	}
+	resp.SqlAfterRewrite = out
+	return resp, true, nil
 }
 
 func dispatchDropLike(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection, siDrop bool) (*pb.RewriteSQLResponse, bool, error) {
@@ -520,12 +531,17 @@ func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.Write
 // It rejects the two unrewriteable forms first — INSERT INTO FUNCTION(...) and a
 // missing target table — then rewrites the SINGLE insert target via the shared
 // applyStructuredSlots (which records access + table_rewrites and short-circuits
-// on a remote/invalid reject). The embedded SELECT of an INSERT…SELECT is NOT
-// walked: only insert.table is a slot, so its source stays as written (C++ only
-// rewrites insert_query->table). GenerateInsert regenerates the prelude and, for
-// a FORMAT data clause, splices the original inline payload back verbatim (a plain
-// VALUES / INSERT…SELECT has no payload tail and just round-trips through Generate).
-func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
+// on a remote/invalid reject). The embedded SELECT of an INSERT…SELECT is then
+// routed through the same pipeline a view body uses (rewriteEmbeddedBody), so its
+// FROM/IN sources are rewritten and reported — merging into resp before the
+// insert.table slot's bookkeeping — and an SI source becomes the derived
+// safe/unsafe read instead of forwarding a raw physical name (spec 2026-09-26
+// T4, second half). A VALUES insert or a FORMAT data clause has no read body
+// (isReadBody), so the step is a no-op for those. GenerateInsert regenerates the
+// prelude and, for a FORMAT data clause, splices the original inline payload
+// back verbatim (a plain VALUES / INSERT…SELECT has no payload tail and just
+// round-trips through Generate).
+func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_INSERT)
 	if info.AsTableFunction {
 		rejectUnsupported(resp, "INSERT INTO FUNCTION(...) is not supported")
@@ -542,12 +558,51 @@ func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.Wri
 	if !ok {
 		return resp, true, nil // reject populated by applyStructuredSlots
 	}
+	rewritten, ok, err = rewriteEmbeddedBody(e, rewritten, sql, opts, engine.ExtractInsertBody, engine.SetInsertBody, resp)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return resp, true, nil
+	}
 	out, err := engine.GenerateInsert(e, sql, rewritten)
 	if err != nil {
 		return nil, false, err
 	}
 	resp.SqlAfterRewrite = out
 	return resp, true, nil
+}
+
+// rewriteEmbeddedBody runs the SELECT pipeline over an INSERT … SELECT or
+// CREATE TABLE … AS SELECT body and merges its bookkeeping after the
+// statement's own targets (spec 2026-09-26 T4). Mirrors dispatchView's body
+// step; an SI source becomes the derived read the FROM path emits. extract
+// returning has=false (VALUES / FORMAT / EMPTY AS SELECT / plain CREATE TABLE)
+// is a no-op: the caller's `rewritten` AST is returned unchanged with ok=true
+// so it continues to Generate normally. A body rejection (bodyResp.Code !=
+// Success) is reported via resp and ok=false so the caller stops and returns
+// resp as-is.
+func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts []*pb.RewriteOption,
+	extract func(engine.AST) (engine.AST, bool, error), set func(engine.AST, engine.AST) (engine.AST, error),
+	resp *pb.RewriteSQLResponse) (engine.AST, bool, error) {
+	body, has, err := extract(rewritten)
+	if err != nil || !has {
+		return rewritten, err == nil, err
+	}
+	newBody, bodyResp, err := rewriteSelectCore(e, body, opts, sql)
+	if err != nil {
+		return nil, false, err
+	}
+	mergeViewBody(resp, bodyResp)
+	if bodyResp.Code != pb.RewriteCode_Success {
+		resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
+		return nil, false, nil
+	}
+	out, err := set(rewritten, newBody)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
 }
 
 // mergeViewBody folds the body SELECT's bookkeeping into the view response: the

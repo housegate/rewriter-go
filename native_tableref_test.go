@@ -264,9 +264,14 @@ func rejectCodeFor(db string, si bool) pb.RewriteCode {
 // UnsupportedStatement under active SI for a protected hg_* database, not
 // RewriteError. Pre-existing, corpus-pinned SI dispatch; this task does not
 // touch it, only records which shapes hit it.
+//
+// NOT listed (spec 2026-09-26 T4, second half): the INSERT ... SELECT and
+// CREATE TABLE ... AS SELECT embedded-source shapes. Those bodies are now
+// routed through the same SELECT pipeline a view body uses
+// (rewriteEmbeddedBody), so they answer rejectCodeFor's plain-SELECT-read
+// RewriteError default now, exactly like CREATE VIEW's body already did
+// (CREATE VIEW's own shape was never in this map).
 var siWriteSideShapes = map[string]bool{
-	"INSERT INTO db1.o SELECT * FROM %s.`db2.x`":                           true,
-	"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM %s.`db2.x`":       true,
 	"CREATE MATERIALIZED VIEW db1.mv TO %s.`db2.x` AS SELECT * FROM db1.o": true,
 	"INSERT INTO %s.`db2.x` VALUES (1)":                                    true,
 	"DROP TABLE %s.`db2.x`":                                                true,
@@ -400,5 +405,60 @@ func TestTableRef_ProtectedLogicalContextIsRefused(t *testing.T) {
 	}
 	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest || resp.GetMessage() != "protected database phys is not addressable" {
 		t.Fatalf("resp = %s %q", resp.GetCode(), resp.GetMessage())
+	}
+}
+
+// TestTableRef_EmbeddedSourcesAreRewrittenAndReported pins spec T4 (second
+// half): an INSERT ... SELECT or CREATE TABLE ... AS SELECT body is routed
+// through the same SELECT pipeline as a view body, so its FROM/IN sources are
+// rewritten to physical names and reported in original_accessed_tables, and an
+// SI source becomes the derived safe/unsafe read the FROM path already emits.
+func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "insert select own", sql: "INSERT INTO db1.o SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM phys."db1.p" "db1.p"`, wantAcc: []string{"db1.o", "db1.p"}},
+		// DEVIATION FROM BRIEF (reported DONE_WITH_CONCERNS): the brief's wantSQL
+		// spells the back-alias quoted (`"p"`), but applyDecision's back-alias is
+		// ident(originName(tt)) — for an unqualified operand tt.DB=="" so
+		// originName is the bare "p", which the generator prints unquoted like
+		// any other plain identifier with no dot (see TestTableRef_InOperandsAreRewrittenAndReported's
+		// "unqualified" case, which documents the same TableTarget{DB:"",Table:"p"}
+		// decode). Pinning the engine's actual, measured output.
+		// wantAcc's second entry is ".p", not "db1.p", for the same documented
+		// reason as TestTableRef_InOperandsAreRewrittenAndReported's "unqualified"
+		// case: OriginalAccessedTables reports TableTarget{DB:"",Table:"p"} verbatim.
+		{name: "insert select unqualified", sql: "INSERT INTO db1.o SELECT * FROM p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM phys."db1.p" p`, wantAcc: []string{"db1.o", ".p"}},
+		{name: "insert select nested in", sql: "INSERT INTO db1.o SELECT * FROM (SELECT * FROM db1.p WHERE a IN db1.q)", wantCode: pb.RewriteCode_Success,
+			wantAcc: []string{"db1.o", "db1.p", "db1.q"}},
+		{name: "insert select active source", sql: "INSERT INTO db1.o SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t"`, wantAcc: []string{"db1.o", "db1.t"}},
+		{name: "insert into active target keeps signed-lane marking", sql: "INSERT INTO db1.t SELECT * FROM db1.o", si: true, wantCode: pb.RewriteCode_Success,
+			wantAcc: []string{"db1.t", "db1.o"}},
+		{name: "ctas own", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas empty drops the body", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory`, wantAcc: []string{"db1.n"}},
+		{name: "ctas active source", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
+			wantAcc: []string{"db1.n", "db1.t"}},
+		{name: "ctas into active target still refused", sql: "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "accepts writes only through the signed statement lane"},
+	})
+
+	// The signed lane's contract (spec §2): "INSERT remains an ordinary
+	// successful physical rewrite marked is_storage_integrity". Confirm the
+	// INSERT target itself (not just its embedded source) still carries the
+	// SI marker after this task routes the body through the SELECT pipeline.
+	e := newEngine(t)
+	resp, err := doRewrite(e, "INSERT INTO db1.t SELECT * FROM db1.o", tablerefOpts(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+	}
+	acc := resp.GetOriginalAccessedTables()
+	if len(acc) == 0 || !acc[0].GetIsStorageIntegrity() {
+		t.Fatalf("accessed[0] = %+v, want IsStorageIntegrity=true", acc)
 	}
 }

@@ -855,13 +855,21 @@ func TestRewriteSelect_storageIntegrityCommaWithOffsetBindsActualTable(t *testin
 	}
 }
 
+// TestWrite_storageIntegrityEmbeddedSelectSourcesRejected pins that a DIRECT
+// physical hg_* reference inside a CREATE TABLE ... AS SELECT / INSERT ...
+// SELECT embedded source stays refused: LookupStorageIntegrity only matches a
+// configured LOGICAL name (db1.t), so a raw hg_safe/hg_unsafe reference is
+// never resolved to a derived safe/unsafe read — it is still "not directly
+// addressable", just via the SELECT-body pipeline now (spec 2026-09-26 T4,
+// second half) instead of the write-side preflight this task removed. A
+// logical Active-table source (db1.t) is covered separately by
+// TestWrite_storageIntegrityEmbeddedSelectSourcesRewritten: it is no longer
+// blanket-rejected, it becomes a derived-read success.
 func TestWrite_storageIntegrityEmbeddedSelectSourcesRejected(t *testing.T) {
 	e := newEngine(t)
 	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
 	for _, sql := range []string{
-		`CREATE TABLE other.x AS SELECT * FROM db1.t`,
 		`CREATE TABLE other.x AS SELECT * FROM hg_safe.db1__t`,
-		`INSERT INTO other.u SELECT * FROM db1.t`,
 		`INSERT INTO other.u SELECT * FROM hg_unsafe.db1__t`,
 	} {
 		t.Run(sql, func(t *testing.T) {
@@ -874,6 +882,50 @@ func TestWrite_storageIntegrityEmbeddedSelectSourcesRejected(t *testing.T) {
 				t.Fatalf("handled=%v err=%v", handled, err)
 			}
 			assertStorageIntegrityReject(t, resp, "storage-integrity")
+		})
+	}
+}
+
+// TestWrite_storageIntegrityEmbeddedSelectSourcesRewritten pins the T4
+// (second half) contract: a CREATE TABLE ... AS SELECT / INSERT ... SELECT
+// body reading an Active table by its LOGICAL name is routed through the same
+// SELECT pipeline a view body uses (rewriteEmbeddedBody), so the source
+// becomes the derived safe/unsafe read instead of a blanket reject — mirroring
+// how an IN operand reading db1.t already behaves (Task 5).
+func TestWrite_storageIntegrityEmbeddedSelectSourcesRewritten(t *testing.T) {
+	e := newEngine(t)
+	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
+	for _, sql := range []string{
+		`CREATE TABLE other.x AS SELECT * FROM db1.t`,
+		`INSERT INTO other.u SELECT * FROM db1.t`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			ast, err := e.ParseOne(sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, handled, err := RewriteWrite(e, ast, sql, opts)
+			if err != nil || !handled {
+				t.Fatalf("handled=%v err=%v", handled, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success {
+				t.Fatalf("code=%v msg=%q, want Success", resp.GetCode(), resp.GetMessage())
+			}
+			if !strings.Contains(resp.GetSqlAfterRewrite(), "hg_safe.db1__t") {
+				t.Fatalf("sql = %q, want a derived safe read of hg_safe.db1__t", resp.GetSqlAfterRewrite())
+			}
+			var sawSI bool
+			for _, accessed := range resp.GetOriginalAccessedTables() {
+				if accessed.GetOriginalDatabase() == "db1" && accessed.GetOriginalTable() == "t" {
+					if !accessed.GetIsStorageIntegrity() {
+						t.Fatalf("db1.t accessed entry not flagged IsStorageIntegrity: %+v", accessed)
+					}
+					sawSI = true
+				}
+			}
+			if !sawSI {
+				t.Fatalf("accessed=%+v, want a db1.t entry", resp.GetOriginalAccessedTables())
+			}
 		})
 	}
 }

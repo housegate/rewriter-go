@@ -631,13 +631,16 @@ func TestRewriteWrite_insertFormatPreservesPayload(t *testing.T) {
 	}
 }
 
-// Task 9.3. INSERT INTO db.t SELECT * FROM db.s, static {db.t→t_phys,
-// db.s→s_phys}. C++ parity: only the INSERT target is rewritten — the embedded
-// SELECT source db.s is LEFT db.s (the INSERT handler does not run the SELECT
-// pipeline on insert.query). So db.s is NOT in table_rewrites and accessed is
-// ONLY [t]. Verified empirically: GenerateInsert+applyStructuredSlots produce
-// exactly `INSERT INTO db.t_phys SELECT * FROM db.s`.
-func TestRewriteWrite_insertSelectSourceUntouched(t *testing.T) {
+// Task 9.3 / spec 2026-09-26 T4 (second half). INSERT INTO db.t SELECT * FROM
+// db.s, static {db.t→t_phys, db.s→s_phys}. SUPERSEDES the original Task-9.3
+// "embedded SELECT source untouched" contract: the source is now routed
+// through the same SELECT pipeline a view body uses (rewriteEmbeddedBody), so
+// BOTH the INSERT target and the embedded source are rewritten and reported.
+// Verified empirically: applyStructuredSlots+rewriteEmbeddedBody+GenerateInsert
+// produce exactly `INSERT INTO db.t_phys SELECT * FROM db.s_phys "db.s"` (the
+// back-alias is the Phase-1 SELECT-rewrite contract, see
+// TestViewBody_extractRewriteSet).
+func TestRewriteWrite_insertSelectSourceRewritten(t *testing.T) {
 	e := newEngine(t)
 	const src = "INSERT INTO db.t SELECT * FROM db.s"
 	ast := mustParse(t, e, src)
@@ -656,17 +659,18 @@ func TestRewriteWrite_insertSelectSourceUntouched(t *testing.T) {
 	if resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_INSERT {
 		t.Fatalf("stmt = %v, want INSERT", resp.GetStatementType())
 	}
-	// Target rewritten, embedded SELECT source untouched (db.s stays db.s).
-	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), "INSERT INTO db.t_phys SELECT * FROM db.s") {
-		t.Fatalf("sql = %q, want ≈ INSERT INTO db.t_phys SELECT * FROM db.s", resp.GetSqlAfterRewrite())
+	// Target AND embedded SELECT source both rewritten, source back-aliased to
+	// its original qualified name.
+	if !sqlSemEq(t, e, resp.GetSqlAfterRewrite(), `INSERT INTO db.t_phys SELECT * FROM db.s_phys "db.s"`) {
+		t.Fatalf("sql = %q, want ≈ INSERT INTO db.t_phys SELECT * FROM db.s_phys \"db.s\"", resp.GetSqlAfterRewrite())
 	}
-	// Only the INSERT target is recorded — the SELECT source is NOT walked.
-	want := map[string]string{"db.t": "db.t_phys"}
+	// Both the INSERT target and the SELECT source are recorded now.
+	want := map[string]string{"db.t": "db.t_phys", "db.s": "db.s_phys"}
 	if got := resp.GetTableRewrites(); !mapEq(got, want) {
-		t.Fatalf("table_rewrites = %v, want %v (db.s must NOT be rewritten)", got, want)
+		t.Fatalf("table_rewrites = %v, want %v (db.s must be rewritten too)", got, want)
 	}
-	if ats := resp.GetOriginalAccessedTables(); len(ats) != 1 || ats[0].GetOriginalTable() != "t" {
-		t.Fatalf("accessed = %+v, want exactly 1 {t} (embedded SELECT not walked)", ats)
+	if ats := resp.GetOriginalAccessedTables(); len(ats) != 2 || ats[0].GetOriginalTable() != "t" || ats[1].GetOriginalTable() != "s" {
+		t.Fatalf("accessed = %+v, want exactly 2 {t, s} (embedded SELECT walked)", ats)
 	}
 }
 

@@ -131,14 +131,17 @@
     "sql_contains": ["{\"x\":1}"]
   },
   {
-    "name": "insert_select_source_untouched",
+    "name": "insert_select_source_rewritten",
     "sql": "INSERT INTO db.t SELECT * FROM db.s",
     "static": {"table_map": {"db.t": "t_phys", "db.s": "s_phys"}},
     "want_code": "Success",
     "want_stmt": "INSERT",
-    "want_table_rewrites": {"db.t": "db.t_phys"},
-    "want_accessed": [{"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false}],
-    "want_sql": "INSERT INTO db.t_phys SELECT * FROM db.s"
+    "want_table_rewrites": {"db.t": "db.t_phys", "db.s": "db.s_phys"},
+    "want_accessed": [
+      {"original_database": "db", "original_table": "t", "logical_database": "", "physical_database": "db", "is_remote": false},
+      {"original_database": "db", "original_table": "s", "logical_database": "", "physical_database": "db", "is_remote": false}
+    ],
+    "want_sql": "INSERT INTO db.t_phys SELECT * FROM db.s_phys \"db.s\""
   },
   {
     "name": "insert_into_function_reject",
