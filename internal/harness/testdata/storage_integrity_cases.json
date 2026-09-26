@@ -3807,7 +3807,7 @@
         "reserved_row_id_column": "_hg_row_id"
       }
     },
-    "name": "si_ctas_logical_source_rejected",
+    "name": "si_ctas_logical_source_rewritten",
     "sql": "CREATE TABLE other.x AS SELECT * FROM db1.t",
     "want_accessed": [
       {
@@ -3896,7 +3896,7 @@
         "reserved_row_id_column": "_hg_row_id"
       }
     },
-    "name": "si_insert_select_logical_source_rejected",
+    "name": "si_insert_select_logical_source_rewritten",
     "sql": "INSERT INTO other.u SELECT * FROM db1.t",
     "want_accessed": [
       {
@@ -4660,7 +4660,7 @@
         "reserved_row_id_column": "_hg_row_id"
       }
     },
-    "name": "si_in_logical_table_rejected",
+    "name": "si_in_logical_table_rewritten",
     "sql": "SELECT * FROM other.u WHERE id IN db1.t",
     "want_accessed": [
       {
@@ -6978,7 +6978,7 @@
         "reserved_row_id_column": "_hg_row_id"
       }
     },
-    "name": "si_ordinary_remote_engine_allowed",
+    "name": "si_ordinary_remote_engine_rejected",
     "reject": true,
     "sql": "CREATE TABLE other.x (a UInt64) ENGINE = Remote('h', 'other', 'u')",
     "want_code": "UnsupportedStatement",
@@ -8329,7 +8329,7 @@
   },
   {
     "contract_version": "V1",
-    "name": "si_mysql_ordinary_database_allowed",
+    "name": "si_mysql_ordinary_database_rejected",
     "sql": "SELECT * FROM mysql('127.0.0.1:9004', 'other', 'u', 'x', 'y')",
     "dynamic": {
       "database_map": {"db1": "phys", "other": "phys"},
@@ -8755,7 +8755,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_from_qualified_rejected",
@@ -8771,7 +8772,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_db_rejected",
@@ -8787,7 +8789,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_join_rejected",
@@ -8803,7 +8806,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_subquery_rejected",
@@ -8819,7 +8823,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_in_rejected",
@@ -8835,7 +8840,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_in_qualified_rejected",
@@ -8851,7 +8857,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_in_call_rejected",
@@ -8867,7 +8874,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_insert_select_source_rejected",
@@ -8883,7 +8891,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_ctas_source_rejected",
@@ -8899,7 +8908,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_mv_to_rejected",
@@ -8915,7 +8925,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_mv_name_rejected",
@@ -8931,7 +8942,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_drop_bare_rejected",
@@ -8947,7 +8959,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_drop_rejected",
@@ -8963,7 +8976,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_insert_target_rejected",
@@ -8979,7 +8993,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_create_target_rejected",
@@ -8995,7 +9010,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_exists_rejected",
@@ -9011,7 +9027,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_show_create_rejected",
@@ -9027,7 +9044,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_describe_rejected",
@@ -9043,7 +9061,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_rename_rejected",
@@ -9059,7 +9078,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_show_tables_from_rejected",
@@ -9075,7 +9095,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_use_rejected",
@@ -9091,7 +9112,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_alter_update_rejected",
@@ -9107,7 +9129,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_create_database_rejected",
@@ -9123,7 +9146,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_drop_database_rejected",
@@ -9139,7 +9163,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_show_columns_from_rejected",
@@ -9155,7 +9180,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_show_index_from_rejected",
@@ -9171,7 +9197,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "query parameters are not supported in a database or table position"
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_value_allowed",
@@ -9187,7 +9214,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a = {v: UInt64}",
-    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_param_column_allowed",
@@ -9203,7 +9230,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT {c: Identifier} FROM phys.\"db1.o\" \"db1.o\"",
-    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_from_rejected",
@@ -9220,7 +9247,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_join_rejected",
@@ -9237,7 +9264,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_subquery_rejected",
@@ -9254,7 +9281,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_cte_rejected",
@@ -9271,7 +9298,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_in_rejected",
@@ -9288,7 +9315,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_in_paren_rejected",
@@ -9305,7 +9332,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_in_tuple_rejected",
@@ -9322,7 +9349,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_in_call_rejected",
@@ -9339,7 +9366,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_global_in_rejected",
@@ -9356,7 +9383,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_insert_select_source_rejected",
@@ -9373,7 +9400,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_ctas_source_rejected",
@@ -9390,7 +9417,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_view_body_rejected",
@@ -9407,7 +9434,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_mv_to_rejected",
@@ -9424,7 +9451,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_insert_target_rejected",
@@ -9441,7 +9468,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_drop_rejected",
@@ -9458,7 +9485,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_create_target_rejected",
@@ -9475,7 +9502,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_create_as_rejected",
@@ -9492,7 +9519,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_rename_rejected",
@@ -9509,7 +9536,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_exists_rejected",
@@ -9526,7 +9553,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_show_create_rejected",
@@ -9543,7 +9570,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_describe_rejected",
@@ -9560,7 +9587,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_show_tables_from_rejected",
@@ -9577,7 +9604,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_use_rejected",
@@ -9594,7 +9621,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_create_database_rejected",
@@ -9611,7 +9638,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_drop_database_rejected",
@@ -9628,7 +9655,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_merge_arg_rejected",
@@ -9645,7 +9672,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_remote_arg_rejected",
@@ -9662,7 +9689,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_engine_merge_arg_rejected",
@@ -9679,7 +9706,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_joinget_arg_rejected",
@@ -9696,7 +9723,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_from_rejected",
@@ -9713,7 +9740,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_join_rejected",
@@ -9730,7 +9757,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_subquery_rejected",
@@ -9747,7 +9774,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_cte_rejected",
@@ -9764,7 +9791,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_in_rejected",
@@ -9781,7 +9808,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_in_paren_rejected",
@@ -9798,7 +9825,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_in_tuple_rejected",
@@ -9815,7 +9842,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_in_call_rejected",
@@ -9832,7 +9859,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_global_in_rejected",
@@ -9849,7 +9876,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_insert_select_source_rejected",
@@ -9866,7 +9893,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_ctas_source_rejected",
@@ -9883,7 +9910,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_view_body_rejected",
@@ -9900,7 +9927,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_mv_to_rejected",
@@ -9917,7 +9944,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_insert_target_rejected",
@@ -9934,7 +9961,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_drop_rejected",
@@ -9951,7 +9978,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_create_target_rejected",
@@ -9968,7 +9995,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_create_as_rejected",
@@ -9985,7 +10012,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_rename_rejected",
@@ -10002,7 +10029,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_exists_rejected",
@@ -10019,7 +10046,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_show_create_rejected",
@@ -10036,7 +10063,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_describe_rejected",
@@ -10053,7 +10080,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_show_tables_from_rejected",
@@ -10070,7 +10097,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_use_rejected",
@@ -10087,7 +10114,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_create_database_rejected",
@@ -10104,7 +10131,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_drop_database_rejected",
@@ -10121,7 +10148,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_merge_arg_rejected",
@@ -10138,7 +10165,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_remote_arg_rejected",
@@ -10155,7 +10182,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_engine_merge_arg_rejected",
@@ -10172,7 +10199,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_safe_joinget_arg_rejected",
@@ -10189,7 +10216,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}]
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_from_rejected",
@@ -10206,7 +10233,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_join_rejected",
@@ -10223,7 +10250,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_subquery_rejected",
@@ -10240,7 +10267,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_cte_rejected",
@@ -10257,7 +10284,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_in_rejected",
@@ -10274,7 +10301,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_in_paren_rejected",
@@ -10291,7 +10318,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_in_tuple_rejected",
@@ -10308,7 +10335,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_in_call_rejected",
@@ -10325,7 +10352,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_global_in_rejected",
@@ -10342,7 +10369,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_insert_select_source_rejected",
@@ -10359,7 +10386,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_ctas_source_rejected",
@@ -10376,7 +10403,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_view_body_rejected",
@@ -10393,7 +10420,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_mv_to_rejected",
@@ -10410,7 +10437,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_insert_target_rejected",
@@ -10427,7 +10454,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_drop_rejected",
@@ -10444,7 +10471,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_create_target_rejected",
@@ -10461,7 +10488,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_create_as_rejected",
@@ -10478,7 +10505,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_rename_rejected",
@@ -10495,7 +10522,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_exists_rejected",
@@ -10512,7 +10539,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_show_create_rejected",
@@ -10529,7 +10556,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_describe_rejected",
@@ -10546,7 +10573,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_show_tables_from_rejected",
@@ -10563,7 +10590,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_use_rejected",
@@ -10580,7 +10607,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_create_database_rejected",
@@ -10597,7 +10624,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_drop_database_rejected",
@@ -10614,7 +10641,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_merge_arg_rejected",
@@ -10631,7 +10658,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_remote_arg_rejected",
@@ -10648,7 +10675,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_engine_merge_arg_rejected",
@@ -10665,7 +10692,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_unsafe_joinget_arg_rejected",
@@ -10682,7 +10709,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_unsafe is not addressable",
-    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}]
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_from_rejected",
@@ -10699,7 +10726,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_join_rejected",
@@ -10716,7 +10743,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_subquery_rejected",
@@ -10733,7 +10760,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_cte_rejected",
@@ -10750,7 +10777,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_in_rejected",
@@ -10767,7 +10794,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_in_paren_rejected",
@@ -10784,7 +10811,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_in_tuple_rejected",
@@ -10801,7 +10828,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_in_call_rejected",
@@ -10818,7 +10845,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_global_in_rejected",
@@ -10835,7 +10862,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_insert_select_source_rejected",
@@ -10852,7 +10879,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_ctas_source_rejected",
@@ -10869,7 +10896,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_view_body_rejected",
@@ -10886,7 +10913,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_mv_to_rejected",
@@ -10903,7 +10930,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_insert_target_rejected",
@@ -10920,7 +10947,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_drop_rejected",
@@ -10937,7 +10964,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_create_target_rejected",
@@ -10954,7 +10981,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_create_as_rejected",
@@ -10971,7 +10998,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_rename_rejected",
@@ -10988,7 +11015,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_exists_rejected",
@@ -11005,7 +11032,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_show_create_rejected",
@@ -11022,7 +11049,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_describe_rejected",
@@ -11039,7 +11066,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_show_tables_from_rejected",
@@ -11056,7 +11083,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_use_rejected",
@@ -11073,7 +11100,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_create_database_rejected",
@@ -11090,7 +11117,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_drop_database_rejected",
@@ -11107,7 +11134,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_merge_arg_rejected",
@@ -11124,7 +11151,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_remote_arg_rejected",
@@ -11141,7 +11168,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_engine_merge_arg_rejected",
@@ -11158,7 +11185,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_hg_promote_joinget_arg_rejected",
@@ -11175,7 +11202,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database hg_promote is not addressable",
-    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}]
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_protected_phys_from_v2_rejected",
@@ -11671,7 +11698,7 @@
     "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
   },
   {
-    "name": "si_tr_phys_active_ordinary_table_in_rejected",
+    "name": "si_tr_phys_active_ordinary_in_v2_rejected",
     "contract_version": "V2",
     "sql": "SELECT * FROM db1.o WHERE a IN phys.`db1.t`",
     "dynamic": {
@@ -11688,7 +11715,7 @@
     "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
   },
   {
-    "name": "si_tr_phys_active_ordinary_table_insert_select_source_v2_rejected",
+    "name": "si_tr_phys_active_ordinary_insert_select_source_v2_rejected",
     "contract_version": "V2",
     "sql": "INSERT INTO db1.o SELECT * FROM phys.`db1.t`",
     "dynamic": {
@@ -11705,7 +11732,7 @@
     "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
   },
   {
-    "name": "si_tr_phys_active_ordinary_table_ctas_source_v2_rejected",
+    "name": "si_tr_phys_active_ordinary_ctas_source_v2_rejected",
     "contract_version": "V2",
     "sql": "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM phys.`db1.t`",
     "dynamic": {
@@ -11735,7 +11762,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN phys.\"db1.p\"",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_in_paren_own_rewritten",
@@ -11751,7 +11778,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.p\")",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_in_tuple_own_rewritten",
@@ -11767,7 +11794,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE (a, b) IN phys.\"db1.p\"",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_in_call_own_rewritten",
@@ -11783,7 +11810,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE in(a, phys.\"db1.p\")",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_global_in_own_rewritten",
@@ -11799,7 +11826,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a GLOBAL IN phys.\"db1.p\"",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_in_active_derived_read",
@@ -11847,7 +11874,7 @@
     },
     "want_code": "Success", "want_stmt": "INSERT",
     "want_sql": "INSERT INTO phys.\"db1.o\" SELECT * FROM phys.\"db1.p\" \"db1.p\"",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_insert_select_unqualified_source_rewritten",
@@ -11863,7 +11890,7 @@
     },
     "want_code": "Success", "want_stmt": "INSERT",
     "want_sql": "INSERT INTO phys.\"db1.o\" SELECT * FROM phys.\"db1.p\" p",
-    "want_table_rewrites": {"db1.o": "phys.db1.o", "p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_insert_select_active_source_derived_read",
@@ -11911,7 +11938,7 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_TABLE",
     "want_sql": "CREATE TABLE phys.\"db1.n\" ENGINE=Memory AS (SELECT * FROM phys.\"db1.p\" \"db1.p\")",
-    "want_table_rewrites": {"db1.n": "phys.db1.n", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.n": "phys.db1.n", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_ctas_empty_own_source_rewritten",
@@ -11927,7 +11954,7 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_TABLE",
     "want_sql": "CREATE TABLE phys.\"db1.n\" ENGINE=Memory",
-    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_ctas_active_source_derived_read",
@@ -11959,7 +11986,7 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_TABLE",
     "want_sql": "CREATE TABLE phys.\"db1.n\" ENGINE=Memory AS (SELECT * FROM othertenant.z)",
-    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "othertenant", "original_table": "z", "logical_database": "othertenant"}]
+    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "othertenant", "original_table": "z", "logical_database": "othertenant"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_in_system_reported",
@@ -11975,7 +12002,248 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN system.tables",
-    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "system", "original_table": "tables", "logical_database": "system"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "system", "original_table": "tables", "logical_database": "system"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_cte_alias_untouched",
+    "contract_version": "V1",
+    "sql": "WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "WITH c AS (SELECT 1 AS a) SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN c",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_unqualified_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN p",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN phys.\"db1.p\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_own_table_active_surface_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN phys.\"db1.o\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_call_active_derived_read",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE in(a, db1.t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.t": "hg_safe.db1__t"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_in_unqualified_active_derived_read",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "t": "hg_safe.db1__t"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_in_unqualified_paren_active_derived_read",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN (t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "t": "hg_safe.db1__t"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_in_unqualified_call_active_derived_read",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE in(a, t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "t": "hg_safe.db1__t"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_in_literal_value_list_active_allowed",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN ('hg_safe.db1__t')",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN ('hg_safe.db1__t')",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_literal_value_list_allowed",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN ('phys.x')",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN ('phys.x')",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_insert_select_nested_in_rewritten",
+    "contract_version": "V1",
+    "sql": "INSERT INTO db1.o SELECT * FROM (SELECT * FROM db1.p WHERE a IN db1.q)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "INSERT",
+    "want_sql": "INSERT INTO phys.\"db1.o\" SELECT * FROM (SELECT * FROM phys.\"db1.p\" \"db1.p\" WHERE a IN phys.\"db1.q\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p", "db1.q": "phys.db1.q"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "q", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_insert_select_own_source_paren_rewritten",
+    "contract_version": "V1",
+    "sql": "INSERT INTO db1.o (SELECT * FROM db1.p)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "INSERT",
+    "want_sql": "INSERT INTO phys.\"db1.o\" (SELECT * FROM phys.\"db1.p\" \"db1.p\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_ctas_own_source_paren_rewritten",
+    "contract_version": "V1",
+    "sql": "CREATE TABLE db1.n ENGINE = Memory AS (SELECT * FROM db1.p) COMMENT 'x'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "CREATE_TABLE",
+    "want_sql": "CREATE TABLE phys.\"db1.n\" ENGINE=Memory AS ((SELECT * FROM phys.\"db1.p\" \"db1.p\")) COMMENT 'x'",
+    "want_table_rewrites": {"db1.n": "phys.db1.n", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_ctas_into_active_target_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_accessed": [{"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_insert_select_active_source_paren_derived_read",
+    "contract_version": "V2",
+    "sql": "INSERT INTO db1.o (SELECT * FROM db1.t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "INSERT",
+    "want_sql": "INSERT INTO phys.\"db1.o\" (SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db1.t": "hg_safe.db1__t"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_ctas_active_source_paren_derived_read",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.n ENGINE = Memory AS (SELECT * FROM db1.t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "CREATE_TABLE",
+    "want_sql": "CREATE TABLE phys.\"db1.n\" ENGINE=Memory AS ((SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"))",
+    "want_table_rewrites": {"db1.n": "phys.db1.n", "db1.t": "hg_safe.db1__t"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
   },
   {
     "name": "si_tr_tf_merge_rejected",
@@ -11991,7 +12259,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function merge is not accepted"
+    "want_message_contains": "table function merge is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_remote_rejected",
@@ -12007,7 +12276,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function remote is not accepted"
+    "want_message_contains": "table function remote is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_remoteSecure_rejected",
@@ -12023,7 +12293,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function remoteSecure is not accepted"
+    "want_message_contains": "table function remoteSecure is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_cluster_rejected",
@@ -12039,7 +12310,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function cluster is not accepted"
+    "want_message_contains": "table function cluster is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_clusterAllReplicas_rejected",
@@ -12055,7 +12327,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function clusterAllReplicas is not accepted"
+    "want_message_contains": "table function clusterAllReplicas is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_loop_rejected",
@@ -12071,7 +12344,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function loop is not accepted"
+    "want_message_contains": "table function loop is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_dictionary_rejected",
@@ -12087,7 +12361,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function dictionary is not accepted"
+    "want_message_contains": "table function dictionary is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_mergeTreeIndex_rejected",
@@ -12103,7 +12378,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function mergeTreeIndex is not accepted"
+    "want_message_contains": "table function mergeTreeIndex is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_mergeTreeProjection_rejected",
@@ -12119,7 +12395,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function mergeTreeProjection is not accepted"
+    "want_message_contains": "table function mergeTreeProjection is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_timeSeriesData_rejected",
@@ -12135,7 +12412,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function timeSeriesData is not accepted"
+    "want_message_contains": "table function timeSeriesData is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_prometheusQuery_rejected",
@@ -12151,7 +12429,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function prometheusQuery is not accepted"
+    "want_message_contains": "table function prometheusQuery is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_clickhouse_rejected",
@@ -12167,7 +12446,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function clickhouse is not accepted"
+    "want_message_contains": "table function clickhouse is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_mysql_rejected",
@@ -12183,7 +12463,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function mysql is not accepted"
+    "want_message_contains": "table function mysql is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_postgresql_rejected",
@@ -12199,7 +12480,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function postgresql is not accepted"
+    "want_message_contains": "table function postgresql is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_mongodb_rejected",
@@ -12215,7 +12497,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function mongodb is not accepted"
+    "want_message_contains": "table function mongodb is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_jdbc_rejected",
@@ -12231,7 +12514,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function jdbc is not accepted"
+    "want_message_contains": "table function jdbc is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_odbc_rejected",
@@ -12247,7 +12531,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function odbc is not accepted"
+    "want_message_contains": "table function odbc is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_executable_rejected",
@@ -12263,7 +12548,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function executable is not accepted"
+    "want_message_contains": "table function executable is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_fuzzQuery_rejected",
@@ -12279,7 +12565,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function fuzzQuery is not accepted"
+    "want_message_contains": "table function fuzzQuery is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_unknown_rejected",
@@ -12295,7 +12582,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function frobnicate is not recognised"
+    "want_message_contains": "table function frobnicate is not recognised",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_numbers_allowed",
@@ -12311,7 +12599,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM numbers(10)",
-    "want_accessed": []
+    "want_accessed": [], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_view_body_rewritten",
@@ -12327,7 +12615,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM view(SELECT * FROM phys.\"db1.o\" \"db1.o\")",
-    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_input_allowed",
@@ -12343,7 +12631,7 @@
     },
     "want_code": "Success", "want_stmt": "INSERT",
     "want_sql": "INSERT INTO phys.\"db1.o\" SELECT * FROM input('a UInt8')",
-    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_url_unchanged",
@@ -12359,7 +12647,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM url('http://127.0.0.1/x', CSV)",
-    "want_accessed": []
+    "want_accessed": [], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_tf_insert_function_remote_rejected",
@@ -12375,7 +12663,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table function remote is not accepted"
+    "want_message_contains": "table function remote is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_Merge_rejected",
@@ -12391,7 +12680,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine Merge is not accepted"
+    "want_message_contains": "table engine Merge is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_Buffer_rejected",
@@ -12407,7 +12697,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine Buffer is not accepted"
+    "want_message_contains": "table engine Buffer is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_Distributed_rejected",
@@ -12423,7 +12714,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine Distributed is not accepted"
+    "want_message_contains": "table engine Distributed is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_URL_rejected",
@@ -12439,7 +12731,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine URL is not accepted"
+    "want_message_contains": "table engine URL is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_Dictionary_rejected",
@@ -12455,7 +12748,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine Dictionary is not accepted"
+    "want_message_contains": "table engine Dictionary is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_KeeperMap_rejected",
@@ -12471,7 +12765,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine KeeperMap is not accepted"
+    "want_message_contains": "table engine KeeperMap is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_EmbeddedRocksDB_rejected",
@@ -12487,7 +12782,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine EmbeddedRocksDB is not accepted"
+    "want_message_contains": "table engine EmbeddedRocksDB is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_Kafka_rejected",
@@ -12503,7 +12799,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine Kafka is not accepted"
+    "want_message_contains": "table engine Kafka is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_S3_rejected",
@@ -12519,7 +12816,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine S3 is not accepted"
+    "want_message_contains": "table engine S3 is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_File_rejected",
@@ -12535,7 +12833,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine File is not accepted"
+    "want_message_contains": "table engine File is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_replicated_with_args_rejected",
@@ -12551,7 +12850,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine ReplicatedMergeTree is not accepted"
+    "want_message_contains": "table engine ReplicatedMergeTree is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_replicated_bare_allowed",
@@ -12567,7 +12867,7 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_TABLE",
     "want_sql": "CREATE TABLE phys.\"db1.n\" (a UInt64) ENGINE=ReplicatedMergeTree ORDER BY a",
-    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_mergetree_allowed",
@@ -12583,7 +12883,7 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_TABLE",
     "want_sql": "CREATE TABLE phys.\"db1.n\" (a UInt64) ENGINE=MergeTree ORDER BY a",
-    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_memory_allowed",
@@ -12599,7 +12899,7 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_TABLE",
     "want_sql": "CREATE TABLE phys.\"db1.n\" (a UInt64) ENGINE=Memory",
-    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.n": "phys.db1.n"}, "want_accessed": [{"original_database": "db1", "original_table": "n", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_storage_policy_rejected",
@@ -12615,7 +12915,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table setting storage_policy is not accepted"
+    "want_message_contains": "table setting storage_policy is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_disk_rejected",
@@ -12631,7 +12932,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table setting disk is not accepted"
+    "want_message_contains": "table setting disk is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_setting_alter_modify_disk_rejected",
@@ -12647,7 +12949,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table setting disk is not accepted"
+    "want_message_contains": "table setting disk is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_engine_unknown_rejected",
@@ -12663,7 +12966,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "table engine Frob is not accepted"
+    "want_message_contains": "table engine Frob is not accepted",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_joinget_mapped_rejected",
@@ -12679,7 +12983,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "joinGet target \"db1.j\" does not resolve through the caller's databases"
+    "want_message_contains": "joinGet target \"db1.j\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_joinget_unqualified_rejected",
@@ -12695,7 +13000,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "joinGet target \"db1.j\" does not resolve through the caller's databases"
+    "want_message_contains": "joinGet target \"db1.j\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_joinget_phys_rejected",
@@ -12712,7 +13018,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_joinget_non_literal_rejected",
@@ -12728,7 +13034,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "joinGet target \"\" does not resolve through the caller's databases"
+    "want_message_contains": "joinGet target \"\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_dictget_mapped_rejected",
@@ -12744,7 +13051,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "dictGet target \"db1.d\" does not resolve through the caller's databases"
+    "want_message_contains": "dictGet target \"db1.d\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_dictget_phys_rejected",
@@ -12761,7 +13069,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_hascolumnintable_mapped_rewritten",
@@ -12777,7 +13085,7 @@
     },
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT hasColumnInTable('phys', 'db1.j', 'v')",
-    "want_table_rewrites": {"db1.j": "phys.db1.j"}, "want_accessed": [{"original_database": "db1", "original_table": "j", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.j": "phys.db1.j"}, "want_accessed": [{"original_database": "db1", "original_table": "j", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_hascolumnintable_phys_rejected",
@@ -12794,7 +13102,7 @@
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
     "want_message_contains": "protected database phys is not addressable",
-    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_hascolumnintable_outside_select_rejected",
@@ -12810,7 +13118,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "hasColumnInTable target \"db1.j\" does not resolve through the caller's databases"
+    "want_message_contains": "hasColumnInTable target \"db1.j\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_lookup_quoted_name_rejected",
@@ -12826,7 +13135,8 @@
     },
     "reject": true,
     "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "joinGet target \"default.j\" does not resolve through the caller's databases"
+    "want_message_contains": "joinGet target \"default.j\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_joinget_active_rejected",
@@ -12858,7 +13168,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_set_inactive_passthrough",
@@ -12890,7 +13201,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_check_table_inactive_rejected",
@@ -12906,7 +13218,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_create_user_inactive_rejected",
@@ -12922,7 +13235,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_detach_rejected",
@@ -12939,7 +13253,7 @@
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
     "want_message_contains": "statement is not supported",
-    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   },
   {
     "name": "si_tr_kill_rejected",
@@ -12955,7 +13269,8 @@
     },
     "reject": true,
     "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
   },
   {
     "name": "si_tr_mv_to_active_rejected",
@@ -13005,6 +13320,6 @@
     },
     "want_code": "Success", "want_stmt": "CREATE_MATERIALIZED_VIEW",
     "want_sql": "CREATE MATERIALIZED VIEW phys.\"db1.mv\" TO phys.\"db1.o\" AS SELECT * FROM phys.\"db1.p\" \"db1.p\"",
-    "want_table_rewrites": {"db1.mv": "phys.db1.mv", "db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "mv", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}]
+    "want_table_rewrites": {"db1.mv": "phys.db1.mv", "db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "mv", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   }
 ]

@@ -68,9 +68,7 @@ published corpus.
   `storage_integrity.reserved_databases` string array is sent as
   `StorageIntegrityArgs.reserved_databases` (read by the engines under V2
   only).
-- Every case whose name starts with `si_tr_` (table-reference hardening) must
-  set a non-empty `dynamic.protected_databases` string array (rule R9), sent
-  as `RewriteTableDynamicArgs.protected_databases`.
+- Every case whose name starts with `si_tr_` (table-reference hardening) must set a non-empty `dynamic.protected_databases` string array (rule R9), sent as `RewriteTableDynamicArgs.protected_databases`.
 
 Regenerate SQL pins only with both engines available. `UPDATE_GOLDEN` is
 enabled only by the exact value `1`, and the scoped command must provide the
