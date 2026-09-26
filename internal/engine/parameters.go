@@ -74,6 +74,11 @@ func TablePositionParameter(e Engine, ast AST, sql string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if text, ok, ierr := OpaqueInsertQueryText(ast); ierr != nil {
+		return false, ierr
+	} else if ok {
+		texts = append(texts, text)
+	}
 	for _, text := range texts {
 		if IdentifierParameterInText(e, text) {
 			return true, nil

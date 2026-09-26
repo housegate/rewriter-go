@@ -234,7 +234,7 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 		checkSettings = false
 	}
 	if checkSettings {
-		if rejected, err := rejectSQLBearingSettings(e, ast, resp); err != nil || rejected {
+		if rejected, err := rejectSQLBearingSettings(e, ast, sql, resp); err != nil || rejected {
 			return rejected, err
 		}
 	}
@@ -255,6 +255,12 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
 			return true, nil
 		}
+	}
+	if text, ok, ierr := engine.OpaqueInsertQueryText(ast); ierr != nil {
+		return false, ierr
+	} else if ok && engine.OpaqueInsertQueryIsUngoverned(e, text) {
+		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+		return true, nil
 	}
 	return false, nil
 }
@@ -318,7 +324,15 @@ func rejectDisallowedCarriers(e engine.Engine, ast engine.AST, resp *pb.RewriteS
 // numeric literal, a string literal or a bare identifier / keyword with
 // "statement is not supported". A session SET statement is checked by the
 // SET carve-out instead (CheckSessionSet).
-func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLResponse) (bool, error) {
+func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, sql string, resp *pb.RewriteSQLResponse) (bool, error) {
+	// Token backstop: a denylisted setting name anywhere after a SETTINGS
+	// keyword is refused whatever AST shape carries it.
+	if sql != "" {
+		if name, hit := engine.SettingsBackstop(e, sql); hit {
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(name)
+			return true, nil
+		}
+	}
 	assignments, err := engine.QuerySettings(ast)
 	if err != nil {
 		return false, err
@@ -340,6 +354,11 @@ func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, resp *pb.RewriteS
 			return false, oerr
 		}
 		texts = append(texts, opaque...)
+		if text, ok, ierr := engine.OpaqueInsertQueryText(ast); ierr != nil {
+			return false, ierr
+		} else if ok {
+			texts = append(texts, text)
+		}
 	}
 	for _, text := range texts {
 		raw, ok := engine.RawSettingsClauses(e, text)

@@ -84,7 +84,7 @@ func parseSettingAssignments(toks []rawToken, i int) ([]SettingAssignment, int, 
 			case "R_PAREN", "R_BRACKET", "R_BRACE":
 				depth--
 			}
-			if depth == 0 && (toks[j].TokenType == "COMMA" || toks[j].TokenType == "SEMICOLON") {
+			if depth == 0 && (toks[j].TokenType == "COMMA" || toks[j].TokenType == "SEMICOLON" || settingsListEnd(toks[j])) {
 				break
 			}
 			j++
@@ -94,6 +94,9 @@ func parseSettingAssignments(toks []rawToken, i int) ([]SettingAssignment, int, 
 			return out, j, false
 		}
 		out = append(out, SettingAssignment{Name: name, PlainValue: plainSettingValueTokens(value)})
+		if j < len(toks) && settingsListEnd(toks[j]) {
+			return out, j, true // an INSERT's query follows its SETTINGS list
+		}
 		if j >= len(toks) || toks[j].TokenType == "SEMICOLON" {
 			if j < len(toks) {
 				j++
@@ -102,6 +105,52 @@ func parseSettingAssignments(toks []rawToken, i int) ([]SettingAssignment, int, 
 		}
 		i = j + 1 // past the comma
 	}
+}
+
+// settingsListEnd reports a keyword that ends a SETTINGS assignment list: the
+// query or data clause of an INSERT (`INSERT INTO t (a) SETTINGS x = 1 SELECT
+// …`), which follows the list without a separator.
+func settingsListEnd(tok rawToken) bool {
+	if !opaqueKeyword(tok) || tok.TokenType == "VAR" {
+		return false
+	}
+	switch strings.ToUpper(tok.Text) {
+	case "SELECT", "WITH", "VALUES", "FORMAT":
+		return true
+	}
+	return false
+}
+
+// SettingsBackstop is a token-level backstop for R5 (spec 2026-09-26): it
+// reports the first SQL-bearing or dialect setting name (quoted or not, any
+// case) that appears anywhere after a SETTINGS keyword in sql, so no AST shape
+// can hide one from the structured check. A tokenizer failure reports
+// hit=false: the structured checks and the fail-closed tokenizer paths
+// elsewhere still apply.
+func SettingsBackstop(e Engine, sql string) (name string, hit bool) {
+	// A SETTINGS keyword is plain ASCII in the source text; skip the tokenizer
+	// when it cannot be there.
+	if !strings.Contains(strings.ToUpper(sql), "SETTINGS") {
+		return "", false
+	}
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return "", false
+	}
+	seen := false
+	for _, tok := range toks {
+		if !seen {
+			seen = opaqueKeyword(tok) && strings.EqualFold(tok.Text, "SETTINGS")
+			continue
+		}
+		if tok.TokenType == "STRING" {
+			continue
+		}
+		if SQLBearingSetting(tok.Text) {
+			return tok.Text, true
+		}
+	}
+	return "", false
 }
 
 func settingNameToken(tok rawToken) bool {

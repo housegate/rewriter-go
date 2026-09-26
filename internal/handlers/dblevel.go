@@ -323,12 +323,7 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 			return resp, true, nil
 		}
 		if engine.ShowBodyIsUngoverned(e, info, sql) {
-			// Spec 2026-09-26 R7: the WHERE / LIKE body is forwarded as
-			// written, so SQL that could read a table there is refused.
-			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
-			resp.SqlAfterRewrite = sql
-			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
-			return resp, true, nil
+			return rejectShowBody(sql, resp)
 		}
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
@@ -350,8 +345,14 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		}
 		return passthroughDB(e, ast, sql, resp)
 	case showTargetLess:
+		if engine.ShowBodyIsUngoverned(e, info, sql) {
+			return rejectShowBody(sql, resp)
+		}
 		return passthroughDB(e, ast, sql, resp)
 	case showUnknown:
+		if !nameresolve.StorageIntegritySurfaceActive(dyn) && engine.ShowBodyIsUngoverned(e, info, sql) {
+			return rejectShowBody(sql, resp)
+		}
 		if nameresolve.StorageIntegritySurfaceActive(dyn) {
 			// Fall through unhandled: native.go's pass-through tail is the Spec I
 			// D1 catch-all and answers with the generic unmodelled-statement
@@ -584,5 +585,15 @@ func dispatchShowUnqualifiedTable(e engine.Engine, sql string, info engine.DBLev
 		return nil, false, err
 	}
 	resp.SqlAfterRewrite = out
+	return resp, true, nil
+}
+
+// rejectShowBody refuses a verbatim-forwarded SHOW statement whose trailing
+// clauses carry SQL that could read a table (spec 2026-09-26 R7): the
+// statement is forwarded as written, so nothing there would be rewritten.
+func rejectShowBody(sql string, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
 	return resp, true, nil
 }

@@ -46,6 +46,13 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		TableRewrites: map[string]string{},
 	}
 	sel := nameresolve.FindActive(opts)
+	// selectSQL is the statement's source text when the caller has it (a
+	// top-level SELECT); an embedded body passes none, and its enclosing
+	// write statement's text was already checked by the write preflight.
+	selectSQL := ""
+	if len(sourceSQL) > 0 {
+		selectSQL = sourceSQL[0]
+	}
 
 	// CTE injection (CommonTableExprRewrite): parse bodies, then inject ONLY the
 	// aliases actually referenced by the query (referenced-only, non-transitive).
@@ -138,7 +145,7 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			} else if rejected {
 				return ast, resp, nil
 			}
-			if rejected, rerr := rejectUngovernedReads(e, ast, "", sel, resp); rerr != nil {
+			if rejected, rerr := rejectUngovernedReads(e, ast, selectSQL, sel, resp); rerr != nil {
 				return nil, nil, rerr
 			} else if rejected {
 				return ast, resp, nil

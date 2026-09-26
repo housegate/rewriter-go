@@ -117,6 +117,11 @@ func addOpaqueAlterDatabases(e Engine, ast AST, add func(string)) error {
 	if err != nil {
 		return err
 	}
+	if text, ok, ierr := OpaqueInsertQueryText(ast); ierr != nil {
+		return ierr
+	} else if ok {
+		texts = append(texts, text) // an INSERT query polyglot left as text
+	}
 	for _, text := range texts {
 		dbs, ok := OpaqueTextDatabases(e, text)
 		if !ok {

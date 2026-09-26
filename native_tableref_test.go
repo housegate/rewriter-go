@@ -1509,3 +1509,106 @@ func TestTableRef_ResidualMinors(t *testing.T) {
 		wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_Residual2ShowBodies pins residual round 2, open 1: every SHOW
+// family forwarded verbatim has its trailing clauses (WHERE / LIKE / ILIKE /
+// LIMIT / …) scanned, so a subquery or call there refuses the statement.
+func TestTableRef_Residual2ShowBodies(t *testing.T) {
+	const unsupported = "statement is not supported"
+	const siDB1 = "storage-integrity logical database db1 is not directly addressable"
+	sub := "(SELECT count() FROM `db2.x`)"
+	var cases []tablerefCase
+	for _, c := range []struct {
+		sql     string
+		siDBOne bool // with the SI surface active, db1 (an SI owner) is refused first
+	}{
+		{"SHOW COLUMNS FROM o LIMIT " + sub, true},
+		{"SHOW FIELDS FROM o LIMIT " + sub, true},
+		{"SHOW EXTENDED FULL COLUMNS IN o LIMIT " + sub, true},
+		{"SHOW COLUMNS FROM o LIMIT 1 + " + sub, true},
+		{"SHOW COLUMNS FROM o FROM db1 LIMIT " + sub, true},
+		{"SHOW COLUMNS FROM db3.o LIMIT " + sub, false},
+		{"SHOW COLUMNS FROM o LIMIT throwIf(1)", true},
+		{"SHOW DICTIONARIES WHERE " + sub + " = 2", true},
+		{"SHOW DICTIONARIES FROM default WHERE " + sub + " = 2", false},
+		{"SHOW DICTIONARIES LIMIT " + sub, true},
+		{"SHOW FULL DICTIONARIES LIMIT " + sub, true},
+		{"SHOW CLUSTERS LIMIT " + sub, false},
+		{"SHOW CLUSTERS LIKE 'x' LIMIT " + sub, false},
+		{"SHOW MERGES LIMIT " + sub, false},
+		{"SHOW MERGES LIKE 'x' LIMIT " + sub, false},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: c.sql})
+		msg := unsupported
+		if c.siDBOne {
+			msg = siDB1
+		}
+		cases = append(cases, tablerefCase{name: "si/" + c.sql, sql: c.sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+	}
+	cases = append(cases,
+		tablerefCase{name: "columns_limit_5", sql: "SHOW COLUMNS FROM o LIMIT 5", wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` LIMIT 5"},
+		tablerefCase{name: "dictionaries_like", sql: "SHOW DICTIONARIES LIKE 'a%'", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "clusters_like_limit", sql: "SHOW CLUSTERS LIKE 'x' LIMIT 3", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "si/clusters_like_limit", sql: "SHOW CLUSTERS LIKE 'x' LIMIT 3", si: true, wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "keyword_if_call_allowed", sql: "SHOW COLUMNS FROM o WHERE if(1, 1, 0) = 1", wantCode: pb.RewriteCode_Success},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual2InsertHeaderSettings pins residual round 2, open 2:
+// the SETTINGS list polyglot leaves as opaque query text after an INSERT
+// column list is examined like any other, a token backstop refuses a
+// denylisted setting name after any SETTINGS keyword, and a read in that
+// opaque query text is refused.
+func TestTableRef_Residual2InsertHeaderSettings(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"INSERT INTO db1.o (a) SETTINGS additional_table_filters = {'system.one': '(SELECT throwIf(count() = 2) FROM `db2.x`) = 0'} SELECT dummy FROM system.one", "table setting additional_table_filters is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS additional_result_filter = 'a > 1' SELECT 1", "table setting additional_result_filter is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS additional_result_filter = 'a > 1' VALUES (1)", "table setting additional_result_filter is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS dialect = 'prql' SELECT 1", "table setting dialect is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS polyglot_dialect = 'sqlite' SELECT 1", "table setting polyglot_dialect is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS `POLYGLOT_DIALECT` = 'sqlite' SELECT 1", "table setting POLYGLOT_DIALECT is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT a FROM `db2.x`", "statement is not supported"},
+			{"INSERT INTO db1.o (a) SETTINGS max_threads = (SELECT 1) SELECT 1", "statement is not supported"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+		}
+		cases = append(cases,
+			tablerefCase{name: "protected_in_opaque_query", sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT a FROM phys.x", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "plain_select", sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1", si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 SELECT 1`},
+			tablerefCase{name: "plain_values", sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1)", si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 VALUES (1)`},
+		)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual2RefreshPositions pins residual round 2, open 3:
+// REFRESH in a CREATE VIEW header is allowed only as the view's own name or
+// the TO target's name; anywhere else the statement is refused.
+func TestTableRef_Residual2RefreshPositions(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH TO db1.t2 AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH AFTER 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW db1.`refresh` REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"CREATE MATERIALIZED VIEW db1.refresh TO db1.t2 AS SELECT * FROM db1.o", `CREATE MATERIALIZED VIEW phys."db1.refresh" TO phys."db1.t2" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			{"CREATE MATERIALIZED VIEW db1.mv TO db1.refresh AS SELECT * FROM db1.o", `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.refresh" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			{"CREATE VIEW db1.refresh AS SELECT 1", `CREATE VIEW phys."db1.refresh" AS SELECT 1`},
+			{"CREATE VIEW db1.v AS SELECT refresh FROM db1.o", `CREATE VIEW phys."db1.v" AS SELECT refresh FROM phys."db1.o" "db1.o"`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}

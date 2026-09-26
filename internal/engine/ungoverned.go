@@ -371,21 +371,78 @@ func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 	return selects > 1
 }
 
-// CreateViewHasRefresh reports a CREATE [MATERIALIZED] VIEW whose header (the
-// depth-0 tokens before its body's first SELECT / WITH) carries a REFRESH
-// EVERY | AFTER clause. The
-// pinned polyglot drops a refreshable view's REFRESH … [APPEND] TO clause when
-// it regenerates the statement, so dynamic mode refuses it rather than
-// forwarding a different statement (spec 2026-09-26 R12). A tokenizer failure
-// reports true (fail closed).
+// CreateViewHasRefresh reports a CREATE [OR REPLACE] [MATERIALIZED] VIEW
+// whose header (the depth-0 tokens before its body's first SELECT / WITH)
+// carries a REFRESH token anywhere other than the view's own name or the TO
+// target's name. The pinned polyglot drops a refreshable view's REFRESH …
+// [APPEND] TO clause (and a bare REFRESH TO silently loses its TO target)
+// when it regenerates the statement, so dynamic mode refuses it rather than
+// forwarding a different statement (spec 2026-09-26 R12). A tokenizer
+// failure reports true (fail closed).
 func CreateViewHasRefresh(e Engine, sql string) bool {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
 		return true
 	}
-	// REFRESH is the clause keyword only when EVERY or AFTER follows it; a
-	// view or target named `refresh` is an ordinary name.
-	return headerHasWords(toks, "REFRESH", "EVERY") || headerHasWords(toks, "REFRESH", "AFTER")
+	word := func(i int, w string) bool {
+		return i < len(toks) && opaqueKeyword(toks[i]) && strings.EqualFold(toks[i].Text, w)
+	}
+	names := map[int]bool{}
+	// A name token may lex as a keyword (`refresh` itself does).
+	nameTok := func(tok rawToken) bool { return isNameTok(tok.TokenType) || mutationProbeKeywordToken(tok) }
+	nameRun := func(i int) int {
+		if i < len(toks) && nameTok(toks[i]) {
+			names[i] = true
+			if i+2 < len(toks) && toks[i+1].TokenType == "DOT" && nameTok(toks[i+2]) {
+				names[i+2] = true
+				return i + 3
+			}
+			return i + 1
+		}
+		return i
+	}
+	i := 0
+	if word(i, "CREATE") {
+		i++
+	}
+	if word(i, "OR") && word(i+1, "REPLACE") {
+		i += 2
+	}
+	if word(i, "MATERIALIZED") {
+		i++
+	}
+	if word(i, "VIEW") {
+		i++
+	}
+	if word(i, "IF") && word(i+1, "NOT") && word(i+2, "EXISTS") {
+		i += 3
+	}
+	i = nameRun(i)
+	depth := 0
+	for ; i < len(toks); i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			depth++
+			continue
+		case "R_PAREN":
+			depth--
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		if word(i, "SELECT") || word(i, "WITH") {
+			return false
+		}
+		if word(i, "TO") {
+			i = nameRun(i+1) - 1
+			continue
+		}
+		if !names[i] && word(i, "REFRESH") {
+			return true
+		}
+	}
+	return false
 }
 
 // InsertFromInfile reports an INSERT … FROM INFILE statement: the pinned
@@ -428,4 +485,59 @@ func headerHasWords(toks []rawToken, words ...string) bool {
 		}
 	}
 	return false
+}
+
+// OpaqueInsertQueryText returns the text of an INSERT whose query polyglot
+// could not structure — measured: an INSERT with a column list followed by a
+// SETTINGS clause (`INSERT INTO t (a) SETTINGS … SELECT …`) or FORMAT becomes
+// {"query":{"command":{"this":"SETTINGS … SELECT …"}}}, so the SELECT is
+// never rewritten. ok=false for every other statement.
+func OpaqueInsertQueryText(ast AST) (string, bool, error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil || kind != NodeInsert || body == nil {
+		return "", false, err
+	}
+	query, _ := body["query"].(map[string]any)
+	command, _ := query["command"].(map[string]any)
+	text, ok := command["this"].(string)
+	return text, ok, nil
+}
+
+// OpaqueInsertQueryIsUngoverned reports whether an opaque INSERT query text
+// (OpaqueInsertQueryText) can read a table the rewriter does not see (spec
+// 2026-09-26 R5 / R2): a FROM / JOIN / WITH keyword, more than one SELECT (a
+// subquery), a table-operand IN or callable IN, a lookup-family call, or an
+// Identifier parameter. `SETTINGS … SELECT 1`, `SETTINGS … VALUES (…)` and
+// `FORMAT …` pass. A tokenizer failure is ungoverned.
+func OpaqueInsertQueryIsUngoverned(e Engine, text string) bool {
+	toks, err := tokenizeRaw(e, text)
+	if err != nil {
+		return true
+	}
+	if tokensHoldIdentifierParameter(toks) {
+		return true
+	}
+	selects := 0
+	for i, tok := range toks {
+		if opaqueCallableInHasTable(toks, i) {
+			return true
+		}
+		if tok.TokenType != "STRING" && IsStringLookup(tok.Text) && i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
+			return true
+		}
+		if !opaqueKeyword(tok) {
+			continue
+		}
+		switch strings.ToUpper(tok.Text) {
+		case "FROM", "JOIN", "WITH":
+			return true
+		case "SELECT":
+			selects++
+		case "IN":
+			if opaqueInOperandIsTable(toks, i+1) {
+				return true
+			}
+		}
+	}
+	return selects > 1
 }

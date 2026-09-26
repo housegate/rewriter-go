@@ -278,27 +278,29 @@ func SpliceShowTable(e Engine, sql, replacement string) (string, error) {
 	return "", fmt.Errorf("engine: SHOW statement has no table clause")
 }
 
-// showColumnsFamily reports the SHOW kinds whose statement names a table and
-// may carry a WHERE / LIKE body ClickHouse evaluates as SQL.
-func showColumnsFamily(kind string) bool {
-	switch kind {
-	case "COLUMNS", "FIELDS", "INDEX", "INDEXES", "INDICES", "KEYS":
-		return true
+// showForwardedVerbatim reports the SHOW kinds the dispatcher forwards as
+// written (every kind except TABLES and DATABASES, which are rewritten into a
+// synthetic SELECT, and CREATE, which has its own handler): the COLUMNS /
+// INDEX family, DICTIONARIES, CLUSTERS, MERGES, SETTINGS, PROCESSLIST, … and
+// any kind the dispatcher does not recognise.
+func showForwardedVerbatim(info DBLevelInfo) bool {
+	if info.Kind != DBShow {
+		return false
 	}
-	return false
+	switch info.ShowWhat {
+	case "TABLES", "DATABASES", "CREATE":
+		return false
+	}
+	return true
 }
 
-// showBodyTokens returns the tokens of a SHOW COLUMNS / INDEX family
-// statement's filter body: everything after its first top-level WHERE, LIKE
-// or ILIKE keyword. ok=false when the text does not tokenize.
-func showBodyTokens(e Engine, sql string) (body []rawToken, ok bool) {
-	toks, err := tokenizeRaw(e, sql)
-	if err != nil {
-		return nil, false
-	}
+// showBodyStart returns the index of a verbatim-forwarded SHOW statement's
+// first top-level trailing clause keyword (WHERE, LIKE, ILIKE, LIMIT, OFFSET,
+// SETTINGS, FORMAT, INTO) after the SHOW kind, or len(toks) when it has none.
+func showBodyStart(toks []rawToken) int {
 	depth := 0
-	for i, tok := range toks {
-		switch tok.TokenType {
+	for i := 2; i < len(toks); i++ {
+		switch toks[i].TokenType {
 		case "L_PAREN":
 			depth++
 			continue
@@ -306,62 +308,70 @@ func showBodyTokens(e Engine, sql string) (body []rawToken, ok bool) {
 			depth--
 			continue
 		}
-		if depth == 0 && opaqueKeyword(tok) &&
-			(strings.EqualFold(tok.Text, "WHERE") || strings.EqualFold(tok.Text, "LIKE") || strings.EqualFold(tok.Text, "ILIKE")) {
-			return toks[i+1:], true
+		if depth != 0 || !opaqueKeyword(toks[i]) {
+			continue
+		}
+		switch strings.ToUpper(toks[i].Text) {
+		case "WHERE", "LIKE", "ILIKE", "LIMIT", "OFFSET", "SETTINGS", "FORMAT", "INTO":
+			return i
 		}
 	}
-	return nil, true
+	return len(toks)
 }
 
-// ShowBodyIsUngoverned reports whether a SHOW COLUMNS / INDEX(ES) / KEYS
-// statement's WHERE / LIKE / ILIKE body carries SQL the rewriter does not
-// rewrite (spec 2026-09-26 R7): a SELECT or WITH keyword, any name followed by
-// "(" (a function call — table functions and lookups included), an IN table
-// operand, or a quoted dotted name. A body of literals, plain column
-// identifiers and operators passes. A tokenizer failure is ungoverned.
+// ShowBodyIsUngoverned reports whether a verbatim-forwarded SHOW statement
+// carries SQL the rewriter does not rewrite (spec 2026-09-26 R7): in its
+// trailing clauses after the SHOW target (WHERE / LIKE / ILIKE / LIMIT / …),
+// a SELECT or WITH keyword, a name followed by "(" (a function call — table
+// functions and lookups included; a keyword-tokenized call such as IF( is not
+// a name), an IN table operand, an Identifier parameter or a quoted dotted
+// name. The target itself (a database may be named `select`) is not scanned. Literals, plain identifiers and operators pass (`LIMIT 5`). A
+// tokenizer failure is ungoverned.
 func ShowBodyIsUngoverned(e Engine, info DBLevelInfo, sql string) bool {
-	if info.Kind != DBShow || !showColumnsFamily(info.ShowWhat) {
+	if !showForwardedVerbatim(info) {
 		return false
 	}
-	body, ok := showBodyTokens(e, sql)
-	if !ok {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
 		return true
 	}
-	for i, tok := range body {
+	for i := showBodyStart(toks); i < len(toks); i++ {
+		tok := toks[i]
+		if isNameTok(tok.TokenType) && i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
+			return true
+		}
+		if opaqueKeyword(tok) && (strings.EqualFold(tok.Text, "SELECT") || strings.EqualFold(tok.Text, "WITH")) {
+			return true
+		}
 		if tok.TokenType == "QUOTED_IDENTIFIER" && strings.Contains(tok.Text, ".") {
 			return true
 		}
-		if isNameTok(tok.TokenType) && i+1 < len(body) && body[i+1].TokenType == "L_PAREN" {
+		if tok.TokenType == "L_BRACE" {
 			return true
 		}
-		if !opaqueKeyword(tok) {
-			continue
-		}
-		switch strings.ToUpper(tok.Text) {
-		case "SELECT", "WITH":
+		if opaqueKeyword(tok) && strings.EqualFold(tok.Text, "IN") && opaqueInOperandIsTable(toks, i+1) {
 			return true
-		case "IN":
-			if opaqueInOperandIsTable(body, i+1) {
-				return true
-			}
 		}
 	}
 	return false
 }
 
-// ShowBodyDatabases returns the qualifier of every `name.name` run in a SHOW
-// COLUMNS / INDEX family statement's filter body, for the T3 protected check.
+// ShowBodyDatabases returns the qualifier of every `name.name` run in a
+// verbatim-forwarded SHOW statement's trailing clauses, for the T3 protected
+// check (the target itself is collected from ParseDBLevel).
 func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
-	if info.Kind != DBShow || !showColumnsFamily(info.ShowWhat) {
+	if !showForwardedVerbatim(info) {
 		return nil
 	}
-	body, _ := showBodyTokens(e, sql)
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil
+	}
 	var dbs []string
-	for i := 0; i+2 < len(body); i++ {
-		if isNameTok(body[i].TokenType) && body[i+1].TokenType == "DOT" && isNameTok(body[i+2].TokenType) &&
-			(i == 0 || body[i-1].TokenType != "DOT") {
-			dbs = append(dbs, body[i].Text)
+	for i := showBodyStart(toks); i+2 < len(toks); i++ {
+		if isNameTok(toks[i].TokenType) && toks[i+1].TokenType == "DOT" && isNameTok(toks[i+2].TokenType) &&
+			toks[i-1].TokenType != "DOT" {
+			dbs = append(dbs, toks[i].Text)
 		}
 	}
 	return dbs
