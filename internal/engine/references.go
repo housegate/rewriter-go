@@ -77,13 +77,6 @@ func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) 
 	// family) — those are ordinary scalar function calls, not source-role table
 	// functions, so the shared read-source visitor above never emits them.
 	collectStringLookupDatabases(root, add)
-	// A parenthesized single-element IN list `x IN (db.table)` is not
-	// is_field-tagged (that flag distinguishes only the syntactic bare-vs-
-	// parenthesized IN operand), so the shared namespace/inTable visitor above
-	// — which requires is_field precisely so an ordinary multi-element value
-	// list is never mistaken for a table reference — does not see it. A
-	// single qualified column is the only shape this adds.
-	collectParenthesizedInDatabases(root, add)
 	return out, nil
 }
 
@@ -200,25 +193,19 @@ func stringLookupArgDatabase(name string, args []any) (string, bool) {
 	return "", false
 }
 
-// collectParenthesizedInDatabases recognizes the parenthesized single-element
-// IN-list form `x IN (db.table)` (spec 2026-09-26 T3/T4): polyglot's is_field
-// flag distinguishes only the syntactic bare-vs-parenthesized IN operand, not
-// ClickHouse's own catalog-dependent table-vs-column dichotomy for a
-// parenthesized single identifier, so the shared namespace/inTable visitor
-// (deliberately is_field-gated so an ordinary multi-element value list is
-// never mistaken for a table reference) does not see this shape.
+// collectParenthesizedInDatabases reports the database of every
+// parenthesized single-operand IN (`x IN (db.table)`, at any paren depth),
+// decoded by the shared IN-operand decoder. The storage-integrity handlers
+// classify only the bare, is_field-tagged operand, so this parenthesized form
+// is "SI-handler-blind": PreflightTableReferences must refuse a protected hit
+// here even while the storage-integrity surface is active.
 func collectParenthesizedInDatabases(node any, add func(string)) {
 	switch n := node.(type) {
 	case map[string]any:
 		if in, ok := n["in"].(map[string]any); ok {
-			// is_field is the bare (non-parenthesized) form the shared
-			// namespace/inTable visitor already classifies and defers to the
-			// SI handlers for; only its ABSENCE marks the genuinely-ambiguous
-			// parenthesized form this function exists for.
-			isField, _ := in["is_field"].(bool)
-			if exprs, ok := in["expressions"].([]any); !isField && ok && len(exprs) == 1 {
-				if target, _, ok := qualifiedColumnArgTarget(exprs[0]); ok {
-					add(target.DB)
+			if isField, _ := in["is_field"].(bool); !isField {
+				if kind, detail := decodeInNodeOperand(in); kind == inOperandTable {
+					add(detail.ref.Target.DB)
 				}
 			}
 		}

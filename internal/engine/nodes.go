@@ -610,59 +610,136 @@ func canonicalCallableInName(name string) (string, bool) {
 	}
 }
 
+var callableInDisplayNames = map[string]string{
+	"in": "IN", "notin": "NOT IN", "nullin": "NULL IN", "notnullin": "NOT NULL IN",
+	"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN", "globalnullin": "GLOBAL NULL IN", "globalnotnullin": "GLOBAL NOT NULL IN",
+}
+
 func decodeCallableInNamespaceRefDetail(name string, args []any) (namespaceRefDetail, bool) {
-	if len(args) != 2 || !isNamespaceIdentifierArg(args[1]) {
+	if len(args) != 2 {
 		return namespaceRefDetail{}, false
 	}
-	display := map[string]string{
-		"in": "IN", "notin": "NOT IN", "nullin": "NULL IN", "notnullin": "NOT NULL IN",
-		"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN", "globalnullin": "GLOBAL NULL IN", "globalnotnullin": "GLOBAL NOT NULL IN",
-	}[name]
-	detail := decodeNamespaceSingleDetail(NamespaceRefInTable, display, args[1])
+	kind, detail := decodeInOperand(args[1], false)
+	if kind != inOperandTable {
+		return namespaceRefDetail{}, false
+	}
+	detail.ref.Name = callableInDisplayNames[name]
+	return detail, true
+}
+
+// inOperandKind is decodeInOperand's classification of one IN operand.
+type inOperandKind uint8
+
+const (
+	// inOperandValue: not a table position (a literal value list, a
+	// subquery, an arbitrary expression); the caller walks it as an
+	// ordinary expression.
+	inOperandValue inOperandKind = iota
+	// inOperandTable: a table reference; the detail names it.
+	inOperandTable
+	// inOperandParameter: an Identifier query parameter in the table or
+	// database part (spec 2026-09-26 T2).
+	inOperandParameter
+)
+
+// decodeInOperand is the one decoder every consumer uses to decide whether a
+// single IN operand (`x IN <op>`, `x IN (<op>)`, `in(x, <op>)` and the rest of
+// the callable IN family) is a table reference (spec 2026-09-26 T2-T4):
+//
+//   - `paren` wrappers are unwrapped to any depth, so `x IN ((db.t))` is the
+//     same operand as `x IN db.t`;
+//   - a parameter node, or an identifier whose table or database part is an
+//     Identifier parameter, is a T2 hit;
+//   - an identifier operand is decoded structurally from the node's own
+//     fields: `db.t` is qualified, and a bare quoted name such as
+//     `db2.x` is an unqualified table named "db2.x" in the session's logical
+//     database, exactly like FROM, never split on its dot;
+//   - a literal is a value, except that literalIsTable (only the bare,
+//     is_field-tagged infix form) keeps treating a lone literal as a
+//     namespace question for the storage-integrity policy, as before.
+func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespaceRefDetail) {
+	node, _ := operand.(map[string]any)
+	for node != nil {
+		paren, ok := node["paren"].(map[string]any)
+		if !ok {
+			break
+		}
+		node, _ = paren["this"].(map[string]any)
+	}
+	if node == nil {
+		return inOperandValue, namespaceRefDetail{}
+	}
+	if _, ok := node["parameter"]; ok {
+		return inOperandParameter, namespaceRefDetail{}
+	}
+	if col, ok := node["column"].(map[string]any); ok {
+		if unresolvedIdentifierNode(col["name"]) || unresolvedIdentifierNode(col["table"]) {
+			return inOperandParameter, namespaceRefDetail{}
+		}
+		name := identName(col["name"])
+		if name == "" {
+			return inOperandValue, namespaceRefDetail{}
+		}
+		detail := namespaceRefDetail{
+			ref:         NamespaceRef{Source: NamespaceRefInTable, Target: TableTarget{Table: name}},
+			tableOrigin: namespaceValueIdentifier,
+		}
+		if table := identName(col["table"]); table != "" {
+			detail.ref.Target.DB = table
+			detail.ref.Resolved = true
+			detail.databaseOrigin = namespaceValueIdentifier
+		} else {
+			detail.ref.UsesCurrentDatabase = true
+		}
+		return inOperandTable, detail
+	}
+	if _, ok := node["dot"]; ok {
+		if inOperandHoldsParameter(node) {
+			return inOperandParameter, namespaceRefDetail{}
+		}
+		return inOperandFromSingleDetail(decodeNamespaceSingleDetail(NamespaceRefInTable, "", node))
+	}
+	if _, ok := node["literal"]; ok {
+		if !literalIsTable {
+			return inOperandValue, namespaceRefDetail{}
+		}
+		return inOperandFromSingleDetail(decodeNamespaceSingleDetail(NamespaceRefInTable, "", node))
+	}
+	if unresolvedIdentifierNode(node) {
+		return inOperandParameter, namespaceRefDetail{}
+	}
+	return inOperandValue, namespaceRefDetail{}
+}
+
+func inOperandFromSingleDetail(detail namespaceRefDetail) (inOperandKind, namespaceRefDetail) {
 	if detail.ref.Target.Table == "" && !detail.ref.Resolved {
+		return inOperandValue, namespaceRefDetail{}
+	}
+	return inOperandTable, detail
+}
+
+// decodeInNamespaceRefDetail decodes an infix `in` node's single operand
+// through decodeInOperand. A multi-element list is a value list.
+func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
+	kind, detail := decodeInNodeOperand(in)
+	if kind != inOperandTable {
 		return namespaceRefDetail{}, false
 	}
 	return detail, true
 }
 
-func isNamespaceIdentifierArg(arg any) bool {
-	m, ok := arg.(map[string]any)
-	if !ok {
-		return false
-	}
-	_, column := m["column"]
-	_, dot := m["dot"]
-	return column || dot
-}
-
-func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
-	detail, ok := decodeInNamespaceRefDetail(in)
-	return detail.refWithOrigins(), ok
-}
-
-func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
-	// is_field distinguishes only the syntactic bare-vs-parenthesized IN
-	// operand (`a IN db.t` sets it, `a IN (db.t)` does not); ClickHouse reads
-	// a single parenthesized identifier as a table just like the bare form, so
-	// a lone column/dot operand decodes the same whether or not is_field is
-	// set (spec 2026-09-26 T4, controller ruling 1). But is_field must stay
-	// the gate for anything else: a single-element *value* list — most
-	// notably a single string literal, e.g. `a IN ('hg_safe.db1__t')` or
-	// `a IN ('phys.x')` — is never is_field-tagged either, and unlike a
-	// column/dot node it isn't structurally provable as a table reference at
-	// this AST shape; decodeNamespaceSingleDetail's literal-decoding path can
-	// still turn such a string into a would-be Target if it happens to
-	// contain a dot, which would otherwise wrongly feed this single VALUE
-	// into rewrite/SI policy as if it were a real table operand (controller
-	// review round 1, finding 2). A genuine multi-element value list
-	// (`a IN (1, 2, 3)`) is excluded by the len(exprs)==1 check regardless.
+// decodeInNodeOperand classifies an infix `in` node's operand. is_field marks
+// only the syntactic bare (unparenthesized) form; it matters solely for the
+// lone-literal case decodeInOperand documents.
+func decodeInNodeOperand(in map[string]any) (inOperandKind, namespaceRefDetail) {
 	exprs, _ := in["expressions"].([]any)
 	if len(exprs) != 1 {
-		return namespaceRefDetail{}, false
+		return inOperandValue, namespaceRefDetail{}
 	}
 	isField, _ := in["is_field"].(bool)
-	if !isField && !isNamespaceIdentifierArg(exprs[0]) {
-		return namespaceRefDetail{}, false
+	kind, detail := decodeInOperand(exprs[0], isField)
+	if kind != inOperandTable {
+		return kind, detail
 	}
 	name := "IN"
 	if not, _ := in["not"].(bool); not {
@@ -671,11 +748,8 @@ func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
 	if global, _ := in["global"].(bool); global {
 		name = "GLOBAL " + name
 	}
-	detail := decodeNamespaceSingleDetail(NamespaceRefInTable, name, exprs[0])
-	if detail.ref.Target.Table == "" && !detail.ref.Resolved {
-		return namespaceRefDetail{}, false
-	}
-	return detail, true
+	detail.ref.Name = name
+	return kind, detail
 }
 
 func decodeTableEngineNamespaceRef(property map[string]any) (NamespaceRef, bool) {
@@ -1867,23 +1941,15 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 	if err := walkExpression(inNode["this"], scope, visitor); err != nil {
 		return err
 	}
-	// An Identifier query parameter as the sole IN operand (bare `{p:Identifier}`,
-	// a qualified `db.{p:Identifier}`, or a column/dot chain naming one) is a
-	// database/table position (spec 2026-09-26 T2) that decodeInNamespaceRefDetail
-	// below cannot see: it bails out to unresolved (Target.Table=="", !Resolved)
-	// for any of these shapes, which reads as "not a namespace ref" rather than
-	// "a namespace ref this policy must reject". Detect it here, ahead of that
-	// decode, so the parameter position is reported instead of silently dropped.
-	if isField, _ := inNode["is_field"].(bool); isField {
-		if exprs, _ := inNode["expressions"].([]any); len(exprs) == 1 {
-			if arg, ok := exprs[0].(map[string]any); ok && inOperandHoldsParameter(arg) {
-				if visitor.parameter != nil {
-					visitor.parameter(arg)
-				}
-			}
+	// decodeInNodeOperand is the shared IN-operand decoder (spec 2026-09-26
+	// T2-T4): a parameter operand is reported to visitor.parameter, a table
+	// operand below, and anything else is walked as an ordinary expression.
+	kind, detail := decodeInNodeOperand(inNode)
+	if kind == inOperandParameter {
+		if visitor.parameter != nil {
+			visitor.parameter(inNode)
 		}
-	}
-	if detail, ok := decodeInNamespaceRefDetail(inNode); ok {
+	} else if kind == inOperandTable {
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
 			// A plain identifier/dot operand is now a real table target handled
 			// by CollectSelectTables/RewriteSelectTables through visitor.inTable
@@ -1939,18 +2005,12 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 
 func walkFunctionExpression(function map[string]any, scope readSourceScope, visitor readSourceVisitor) error {
 	args, _ := function["args"].([]any)
-	// Same reasoning as walkInExpression's parameter check, for the callable
-	// IN family's second (in-table) argument: `in(a, {p:Identifier})` and
-	// `in(a, db.{p:Identifier})` both hold an Identifier parameter that
-	// decodeNamespaceFunctionRefDetail below cannot resolve to a target, so it
-	// would otherwise be silently dropped rather than reported.
-	if canonical, ok := canonicalCallableInName(strings.ToLower(nameOf(function))); ok && len(args) == 2 {
-		if arg, ok := args[1].(map[string]any); ok && inOperandHoldsParameter(arg) {
-			if visitor.parameter != nil {
-				visitor.parameter(arg)
-			}
+	// The callable IN family's second argument goes through the same shared
+	// decoder as the infix form; a parameter operand is a T2 hit.
+	if _, ok := canonicalCallableInName(strings.ToLower(nameOf(function))); ok && len(args) == 2 {
+		if kind, _ := decodeInOperand(args[1], false); kind == inOperandParameter && visitor.parameter != nil {
+			visitor.parameter(function)
 		}
-		_ = canonical
 	}
 	if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 		detail.ref.Source == NamespaceRefInTable {

@@ -886,3 +886,59 @@ func TestTableRef_UnmodelledClassesAreRefusedWithoutSI(t *testing.T) {
 		{name: "set tab-separated setting still passes", sql: "SET\tmax_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET\tmax_threads = 1"},
 	})
 }
+
+// TestTableRef_InOperandsDecodeOnce pins spec 2026-09-26 R1 (final review
+// Critical 1 and 6): every IN consumer decodes its operand through one shared
+// decoder, which unwraps parentheses to any depth, treats a parameter operand
+// as a T2 hit, and decodes an identifier operand structurally, so a bare
+// quoted `db2.x` is an unqualified table named "db2.x" in the session's
+// logical database, exactly like FROM.
+func TestTableRef_InOperandsDecodeOnce(t *testing.T) {
+	const paramMsg = "query parameters are not supported in a database or table position"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, db string }{
+			{"SELECT * FROM db1.o WHERE a IN ((phys.`db2.x`))", "phys"},
+			{"SELECT * FROM db1.o WHERE a IN (((phys.`db2.x`)))", "phys"},
+			{"SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))", "hg_safe"},
+			{"SELECT * FROM db1.o WHERE in(a, ((phys.`db2.x`)))", "phys"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest,
+				wantMsg:  "protected database " + c.db + " is not addressable", wantSQL: c.sql})
+		}
+		for _, sql := range []string{
+			"SELECT * FROM db1.o WHERE a IN ({p:Identifier})",
+			"SELECT * FROM db1.o WHERE a IN (({p:Identifier}))",
+			"SELECT * FROM db1.o WHERE in(a, (({p:Identifier})))",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: paramMsg, wantSQL: sql})
+		}
+		const scan = `SELECT * FROM phys."db1.o" "db1.o" WHERE `
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT * FROM db1.o WHERE a IN `db2.x`", scan + `a IN phys."db1.db2.x"`},
+			{"SELECT * FROM db1.o WHERE a IN (`db2.x`)", scan + `a IN (phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE a IN ((`db2.x`))", scan + `a IN (phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE in(a, `db2.x`)", scan + `in(a, phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE a NOT IN `db2.x`", scan + `a NOT IN phys."db1.db2.x"`},
+			{"SELECT * FROM db1.o WHERE a GLOBAL IN `db2.x`", scan + `a GLOBAL IN phys."db1.db2.x"`},
+			{"SELECT * FROM db1.o WHERE nullIn(a, `db2.x`)", scan + `nullIn(a, phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE nullIn(a, ((`db2.x`)))", scan + `nullIn(a, phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE (a, b) IN `db2.x`", scan + `(a, b) IN phys."db1.db2.x"`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{"db1.o", ".db2.x"}})
+		}
+		// A literal operand stays a value at any paren depth.
+		cases = append(cases, tablerefCase{name: "literal_nested_paren", si: si,
+			sql:      "SELECT * FROM db1.o WHERE a IN ((1))",
+			wantCode: pb.RewriteCode_Success, wantSQL: scan + "a IN ((1))", wantAcc: []string{"db1.o"}})
+	}
+	// Under the SI surface a nested-paren Active table is still the derived read.
+	cases = append(cases, tablerefCase{name: "active_nested_paren", si: true,
+		sql:      "SELECT * FROM db1.o WHERE a IN ((db1.t))",
+		wantCode: pb.RewriteCode_Success,
+		wantSQL:  `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`})
+	runTablerefCases(t, cases)
+}
