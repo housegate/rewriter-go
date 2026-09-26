@@ -447,15 +447,24 @@ func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
 	// is_field distinguishes only the syntactic bare-vs-parenthesized IN
 	// operand (`a IN db.t` sets it, `a IN (db.t)` does not); ClickHouse reads
 	// a single parenthesized identifier as a table just like the bare form, so
-	// it is no longer gated on here (spec 2026-09-26 T4, controller ruling 1).
-	// A genuine multi-element value list (`a IN (1, 2, 3)`) is excluded by the
-	// len(exprs)==1 check below regardless of is_field; decodeNamespaceSingleDetail
-	// itself distinguishes a column/dot identifier operand (namespaceValueIdentifier
-	// origin, a real table reference) from a literal one (namespaceValueLiteral,
-	// a value that merely happens to spell a namespace — still worth a namespace
-	// question, but never rewritable — see walkInExpression/walkFunctionExpression).
+	// a lone column/dot operand decodes the same whether or not is_field is
+	// set (spec 2026-09-26 T4, controller ruling 1). But is_field must stay
+	// the gate for anything else: a single-element *value* list — most
+	// notably a single string literal, e.g. `a IN ('hg_safe.db1__t')` or
+	// `a IN ('phys.x')` — is never is_field-tagged either, and unlike a
+	// column/dot node it isn't structurally provable as a table reference at
+	// this AST shape; decodeNamespaceSingleDetail's literal-decoding path can
+	// still turn such a string into a would-be Target if it happens to
+	// contain a dot, which would otherwise wrongly feed this single VALUE
+	// into rewrite/SI policy as if it were a real table operand (controller
+	// review round 1, finding 2). A genuine multi-element value list
+	// (`a IN (1, 2, 3)`) is excluded by the len(exprs)==1 check regardless.
 	exprs, _ := in["expressions"].([]any)
 	if len(exprs) != 1 {
+		return namespaceRefDetail{}, false
+	}
+	isField, _ := in["is_field"].(bool)
+	if !isField && !isNamespaceIdentifierArg(exprs[0]) {
 		return namespaceRefDetail{}, false
 	}
 	name := "IN"
@@ -1670,8 +1679,16 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 			// letting the ordinary TableDecision (including ActionSubquery for
 			// an Active SI table) apply. A literal or otherwise-unrewritable
 			// operand can't go through that path, so it still reaches
-			// visitor.namespace as a namespace question.
-			if visitor.namespace != nil && detail.tableOrigin != namespaceValueIdentifier {
+			// visitor.namespace as a namespace question — and so does a bare,
+			// unqualified identifier operand (UsesCurrentDatabase): resolving
+			// "current database" against dynamic args is exactly what the SI
+			// namespace policy already does (tableFunctionExecutionDatabase),
+			// and CollectSelectTables/RewriteSelectTables have no access to
+			// those dynamic args to reproduce it, so a qualified operand is the
+			// only shape that gets the new subquery-rewrite treatment; an
+			// unqualified one keeps the old conservative reject-or-pass-through
+			// namespace path (controller review round 1, finding 1).
+			if visitor.namespace != nil && (detail.tableOrigin != namespaceValueIdentifier || detail.ref.UsesCurrentDatabase) {
 				visitor.namespace(inNode, detail)
 			}
 			if visitor.inTable != nil {
@@ -1730,12 +1747,15 @@ func walkFunctionExpression(function map[string]any, scope readSourceScope, visi
 			}
 		}
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
-			// Same reasoning as walkInExpression above: an identifier operand is
-			// now handled as an ordinary table target via visitor.inTable, so the
-			// SI namespace policy only needs to see the (never reachable today,
-			// since decodeCallableInNamespaceRefDetail already requires a
-			// column/dot arg) non-identifier case.
-			if visitor.namespace != nil && detail.tableOrigin != namespaceValueIdentifier {
+			// Same reasoning as walkInExpression above: a qualified identifier
+			// operand is now handled as an ordinary table target via
+			// visitor.inTable; an unqualified (UsesCurrentDatabase) one still
+			// needs the SI namespace policy's dynamic-args-aware current-database
+			// resolution, which this package cannot reproduce (controller review
+			// round 1, finding 1). The plain non-identifier case is never
+			// reachable here today since decodeCallableInNamespaceRefDetail
+			// already requires a column/dot arg.
+			if visitor.namespace != nil && (detail.tableOrigin != namespaceValueIdentifier || detail.ref.UsesCurrentDatabase) {
 				visitor.namespace(function, detail)
 			}
 			if visitor.inTable != nil {
@@ -2349,9 +2369,10 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 // the callable-IN `function` node (operand at args[1]). ActionRename installs
 // a qualified column node in place of the operand; ActionSubquery replaces it
 // with the derived-table body the FROM path uses, so an Active SI table is
-// read through hg_safe / hg_unsafe here too (spec 2026-09-26 T4). An IN
-// operand takes no back-alias — unlike a FROM table, nothing ever qualifies a
-// column against it.
+// read through hg_safe / hg_unsafe here too (spec 2026-09-26 T4); ActionRemote
+// installs a bare remote(...) call, mirroring applyDecision's ActionRemote
+// branch for FROM. An IN operand takes no back-alias/alias at all — unlike a
+// FROM table, nothing ever qualifies a column against it.
 func applyInOperandDecision(container map[string]any, tt TableTarget, d TableDecision) {
 	// The infix and parenthesised forms both carry "expressions" (Step 1: only
 	// the identifier-vs-value-list distinction, not parens, is is_field-gated);
@@ -2415,10 +2436,24 @@ func applyInOperandDecision(container map[string]any, tt TableTarget, d TableDec
 			"trailing_comments":   []any{},
 			opaqueDerivedTableKey: true,
 		}})
+	case ActionRemote:
+		// Mirrors applyDecision's ActionRemote branch (the FROM path): a
+		// remote-mapped logical database renders as a bare remote(addr, db,
+		// table, user, password) call. decideTable already recorded this in
+		// table_rewrites/accessed as a real rewrite (controller review round
+		// 1, finding 3 — the prior comment claiming the SELECT handler's
+		// remote rules catch this operand was wrong: nothing rejects it, and
+		// leaving the operand untouched left a logical name in the generated
+		// SQL that table_rewrites falsely claimed had been rewritten). An IN
+		// operand takes no alias, so — unlike applyDecision — the function
+		// call is installed directly as the operand rather than wrapped in an
+		// alias node.
+		if d.Remote == nil {
+			return // misconfigured decision — leave the operand untouched
+		}
+		setOperand(map[string]any{"function": remoteFunc(d.Remote)})
 	default:
-		// ActionSkip / ActionRemote: leave the operand as written. A remote
-		// target is rejected earlier by the SELECT handler's remote rules, so
-		// ActionRemote is not expected to reach an IN operand in practice.
+		// ActionSkip: leave the operand as written.
 	}
 }
 

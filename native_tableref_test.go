@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -322,7 +323,55 @@ func TestTableRef_InOperandsAreRewrittenAndReported(t *testing.T) {
 			wantSQL: `WITH c AS (SELECT 1 AS a) SELECT * FROM phys."db1.o" "db1.o" WHERE a IN c`, wantAcc: []string{"db1.o"}},
 		{name: "system stays", sql: "SELECT * FROM db1.o WHERE a IN system.tables", wantCode: pb.RewriteCode_Success,
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN system.tables`, wantAcc: []string{"db1.o", "system.tables"}},
+		// A single-element *literal* value list is never a table operand
+		// (controller review round 1, finding 2): decodeInNamespaceRefDetail
+		// requires is_field or a structurally-provable column/dot shape, and a
+		// string literal is neither, even when its text happens to spell a
+		// protected or SI-active name. It stays an ordinary value comparison —
+		// untouched, unreported, and never checked against SI/protected-database
+		// policy — exactly as a bare `a = 'hg_safe.db1__t'` would.
+		{name: "literal value list stays a value, not a table (SI)", sql: "SELECT * FROM db1.o WHERE a IN ('hg_safe.db1__t')", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN ('hg_safe.db1__t')`, wantAcc: []string{"db1.o"}},
+		{name: "literal value list stays a value, not a table (non-SI)", sql: "SELECT * FROM db1.o WHERE a IN ('phys.x')", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN ('phys.x')`, wantAcc: []string{"db1.o"}},
 	})
+}
+
+// TestTableRef_InOperandRemoteMappedLogicalRendersRemoteCall pins controller
+// review round 1, finding 3: a logical database mapped through
+// LogicalDatabaseToRemoteUpstreamIndex/RemoteUpstreams (decideTable's
+// StatusRemote) renders as a bare remote(addr, db, table, user, password) call
+// when it appears as an IN operand, exactly mirroring applyDecision's
+// ActionRemote branch for a FROM table (see remoteFunc). Before this fix the
+// operand was left untouched (still reading the logical name in the generated
+// SQL) even though decideTable had already recorded a table_rewrites entry
+// and an accessed table for it — a real rewrite that never actually happened
+// in the SQL.
+func TestTableRef_InOperandRemoteMappedLogicalRendersRemoteCall(t *testing.T) {
+	e := newEngine(t)
+	dyn := tablerefDynamic(false)
+	dyn.DatabaseMap["tenant1"] = "testnet"
+	dyn.KnownPhysicalDatabases = append(dyn.KnownPhysicalDatabases, "testnet")
+	dyn.LogicalDatabaseToRemoteUpstreamIndex = map[string]string{"tenant1": "peer"}
+	dyn.RemoteUpstreams = map[string]*pb.RewriteTableDynamicArgs_RemoteUpstream{
+		"peer": {Addr: "h:9000", User: "u", Password: "p"},
+	}
+	sql := "SELECT * FROM db1.o WHERE a IN tenant1.x"
+	resp, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+	}
+	wantSQL := `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN remote('h:9000', 'testnet', 'tenant1.x', 'u', 'p')`
+	if resp.GetSqlAfterRewrite() != wantSQL {
+		t.Fatalf("sql = %q, want %q", resp.GetSqlAfterRewrite(), wantSQL)
+	}
+	wantRewrites := map[string]string{"db1.o": "phys.db1.o", "tenant1.x": "testnet.tenant1.x"}
+	if !reflect.DeepEqual(resp.GetTableRewrites(), wantRewrites) {
+		t.Fatalf("table_rewrites = %v, want %v", resp.GetTableRewrites(), wantRewrites)
+	}
 }
 
 func TestTableRef_ProtectedLogicalContextIsRefused(t *testing.T) {

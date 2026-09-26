@@ -182,11 +182,31 @@ func tableFunctionExecutionDatabase(dyn *pb.RewriteTableDynamicArgs) string {
 	return ""
 }
 
+// recordAccessedWriteUnique adds tt to resp's accessed tables unless an
+// identical entry is already recorded. tt.DB is here the current-database
+// context this function (or its caller) already resolved — but by the time an
+// unqualified (UsesCurrentDatabase) operand's own TableTarget reached
+// buildAccessed earlier in the pipeline, that resolution hadn't happened yet,
+// so an unresolved placeholder ({OriginalDatabase: "", OriginalTable: tt.Table})
+// may already sit in resp.OriginalAccessedTables for the very same table.
+// Drop that placeholder before appending the resolved entry so the two don't
+// coexist as if they named different tables (controller review round 1,
+// finding 1).
 func recordAccessedWriteUnique(resp *pb.RewriteSQLResponse, tt engine.TableTarget, sel nameresolve.Selection) {
 	for _, accessed := range resp.GetOriginalAccessedTables() {
 		if accessed.GetOriginalDatabase() == tt.DB && accessed.GetOriginalTable() == tt.Table {
 			return
 		}
+	}
+	if tt.DB != "" {
+		filtered := make([]*pb.AccessedTable, 0, len(resp.GetOriginalAccessedTables()))
+		for _, accessed := range resp.GetOriginalAccessedTables() {
+			if accessed.GetOriginalDatabase() == "" && accessed.GetOriginalTable() == tt.Table {
+				continue
+			}
+			filtered = append(filtered, accessed)
+		}
+		resp.OriginalAccessedTables = filtered
 	}
 	recordAccessedWrite(resp, tt, sel)
 }

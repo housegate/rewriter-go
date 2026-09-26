@@ -401,13 +401,18 @@ func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
 	}
 }
 
-// Every IN/GLOBAL-IN/callable-IN-family case below decodes as a column/dot
-// identifier operand, so spec 2026-09-26 T4 moved it out of CollectNamespaceRefs
-// (want: nil) — it is a real table target now, collected via CollectSelectTables
-// / CollectInTableIdentifierRefs instead of being reported as a namespace
-// question (see walkInExpression/walkFunctionExpression's inTable/namespace
-// split, and TestCollectInTableIdentifierRefs). The table-function/table-engine/
-// dictionary-source cases further down are untouched by that change.
+// Every qualified IN/GLOBAL-IN/callable-IN-family case below decodes as a
+// *qualified* column/dot identifier operand, so spec 2026-09-26 T4 moved it
+// out of CollectNamespaceRefs (want: nil) — it is a real table target now,
+// collected via CollectSelectTables / CollectInTableIdentifierRefs instead of
+// being reported as a namespace question (see
+// walkInExpression/walkFunctionExpression's inTable/namespace split, and
+// TestCollectInTableIdentifierRefs). The table-function/table-engine/
+// dictionary-source cases further down are untouched by that change. A *bare,
+// unqualified* identifier operand (UsesCurrentDatabase) stays reachable here
+// too (controller review round 1, finding 1): resolving "current database"
+// needs the dynamic args this package doesn't have, so only a qualified
+// operand gets the new subquery-rewrite treatment.
 func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
@@ -420,7 +425,7 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 		},
 		{
 			`SELECT * FROM other.u WHERE id IN db1__t`,
-			nil,
+			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{Table: "db1__t"}, UsesCurrentDatabase: true}},
 		},
 		{
 			`SELECT * FROM other.u WHERE id NOT IN hg_safe.db1__t`,
