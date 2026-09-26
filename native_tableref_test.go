@@ -1287,3 +1287,22 @@ func TestTableRef_CommandPrecedence(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_BareIdentifierInOperand pins spec 2026-09-26 R9: a bare
+// identifier IN operand is rewritten as a table in the session's logical
+// database (fail-safe; see AGENTS.md for the deviation from ClickHouse's
+// column-first resolution).
+func TestTableRef_BareIdentifierInOperand(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "paren", sql: "SELECT * FROM db1.o WHERE a IN (b)", si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (phys."db1.b")`, wantAcc: []string{".b", "db1.o"}},
+			tablerefCase{name: "bare", sql: "SELECT * FROM db1.o WHERE a IN b", si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.b"`, wantAcc: []string{".b", "db1.o"}},
+			tablerefCase{name: "tuple_is_a_value", sql: "SELECT * FROM db1.o WHERE a IN tuple(b)", si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN tuple(b)`, wantAcc: []string{"db1.o"}},
+		)
+	}
+	runTablerefCases(t, cases)
+}

@@ -125,6 +125,8 @@ Any handler, walk or generate error (including a polyglot recursion-limit error)
 
 IN operands: `decodeInOperand` unwraps parentheses to any depth, treats a parameter operand as T2, and decodes an identifier structurally — a bare quoted `` `db2.x` `` is an unqualified table named `db2.x` in the session's logical database (`phys."db1.db2.x"`), exactly like FROM. A literal list is a value list.
 
+Known deviation from ClickHouse: a bare identifier operand (`a IN b`, `a IN (b)`) is rewritten as the table `b` in the session's logical database. ClickHouse 26.8 resolves `b` there as a column first and only then as a table. The rewriter has no schema to decide which, and forwarding the operand unrewritten would let ClickHouse bind a table of that name in the physical database; rewriting fails safe (it can only reach the tenant's own governed table), at the cost of refusing (with an unknown-table error from ClickHouse) a legitimate `a IN (b)` that meant a column. Use `a IN tuple(b)` or `a = b` for the column form.
+
 ## ANTI-PATTERNS
 
 - Do not import polyglot outside `internal/engine`.
