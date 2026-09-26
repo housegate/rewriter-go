@@ -17,6 +17,9 @@ func TestCollectDatabaseReferences(t *testing.T) {
 		"CREATE MATERIALIZED VIEW db1.mv TO phys.`x` AS SELECT 1":   {"db1", "phys"},
 		"SELECT * FROM o":                                           nil,
 		"SELECT joinGet('phys.`db2.x`', 'v', 1)":                    {"phys"},
+		// Review round 1 finding 1: the identifier form (unquoted, no
+		// surrounding string literal) must resolve too.
+		"SELECT joinGet(phys.`db2.x`, 'v', 1)": {"phys"},
 	} {
 		ast, err := e.ParseOne(sql)
 		if err != nil {

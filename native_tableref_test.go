@@ -187,6 +187,15 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			"SELECT * FROM remote('127.0.0.1:9000', '%s', 'db2.x')",
 			"CREATE TABLE db1.n (a UInt64) ENGINE = Merge('%s', '^db2')",
 			"SELECT joinGet('%s.`db2.x`', 'v', 1)",
+			// Review round 1 findings 1 & 2: the identifier form of a
+			// lookup's table argument (no surrounding string literal), and
+			// hasColumnInTable's optional leading hostname[, username] form,
+			// which shifts the database to the third argument from the end.
+			"SELECT joinGet(%s.`db2.x`, 'v', 1)",
+			"SELECT dictGet(%s.d, 'v', 1)",
+			"SELECT hasColumnInTable('%s', 't', 'c')",
+			"SELECT hasColumnInTable('localhost', '%s', 't', 'c')",
+			"SELECT hasColumnInTable('localhost', 'user', '%s', 't', 'c')",
 		} {
 			sql := strings.ReplaceAll(shape, "%s", db)
 			// Under the active SI surface the hg_* names keep their existing
@@ -215,7 +224,8 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			//     pre-existing, corpus-pinned SI dispatch this task does not
 			//     touch. A plain SELECT read (including CREATE VIEW's body)
 			//     keeps rejectCodeFor's RewriteError default.
-			isSIHandlerBlind := strings.Contains(shape, "joinGet") || strings.Contains(shape, "IN (%s.")
+			isSIHandlerBlind := strings.Contains(shape, "joinGet") || strings.Contains(shape, "dictGet") ||
+				strings.Contains(shape, "hasColumnInTable") || strings.Contains(shape, "IN (%s.")
 			isWriteSide := siWriteSideShapes[shape]
 			for _, si := range []bool{false, true} {
 				want := msg

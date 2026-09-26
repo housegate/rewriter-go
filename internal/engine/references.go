@@ -139,18 +139,16 @@ func IsStringLookup(name string) bool {
 // collectStringLookupDatabases walks every "function" node anywhere in the
 // decoded AST (arbitrary scalar calls are not otherwise visited for namespace
 // purposes) and reports the database qualifier of an IsStringLookup call's
-// first string-literal argument.
+// relevant argument.
 func collectStringLookupDatabases(node any, add func(string)) {
 	switch n := node.(type) {
 	case map[string]any:
 		if fn, ok := n["function"].(map[string]any); ok {
 			name, _ := fn["name"].(string)
 			args, _ := fn["args"].([]any)
-			if IsStringLookup(name) && len(args) > 0 {
-				if value, origin, ok := tableFunctionArgValue(args[0]); ok && origin == namespaceValueLiteral {
-					if db, ok := stringLookupDatabase(name, value); ok {
-						add(db)
-					}
+			if IsStringLookup(name) {
+				if db, ok := stringLookupArgDatabase(name, args); ok {
+					add(db)
 				}
 			}
 		}
@@ -162,6 +160,42 @@ func collectStringLookupDatabases(node any, add func(string)) {
 			collectStringLookupDatabases(v, add)
 		}
 	}
+}
+
+// stringLookupArgDatabase selects the argument that carries the database for
+// an IsStringLookup call and extracts its qualifier. hasColumnInTable's
+// database is the third argument from the end — ClickHouse's optional leading
+// hostname[, username[, password]] form shifts every other argument (spec
+// 2026-09-26 T3/T4 review round 1 finding 2), so fewer than 3 arguments is an
+// unresolvable call, not database index 0. Every other recognized name uses
+// the first argument.
+//
+// The selected argument may be a string literal (the whole literal for
+// hasColumnInTable, or split on the first '.' for a qualified "db.table"
+// string) or an unquoted qualified identifier `db.table` — ClickHouse
+// documents both forms for joinGet/dictGet (review round 1 finding 1) — the
+// latter decoded structurally via qualifiedColumnArgTarget so a table name
+// containing a literal '.' is never mis-split.
+func stringLookupArgDatabase(name string, args []any) (string, bool) {
+	var arg any
+	if strings.HasPrefix(strings.ToLower(name), "hascolumnintable") {
+		if len(args) < 3 {
+			return "", false
+		}
+		arg = args[len(args)-3]
+	} else {
+		if len(args) == 0 {
+			return "", false
+		}
+		arg = args[0]
+	}
+	if target, _, ok := qualifiedColumnArgTarget(arg); ok {
+		return target.DB, target.DB != ""
+	}
+	if value, origin, ok := tableFunctionArgValue(arg); ok && origin == namespaceValueLiteral {
+		return stringLookupDatabase(name, value)
+	}
+	return "", false
 }
 
 // collectParenthesizedInDatabases recognizes the parenthesized single-element
