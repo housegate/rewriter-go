@@ -81,16 +81,26 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 	return out, nil
 }
 
-// ParseObjectTargetFunctionCall detects an EXISTS / SHOW CREATE / DESCRIBE
-// statement whose target is a function call rather than a plain [db.]name
-// (spec 2026-09-26 T5, Task 7 fix round 1 finding 3). ParseObjectTarget's own
-// name-run extraction stops at the name token and silently drops a following
-// "(...)", so e.g. `DESCRIBE TABLE mysql('h', 'default', 'u', 'x', 'y')`
-// reports Table="mysql" and (having matched none of RewriteDescribe's SI/
-// reject conditions) passes the whole statement through unchanged: neither
-// the T5 table-function allowlist nor the protected-database check ever sees
-// it. ok=false for anything that is not this exact shape (a bare name, one
-// of the three verbs not present at all, or an unterminated call).
+// parseObjectTargetFunctionCallFromTokens detects an EXISTS / SHOW CREATE /
+// DESCRIBE statement whose target is a function call rather than a plain
+// [db.]name (spec 2026-09-26 T5, Task 7 fix round 1 finding 3).
+// ParseObjectTarget's own name-run extraction stops at the name token and
+// silently drops a following "(...)", so e.g. `DESCRIBE TABLE mysql('h',
+// 'default', 'u', 'x', 'y')` reports Table="mysql" and (having matched none
+// of RewriteDescribe's SI/reject conditions) passes the whole statement
+// through unchanged: neither the T5 table-function allowlist nor the
+// protected-database check ever sees it. ok=false for anything that is not
+// this exact shape (a bare name, one of the three verbs not present at all,
+// or an unterminated call).
+//
+// Takes an already-tokenized stream — the caller (CollectCommandTextFindings,
+// Task 7 fix round 2) tokenizes the command text exactly once and shares it
+// with the raw-text string-lookup scan, rather than this function tokenizing
+// again on its own: doing so unconditionally (as an earlier revision did, via
+// a cheap keyword-prefix pre-check on the raw text before tokenizing) both
+// duplicated work and was defeated by a leading comment (fix round 2 finding
+// 3 — the pre-check ran on the ORIGINAL text, comment included, before any
+// tokenizing that would have stripped it).
 //
 // argDatabases lists, for each top-level call argument that decodes as a
 // single string literal or a (possibly db.name-qualified) identifier, the
@@ -100,27 +110,9 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 // An argument of any other shape (nested call, number, expression, ...)
 // contributes nothing — it is not a namespace-bearing candidate this policy
 // classifies.
-func ParseObjectTargetFunctionCall(e Engine, sql string) (verb ObjectVerb, name string, argDatabases []string, ok bool, err error) {
-	// Cheap prefix gate, checked BEFORE tokenizing (mirrors
-	// classifyWriteCommand's own precedent): PreflightTableReferences calls
-	// this for every dynamic-mode statement regardless of kind, and
-	// tokenizing is neither free nor error-free for statements this function
-	// was never going to classify anyway — the two tests this guards were
-	// measured directly: a fake Engine whose Tokenize is unavailable must not
-	// turn an unrelated ordinary statement into a hard failure, and a
-	// Tokenize-call-counting test must not see an extra call for a decoy
-	// statement this position never applies to.
-	u := strings.ToUpper(strings.TrimSpace(sql))
-	if !strings.HasPrefix(u, "EXISTS") && !strings.HasPrefix(u, "SHOW") &&
-		!strings.HasPrefix(u, "DESCRIBE") && !strings.HasPrefix(u, "DESC") {
-		return VerbNone, "", nil, false, nil
-	}
-	toks, err := tokenizeRaw(e, sql)
-	if err != nil {
-		return VerbNone, "", nil, false, err
-	}
+func parseObjectTargetFunctionCallFromTokens(toks []rawToken) (verb ObjectVerb, name string, argDatabases []string, ok bool) {
 	if len(toks) == 0 {
-		return VerbNone, "", nil, false, nil
+		return VerbNone, "", nil, false
 	}
 	i := 0
 	switch strings.ToUpper(toks[0].Text) {
@@ -128,13 +120,13 @@ func ParseObjectTargetFunctionCall(e Engine, sql string) (verb ObjectVerb, name 
 		verb, i = VerbExists, 1
 	case "SHOW":
 		if len(toks) < 2 || !strings.EqualFold(toks[1].Text, "CREATE") {
-			return VerbNone, "", nil, false, nil
+			return VerbNone, "", nil, false
 		}
 		verb, i = VerbShowCreate, 2
 	case "DESCRIBE", "DESC":
 		verb, i = VerbDescribe, 1
 	default:
-		return VerbNone, "", nil, false, nil
+		return VerbNone, "", nil, false
 	}
 	if i < len(toks) && strings.EqualFold(toks[i].Text, "TEMPORARY") {
 		i++
@@ -153,18 +145,18 @@ func ParseObjectTargetFunctionCall(e Engine, sql string) (verb ObjectVerb, name 
 	// merge('hg_safe', 'db1__t')` was silently falling through unclassified
 	// before this check was widened.
 	if i >= len(toks) || !looksLikeBareIdentifierText(toks[i].Text) {
-		return VerbNone, "", nil, false, nil
+		return VerbNone, "", nil, false
 	}
 	name = toks[i].Text
 	i++
 	if i >= len(toks) || toks[i].TokenType != "L_PAREN" {
-		return VerbNone, "", nil, false, nil // a plain [db.]name target, not a function call
+		return VerbNone, "", nil, false // a plain [db.]name target, not a function call
 	}
 	argDatabases, ok = objectTargetCallArgDatabases(toks, i)
 	if !ok {
-		return VerbNone, "", nil, false, nil
+		return VerbNone, "", nil, false
 	}
-	return verb, name, argDatabases, true, nil
+	return verb, name, argDatabases, true
 }
 
 // looksLikeBareIdentifierText reports whether s is shaped like an unquoted

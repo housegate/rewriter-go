@@ -286,57 +286,163 @@ type StringLookup struct {
 	// identifier argument (joinGet-family only) or an unresolvable
 	// expression.
 	Literal bool
+	// InSelectBody reports whether this call is reachable from a
+	// select/union/intersect/except subtree (spec 2026-09-26 T6, Task 7 fix
+	// round 2 mechanism (a)): CTAS's as_select, an INSERT's query, a CREATE
+	// VIEW's body, and an IN subquery all qualify, since polyglot nests a
+	// "select"/"union"/"intersect"/"except" key at their root. Only
+	// hasColumnInTable consults this (rewriteSelectCore's rewrite pipeline
+	// owns it there; everywhere else it is refused like the always-refuse
+	// joinGet/dictGet family). Meaningless (always true) for a call found by
+	// StringLookupCalls on an ast whose OWN root already is such a subtree —
+	// which is exactly the ast rewriteSelectCore hands this package.
+	InSelectBody bool
 }
 
-// StringLookupCalls returns every recognized string-form lookup call in ast,
-// in document order, wherever it appears — an ordinary scalar-expression
-// position (SELECT list, WHERE, …), not gated by readSourceVisitor's
-// source-role traversal, mirroring collectStringLookupDatabases. Only a call
-// that names a first argument at all is reported (spec 2026-09-26 T6,
-// controller ruling 2): a bare `joinGet()` names nothing to refuse or
-// rewrite.
+// StringLookupCalls returns every recognized string-form lookup call
+// anywhere in ast — an ordinary scalar-expression position (SELECT list,
+// WHERE, a CREATE TABLE column's DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL
+// expression, …), not gated by readSourceVisitor's source-role traversal —
+// in document order (spec 2026-09-26 T6, Task 7 fix round 2 mechanism (a) +
+// (c)): ordered by polyglot's span start offset where available, falling
+// back to a SQL-clause-aware traversal order for calls whose subtree carries
+// none (measured: a call's argument carries a span only when it is a column/
+// identifier, never a string or number literal — the overwhelmingly common
+// shape for these functions in practice — so a plain alphabetical key sort
+// would visit a SELECT's ORDER BY before its WHERE, backwards from where
+// they appear in the source). Only a call that names a first argument at all
+// is reported (spec 2026-09-26 T6, controller ruling 2): a bare `joinGet()`
+// names nothing to refuse or rewrite.
 func StringLookupCalls(ast AST) ([]StringLookup, error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return nil, fmt.Errorf("engine: decode string lookups: %w", err)
 	}
-	var out []StringLookup
-	collectStringLookupCalls(root, &out)
+	occurrences := collectStringLookupOccurrences(root)
+	out := make([]StringLookup, len(occurrences))
+	for i, o := range occurrences {
+		out[i] = o.call
+	}
 	return out, nil
 }
 
-func collectStringLookupCalls(node any, out *[]StringLookup) {
-	switch n := node.(type) {
-	case map[string]any:
-		if fn, ok := n["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
-			args, _ := fn["args"].([]any)
-			if IsStringLookup(name) && len(args) > 0 {
-				*out = append(*out, decodeStringLookupCall(name, args))
-			}
-		}
-		for _, k := range sortedMapKeys(n) {
-			collectStringLookupCalls(n[k], out)
-		}
-	case []any:
-		for _, v := range n {
-			collectStringLookupCalls(v, out)
-		}
-	}
+// stringLookupOccurrence is one matched call plus enough context to mutate
+// it in place (fn/args reference the live decoded node) and to order it
+// deterministically (span/hasSpan/walkIndex).
+type stringLookupOccurrence struct {
+	call      StringLookup
+	fn        map[string]any // fn["args"] is replaced to rewrite this call
+	args      []any
+	span      int
+	hasSpan   bool
+	walkIndex int
 }
 
-// sortedMapKeys returns n's keys in sorted order. json.Unmarshal decodes a
-// JSON object into a plain Go map, whose range iteration order is randomized
-// per the language spec; collectStringLookupCalls/rewriteStringLookupCalls
-// walk a map's values to reach nested "function" nodes, so without a fixed
-// order the reported/rewritten position of a call among several siblings in
-// one statement would vary from run to run (Task 7 fix round 1 finding 1,
-// measured over 200 runs: up to 24 distinct accessed orders for one
-// statement, and up to 3 distinct first-refusal messages for another). Sorted
-// key order is a deterministic — not necessarily source-text — order, which
-// is sufficient here: RewriteStringLookups's decide is a pure function of the
-// call it receives (see its own doc comment), so nothing downstream depends
-// on this order matching document order, only on it being STABLE.
+// collectStringLookupOccurrences performs the ONE generic recursive walk
+// mechanism (a) specifies: every map is visited (children in a SQL-clause-
+// aware, otherwise alphabetically sorted order — stringLookupWalkKeys),
+// every "function" node matching IsStringLookup is recorded, and
+// InSelectBody is tracked while descending (sticky once a select/union/
+// intersect/except key is seen, exactly at the node that key's value roots —
+// a CTAS/INSERT/VIEW/IN-subquery body all nest one of these keys at their
+// own root, so no per-statement-kind special-casing is needed here). The
+// result is stable-sorted by span for any pair that both carry one,
+// preserving the walk order everywhere else (T6 fix round 2 finding 1).
+func collectStringLookupOccurrences(root any) []stringLookupOccurrence {
+	var out []stringLookupOccurrence
+	idx := 0
+	var walk func(node any, insideSelectBody bool)
+	walk = func(node any, insideSelectBody bool) {
+		switch n := node.(type) {
+		case map[string]any:
+			inside := insideSelectBody
+			for _, k := range []string{"select", "union", "intersect", "except"} {
+				if _, ok := n[k]; ok {
+					inside = true
+					break
+				}
+			}
+			if fn, ok := n["function"].(map[string]any); ok {
+				name, _ := fn["name"].(string)
+				args, _ := fn["args"].([]any)
+				if IsStringLookup(name) && len(args) > 0 {
+					call := decodeStringLookupCall(name, args)
+					call.InSelectBody = inside
+					span, hasSpan := firstSpanStart(args)
+					out = append(out, stringLookupOccurrence{
+						call: call, fn: fn, args: args, span: span, hasSpan: hasSpan, walkIndex: idx,
+					})
+					idx++
+				}
+			}
+			for _, k := range stringLookupWalkKeys(n) {
+				walk(n[k], inside)
+			}
+		case []any:
+			for _, v := range n {
+				walk(v, insideSelectBody)
+			}
+		}
+	}
+	walk(root, false)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].hasSpan && out[j].hasSpan {
+			return out[i].span < out[j].span
+		}
+		return false // preserve walk order otherwise (both fallback and mixed span/no-span pairs)
+	})
+	return out
+}
+
+// stringLookupClauseOrder ranks a SELECT statement's own clause field names
+// by SQL grammar/textual position, used as collectStringLookupOccurrences's
+// walk order (a TIEBREAKER among one map's direct children, never a gate on
+// which nodes are visited): a string-lookup call's arguments carry a span
+// only when they are column/identifier expressions, never string or number
+// literals — the overwhelmingly common shape in practice — so relying on
+// plain alphabetical key order alone would report a SELECT's ORDER BY call
+// ahead of its WHERE call, backwards from the source text (measured
+// directly; spec 2026-09-26 T6, Task 7 fix round 2 finding 1). Every other
+// field name (CREATE TABLE properties, a dictionary source's properties, an
+// IN node's own fields, …) has no comparable ambiguity in the shapes this
+// policy walks, so it keeps plain alphabetical order among itself, sorted
+// after every ranked name.
+var stringLookupClauseOrder = map[string]int{
+	"with": 0, "expressions": 1, "from": 2, "joins": 3, "where_clause": 4,
+	"group_by": 5, "having": 6, "qualify": 7, "windows": 8, "order_by": 9,
+	"sort_by": 10, "distribute_by": 11, "cluster_by": 12, "limit": 13,
+	"offset": 14, "sample": 15, "top": 16, "distinct_on": 17, "fetch": 18,
+	"into": 19, "hint": 20, "lateral_views": 21, "connect": 22, "locks": 23,
+}
+
+// stringLookupWalkKeys orders n's keys for collectStringLookupOccurrences's
+// walk: stringLookupClauseOrder's ranked names first (in rank order), then
+// every other key alphabetically.
+func stringLookupWalkKeys(n map[string]any) []string {
+	keys := make([]string, 0, len(n))
+	for k := range n {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ri, oki := stringLookupClauseOrder[keys[i]]
+		rj, okj := stringLookupClauseOrder[keys[j]]
+		switch {
+		case oki && okj:
+			return ri < rj
+		case oki:
+			return true
+		case okj:
+			return false
+		default:
+			return keys[i] < keys[j]
+		}
+	})
+	return keys
+}
+
+// sortedMapKeys returns n's keys in plain alphabetical order — used by the
+// non-string-lookup callers that only need a deterministic (not
+// clause-aware) traversal.
 func sortedMapKeys(n map[string]any) []string {
 	keys := make([]string, 0, len(n))
 	for k := range n {
@@ -344,6 +450,35 @@ func sortedMapKeys(n map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// firstSpanStart searches node depth-first (a deterministic, sorted-key
+// order; the result is only ever "found" or "not found", so which
+// deterministic order is used does not matter) for the first {"span":
+// {"start": …}} it can reach, returning ok=false when none exists anywhere
+// in node's subtree (measured: a string/number literal argument carries no
+// span at all; only a column/identifier argument does).
+func firstSpanStart(node any) (int, bool) {
+	switch n := node.(type) {
+	case map[string]any:
+		if span, ok := n["span"].(map[string]any); ok {
+			if start, ok := span["start"].(float64); ok {
+				return int(start), true
+			}
+		}
+		for _, k := range sortedMapKeys(n) {
+			if v, ok := firstSpanStart(n[k]); ok {
+				return v, true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if v, ok := firstSpanStart(v); ok {
+				return v, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // decodeStringLookupCall decodes one already-matched (IsStringLookup, len(args)>0)
@@ -386,53 +521,32 @@ func literalStringArg(arg any) (string, bool) {
 	return decodeStringLiteralValue(lit)
 }
 
-// RewriteStringLookups mutates every string-lookup call decide accepts,
-// re-walking ast in the same shape StringLookupCalls inspects. decide is
-// invoked once per call; returning ok=false leaves that call's arguments
-// untouched. Because decide is expected to be a pure function of the call's
-// own Function/Arg (exactly mirroring how RewriteSelectTables's decide is a
-// pure function of the TableTarget it receives), this second, independent
-// walk never needs to agree on ORDER with a caller's own earlier
-// StringLookupCalls pass — only on each call's own content. The accepted
-// replacement is the new qualified "db.table" text: for a single-argument
-// call it becomes that argument's whole literal value; for hasColumnInTable
-// it is split on the FIRST '.' into the physical database and physical table
-// literals (buildDynamicTableName's own "<logical>.<table>" shape, so the
-// table half may itself still contain a dot — the database half never does).
+// RewriteStringLookups mutates every string-lookup call decide accepts, in
+// the same document order StringLookupCalls reports (T6 fix round 2 finding
+// 1: the order calls are recorded/rewritten in must be deterministic and
+// document-ish, not just stable). decide is invoked once per call, in that
+// order; returning ok=false leaves that call's arguments untouched. The
+// accepted replacement is the new qualified "db.table" text: for a
+// single-argument call it becomes that argument's whole literal value; for
+// hasColumnInTable it is split on the FIRST '.' into the physical database
+// and physical table literals (buildDynamicTableName's own
+// "<logical>.<table>" shape, so the table half may itself still contain a
+// dot — the database half never does).
 func RewriteStringLookups(ast AST, decide func(StringLookup) (string, bool)) (AST, error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return nil, fmt.Errorf("engine: decode string lookups: %w", err)
 	}
-	rewriteStringLookupCalls(root, decide)
+	for _, o := range collectStringLookupOccurrences(root) {
+		if replacement, ok := decide(o.call); ok {
+			o.fn["args"] = applyStringLookupReplacement(o.call.Function, o.args, replacement)
+		}
+	}
 	out, err := json.Marshal(root)
 	if err != nil {
 		return nil, fmt.Errorf("engine: encode string lookups: %w", err)
 	}
 	return AST(out), nil
-}
-
-func rewriteStringLookupCalls(node any, decide func(StringLookup) (string, bool)) {
-	switch n := node.(type) {
-	case map[string]any:
-		if fn, ok := n["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
-			args, _ := fn["args"].([]any)
-			if IsStringLookup(name) && len(args) > 0 {
-				call := decodeStringLookupCall(name, args)
-				if replacement, ok := decide(call); ok {
-					fn["args"] = applyStringLookupReplacement(name, args, replacement)
-				}
-			}
-		}
-		for _, k := range sortedMapKeys(n) {
-			rewriteStringLookupCalls(n[k], decide)
-		}
-	case []any:
-		for _, v := range n {
-			rewriteStringLookupCalls(v, decide)
-		}
-	}
 }
 
 // applyStringLookupReplacement builds the mutated args slice for one accepted
@@ -458,118 +572,163 @@ func applyStringLookupReplacement(name string, args []any, replacement string) [
 	return out
 }
 
-// CollectColumnDefinitionStringLookups returns every string-lookup call in a
-// CREATE TABLE's own column definitions — DEFAULT / MATERIALIZED / ALIAS /
-// EPHEMERAL expressions (spec 2026-09-26 T6, Task 7 fix round 1 finding 2) —
-// in column-then-key order (columns in declaration order, then default,
-// materialized_expr, alias_expr, ephemeral for each column; deterministic by
-// construction, no sorting needed). ok=false (nil, nil) for anything that is
-// not a create_table node. Deliberately narrower than StringLookupCalls: a
-// CREATE TABLE ... AS SELECT's embedded body is a different sub-tree
-// (as_select) that rewriteSelectCore owns and rewrites hasColumnInTable
-// inside — this collector must never also see that body, or its caller could
-// not tell "found in a column expression" (always refuse hasColumnInTable
-// here) apart from "found in the AS SELECT body" (rewrite it there instead).
-func CollectColumnDefinitionStringLookups(ast AST) ([]StringLookup, error) {
-	var root map[string]any
-	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, fmt.Errorf("engine: decode create table columns: %w", err)
-	}
-	body, ok := root[NodeCreateTable].(map[string]any)
-	if !ok {
-		return nil, nil
-	}
-	cols, _ := body["columns"].([]any)
-	var out []StringLookup
-	for _, c := range cols {
-		col, ok := c.(map[string]any)
-		if !ok {
-			continue
-		}
-		for _, key := range []string{"default", "materialized_expr", "alias_expr", "ephemeral"} {
-			collectStringLookupCalls(col[key], &out)
-		}
-	}
-	return out, nil
+// CommandTextFindings is everything PreflightTableReferences needs from
+// tokenizing a `command` node's raw text exactly once (spec 2026-09-26 T5/T6,
+// Task 7 fix round 2): every lookup-family call found by scanning for a name
+// immediately followed by "(" (mechanism (b)), and — when the text is an
+// EXISTS / SHOW CREATE / DESCRIBE statement — its verb and (when the target
+// is a function call) the target's classified name and argument database
+// candidates (mechanism (d), plus the DESCRIBE-function-target
+// classification from fix round 1 finding 3). Sharing one Tokenize call
+// between both concerns avoids tokenizing the same text twice.
+type CommandTextFindings struct {
+	LookupCalls          []StringLookup
+	Verb                 ObjectVerb
+	TargetFunctionName   string
+	TargetArgDatabases   []string
+	TargetIsFunctionCall bool
 }
 
-// CollectAlterMutationStringLookups detects an ALTER TABLE ... UPDATE/DELETE
-// mutation — opaque in polyglot, either a command node classifyWriteCommand
-// reports as CmdAlterUpdate or an alter_table node whose sole action is an
-// unstructured Raw UPDATE/DELETE tail — and returns the string-lookup calls
-// in its assignment/predicate expressions (spec 2026-09-26 T6, Task 7 fix
-// round 1 finding 2): the joinGet/dictGet-family refusal and the
-// hasColumnInTable "outside a SELECT body" refusal must reach these
-// positions too, not just an embedded SELECT, which this opaque shape has
-// none of. Reparses the mutation tail as an equivalent ordinary UPDATE/DELETE
-// probe statement against a sentinel target, mirroring
-// collectAlterMutationSurface's own technique, and walks the structured
-// result for string-lookup calls (deterministic column-then-key order: SET
-// assignments in order, then the predicate).
-//
-// Fails open (nil, nil) for anything that is not this exact opaque mutation
-// shape, or whose tail this probe cannot cleanly reparse: this collector
-// feeds an ADDITIONAL guard layered on top of the table-reference policy and
-// must never turn an unrelated parse/tokenize hiccup into a hard failure for
-// a statement that carries no lookup to refuse in the first place — the
-// stricter round-trip proof collectAlterMutationSurface itself applies (used
-// only under active storage integrity, where a probe mismatch must fail
-// closed) is deliberately not reproduced here.
-func CollectAlterMutationStringLookups(e Engine, ast AST, sql string) ([]StringLookup, error) {
-	kind, body, _, err := bodyOf(ast)
-	if err != nil || body == nil {
-		return nil, nil
-	}
-	switch kind {
-	case NodeCommand:
-		raw, _ := body["this"].(string)
-		if classifyWriteCommand(raw) != CmdAlterUpdate {
-			return nil, nil
-		}
-	case NodeAlterTable:
-		if !alterBodyHasMutation(body) {
-			return nil, nil
-		}
-	default:
-		return nil, nil
-	}
-	if strings.TrimSpace(sql) == "" {
-		return nil, nil
-	}
-	toks, err := tokenizeRaw(e, sql)
+// CollectCommandTextFindings tokenizes text (a `command` node's raw SQL, or
+// a {"Raw":{"sql":…}} action's text) exactly once. ok=false means the
+// tokenizer failed — the caller must refuse regardless of storage-integrity
+// state (T6 mechanism (b): "a tokenizer error fails closed").
+func CollectCommandTextFindings(e Engine, text string) (CommandTextFindings, bool) {
+	toks, err := tokenizeRaw(e, text)
 	if err != nil {
-		return nil, nil
+		return CommandTextFindings{}, false
 	}
-	mkind, tailStart, ok := alterMutationTail(toks)
-	if !ok || tailStart < 0 || tailStart > len(sql) {
-		return nil, nil
+	var f CommandTextFindings
+	f.LookupCalls = lookupCallsInRawTokens(toks)
+	f.Verb, f.TargetFunctionName, f.TargetArgDatabases, f.TargetIsFunctionCall = parseObjectTargetFunctionCallFromTokens(toks)
+	return f, true
+}
+
+// CollectRawActionStringLookupCalls scans every {"Raw":{"sql":…}} action
+// embedded anywhere in the structured AST (e.g. an ALTER TABLE … MODIFY
+// COLUMN … DEFAULT … action, spec 2026-09-26 T6, Task 7 fix round 2 mechanism
+// (b)) for a lookup-family call. Unlike a `command` node's own text (see
+// CollectCommandTextFindings), a Raw action is never an EXISTS/SHOW
+// CREATE/DESCRIBE target, so there is nothing to share a tokenize call with
+// here. ok=false (fail closed) on any tokenizer failure.
+func CollectRawActionStringLookupCalls(e Engine, ast AST) (calls []StringLookup, ok bool) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, false
 	}
-	tail := strings.TrimSpace(sql[tailStart:])
-	if tail == "" {
-		return nil, nil
+	var texts []string
+	collectRawActionTexts(root, &texts)
+	for _, text := range texts {
+		toks, terr := tokenizeRaw(e, text)
+		if terr != nil {
+			return nil, false
+		}
+		calls = append(calls, lookupCallsInRawTokens(toks)...)
 	}
-	probe := "UPDATE " + mutationProbeTable + " SET " + tail
-	if mkind == alterMutationDelete {
-		probe = "DELETE FROM " + mutationProbeTable + " " + tail
-	}
-	probeAST, err := e.ParseOne(probe)
-	if err != nil {
-		return nil, nil
-	}
-	_, probeBody, _, err := bodyOf(probeAST)
-	if err != nil || probeBody == nil {
-		return nil, nil
-	}
-	var out []StringLookup
-	if assignments, ok := probeBody["set"].([]any); ok {
-		for _, rawAssignment := range assignments {
-			assignment, ok := rawAssignment.([]any)
-			if !ok || len(assignment) != 2 {
-				continue
+	return calls, true
+}
+
+// collectRawActionTexts recursively collects every {"Raw":{"sql":"…"}}
+// action's text anywhere in the decoded tree (capital "Raw" — an ALTER
+// action polyglot could not structure; distinct from the lowercase top-level
+// "raw" node CollectCommandTextFindings's caller handles separately via
+// CommandSQL/NodeRaw).
+func collectRawActionTexts(node any, out *[]string) {
+	switch n := node.(type) {
+	case map[string]any:
+		if raw, ok := n["Raw"].(map[string]any); ok {
+			if sql, ok := raw["sql"].(string); ok {
+				*out = append(*out, sql)
 			}
-			collectStringLookupCalls(assignment[1], &out)
+		}
+		for _, k := range sortedMapKeys(n) {
+			collectRawActionTexts(n[k], out)
+		}
+	case []any:
+		for _, v := range n {
+			collectRawActionTexts(v, out)
 		}
 	}
-	collectStringLookupCalls(probeBody["where_clause"], &out)
-	return out, nil
+}
+
+// lookupCallsInRawTokens scans an already-tokenized raw text span for every
+// lookup-family name (spec 2026-09-26 T6: joinGet/dictGet-family AND
+// hasColumnInTable — this opaque-text position has no SELECT-body rewrite
+// pipeline of its own, so hasColumnInTable is treated exactly like the
+// always-refuse family here) immediately followed by "(", in token order. The
+// reported Arg mirrors decodeStringLookupCall's own convention so the
+// message is identical regardless of which mechanism ((a)'s structured walk
+// or (b)'s raw-text scan) found the call: hasColumnInTable's last two
+// top-level arguments (its db/table pair — an optional leading
+// host[, user[, pw]] shifts the index exactly like stringLookupArgDatabase
+// documents) joined with '.'; every other name's first top-level argument.
+func lookupCallsInRawTokens(toks []rawToken) []StringLookup {
+	var out []StringLookup
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i].TokenType == "STRING" || toks[i].TokenType == "QUOTED_IDENTIFIER" {
+			continue // a literal/quoted-identifier's decoded text is never a call name
+		}
+		if !IsStringLookup(toks[i].Text) || toks[i+1].TokenType != "L_PAREN" {
+			continue
+		}
+		groups, ok := rawCallArgGroups(toks, i+1)
+		var arg string
+		if ok {
+			if strings.HasPrefix(strings.ToLower(toks[i].Text), "hascolumnintable") && len(groups) >= 3 {
+				arg = rawArgGroupText(groups[len(groups)-3]) + "." + rawArgGroupText(groups[len(groups)-2])
+			} else if len(groups) > 0 {
+				arg = rawArgGroupText(groups[0])
+			}
+		}
+		out = append(out, StringLookup{Function: toks[i].Text, Arg: arg, Literal: true})
+	}
+	return out
+}
+
+// rawCallArgGroups splits the token stream from a call's opening "(" (at
+// toks[openIdx]) into its top-level (paren-depth-0) comma-separated argument
+// groups. ok=false means the call never closes (malformed input).
+func rawCallArgGroups(toks []rawToken, openIdx int) (groups [][]rawToken, ok bool) {
+	depth := 0
+	groupStart := openIdx + 1
+	for i := openIdx + 1; i < len(toks); i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			depth++
+		case "R_PAREN":
+			if depth == 0 {
+				groups = append(groups, toks[groupStart:i])
+				return groups, true
+			}
+			depth--
+		case "COMMA":
+			if depth == 0 {
+				groups = append(groups, toks[groupStart:i])
+				groupStart = i + 1
+			}
+		}
+	}
+	return nil, false
+}
+
+// rawArgGroupText renders one argument group as display text — a single
+// literal/identifier token's own text for the common case, or every token's
+// text space-joined for anything else (best-effort; the raw-text scan does
+// not attempt a full expression decode the way the structured-AST path
+// does).
+func rawArgGroupText(group []rawToken) string {
+	if len(group) == 0 {
+		return ""
+	}
+	if len(group) == 1 {
+		return group[0].Text
+	}
+	var b strings.Builder
+	for i, t := range group {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(t.Text)
+	}
+	return b.String()
 }

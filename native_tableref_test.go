@@ -643,18 +643,70 @@ func TestTableRef_StringLookupsAreResolvedOrRefused(t *testing.T) {
 		{name: "joinGet in CREATE TABLE column DEFAULT",
 			sql:      "CREATE TABLE db1.n (a String DEFAULT joinGet('default.j','v',1)) ENGINE = Memory",
 			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		// Task 7 fix round 2 finding 2: mechanism (b) (the raw tokenizer scan
+		// over every command/Raw-action text span) closes what round 1's
+		// probe-reparse collector missed — a MULTI-command ALTER tail (which
+		// fails a single-action reparse) and a Raw action that is not a
+		// mutation at all (MODIFY COLUMN … DEFAULT …).
+		{name: "dictHas in multi-command ALTER tail (UPDATE, DELETE)",
+			sql:      "ALTER TABLE db1.o UPDATE a = 1 WHERE 1, DELETE WHERE dictHas('db1.d',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.d" does not resolve`},
+		{name: "joinGet in multi-command ALTER tail (DELETE, UPDATE)",
+			sql:      "ALTER TABLE db1.o DELETE WHERE b = 1, UPDATE a = joinGet('default.j','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "joinGet in ALTER MODIFY COLUMN DEFAULT (Raw action, not a mutation)",
+			sql:      "ALTER TABLE db1.o MODIFY COLUMN a String DEFAULT joinGet('default.j','v',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		// hasColumnInTable outside every SELECT-body position: mechanism (a)'s
+		// generic structured walk finds each of these via an ordinary
+		// "function" node (no per-position collector needed, unlike round
+		// 1's now-deleted CREATE-column/single-ALTER-mutation collectors),
+		// and none of them is InSelectBody, so all are refused rather than
+		// rewritten.
+		{name: "hasColumnInTable in DELETE predicate",
+			sql:      "DELETE FROM db1.o WHERE hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in UPDATE assignment",
+			sql:      "UPDATE db1.o SET a = hasColumnInTable('default','x','v') WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in INSERT VALUES",
+			sql:      "INSERT INTO db1.o VALUES (hasColumnInTable('default','x','v'))",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in ALTER ADD COLUMN DEFAULT",
+			sql:      "ALTER TABLE db1.o ADD COLUMN b UInt8 DEFAULT hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE PARTITION BY",
+			sql:      "CREATE TABLE db1.n (a UInt8) ENGINE = MergeTree ORDER BY a PARTITION BY hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE TTL",
+			sql:      "CREATE TABLE db1.n (a DateTime) ENGINE = MergeTree ORDER BY a TTL a + hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE CONSTRAINT CHECK",
+			sql:      "CREATE TABLE db1.n (a UInt8, CONSTRAINT c CHECK hasColumnInTable('default','x','v')) ENGINE = MergeTree ORDER BY a",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		// Keep: an ordinary multi-value IN predicate, and an ordinary
+		// non-lookup DEFAULT expression, must stay untouched.
+		{name: "ALTER UPDATE with ordinary IN predicate stays Success",
+			sql:      "ALTER TABLE db1.o UPDATE a = 1 WHERE b IN (1, 2)",
+			wantCode: pb.RewriteCode_Success},
+		{name: "CREATE TABLE with ordinary DEFAULT now() stays Success",
+			sql:      "CREATE TABLE db1.n (a DateTime DEFAULT now()) ENGINE = Memory",
+			wantCode: pb.RewriteCode_Success},
 	})
 }
 
 // TestTableRef_StringLookupOrderIsDeterministic pins Task 7 fix round 1
-// finding 1: collectStringLookupCalls/rewriteStringLookupCalls used to
-// recurse with `for _, v := range n` over a decoded map[string]any, whose Go
-// range order is randomized per the language spec — measured over 200 runs,
-// a statement with four hasColumnInTable calls produced 24 distinct accessed
-// orders, and one with joinGet/dictHas/dictGet produced three distinct
-// first-refusal messages. Sorted-key iteration (references.go's
-// sortedMapKeys) fixes this: run with `-count=20` to prove it, not just
-// `-count=1`.
+// finding 1 (measured over 200 runs of the original map-range-order
+// implementation: up to 24 distinct accessed orders for one statement, and
+// up to 3 distinct first-refusal messages for another) and its fix round 2
+// refinement (document order, not just a stable order — the reviewer's own
+// probes below). collectStringLookupOccurrences (references.go) orders calls
+// by polyglot span when available, falling back to a SQL-clause-aware walk
+// order (stringLookupClauseOrder) otherwise, since a string-lookup call's
+// arguments carry a span only when they are column/identifier expressions,
+// never string/number literals — measured directly, and the overwhelmingly
+// common shape for these functions. Run with `-count=20` to prove stability,
+// not just `-count=1`.
 func TestTableRef_StringLookupOrderIsDeterministic(t *testing.T) {
 	runTablerefCases(t, []tablerefCase{
 		{name: "four hasColumnInTable calls, stable accessed order",
@@ -666,6 +718,20 @@ func TestTableRef_StringLookupOrderIsDeterministic(t *testing.T) {
 		{name: "mixed joinGet/dictHas/dictGet, stable first refusal",
 			sql:      "SELECT joinGet('db1.j','v',1), dictHas('db1.d',1), dictGet('db1.g','v',1)",
 			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+		// Fix round 2 finding 1's own probe: WHERE's hasColumnInTable ('a')
+		// must be reported before ORDER BY's ('z') — the FROM target ('o')
+		// always leads, recorded earlier in rewriteSelectCore before any
+		// string-lookup handling runs at all.
+		{name: "WHERE hasColumnInTable precedes ORDER BY hasColumnInTable",
+			sql:      "SELECT x FROM db1.o WHERE hasColumnInTable('db1','a','v') ORDER BY hasColumnInTable('db1','z','v')",
+			wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o", "db1.a", "db1.z"}},
+		// Fix round 2 finding 1's second probe: the CTE body's dictHas is the
+		// first call in document order (the "with" clause precedes the main
+		// SELECT's own "expressions"), so it must be the one named in the
+		// refusal message, not the main body's dictGet.
+		{name: "CTE body's dictHas precedes main body's dictGet",
+			sql:      "WITH (SELECT dictHas('db1.a',1)) AS c SELECT dictGet('db1.j','v',1), c",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.a" does not resolve`},
 	})
 }
 
@@ -691,6 +757,22 @@ func TestTableRef_DescribeFunctionTargetIsClassified(t *testing.T) {
 		{name: "DESCRIBE merge refused even under V2", sql: "DESCRIBE TABLE merge('hg_safe','db1__t')", si: true,
 			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function merge is not accepted"},
 		{name: "DESCRIBE numbers stays allowed", sql: "DESCRIBE TABLE numbers(10)", wantCode: pb.RewriteCode_Success},
+		// Task 7 fix round 2 finding 3: a leading comment defeated the verb
+		// gate, which matched EXISTS/SHOW/DESCRIBE against the raw SQL TEXT
+		// (comment included) before ever tokenizing. The gate now reads the
+		// tokenizer's first token directly — comments are stripped from the
+		// token stream entirely (attached to the FOLLOWING token as
+		// metadata, never emitted as their own token), so it is comment-
+		// agnostic by construction.
+		{name: "leading block comment does not defeat DESCRIBE merge, even under V2",
+			sql: "/* c */ DESCRIBE TABLE merge('hg_safe','db1__t')", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function merge is not accepted"},
+		{name: "leading block comment does not defeat DESCRIBE mysql",
+			sql:      "/* c */ DESCRIBE TABLE mysql('h','default','u','x','y')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function mysql is not accepted"},
+		{name: "leading line comment does not defeat DESCRIBE remote",
+			sql:      "-- c\nDESCRIBE TABLE remote('localhost','default','secret')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function remote is not accepted"},
 	})
 }
 

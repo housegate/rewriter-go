@@ -77,79 +77,116 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		}
 	}
 	// T5 + T3 for a DESCRIBE / EXISTS / SHOW CREATE target that is a function
-	// call, not a plain [db.]name (Task 7 fix round 1 finding 3):
-	// ParseObjectTarget's tokenizer-based name-run extraction silently drops
-	// everything from "(" onward, so e.g. `DESCRIBE TABLE mysql('h', ...)`
-	// reported Table="mysql" and fell through RewriteDescribe's existing
-	// pass-through-unchanged branch — neither the T5 allowlist nor the
-	// protected-database check ever saw it. Unconditional (both SI states):
-	// unlike SELECT/write dispatch, no later handler defers this check for
-	// an active SI surface, so there is no other opportunity to catch it.
-	if _, fnName, argDBs, fok, ferr := engine.ParseObjectTargetFunctionCall(e, sql); ferr != nil {
-		return nil, false, ferr
-	} else if fok {
-		switch engine.ClassifyTableFunction(fnName) {
-		case engine.TableFunctionRefused:
+	// call, not a plain [db.]name (Task 7 fix round 1 finding 3), plus T6
+	// mechanism (b) (Task 7 fix round 2): a `command` node's raw text is
+	// tokenized exactly once and used for BOTH concerns. ParseObjectTarget's
+	// own name-run extraction silently drops everything from "(" onward, so
+	// e.g. `DESCRIBE TABLE mysql('h', ...)` reported Table="mysql" and fell
+	// through RewriteDescribe's existing pass-through-unchanged branch —
+	// neither the T5 allowlist nor the protected-database check ever saw it.
+	// The verb/target detection reads the tokenizer's first token (comments
+	// are stripped before the token stream, never a separate token) rather
+	// than string-matching the raw text, so a leading comment can no longer
+	// defeat it (fix round 2 finding 3). Every lookup-family call the same
+	// tokenize pass finds (mechanism (b): an ALTER TABLE … UPDATE/DELETE
+	// mutation, including a multi-command tail, has no structured "function"
+	// node at all — it is either the command's whole text, as here, or an
+	// embedded Raw action, handled separately below) is refused with the
+	// generic "does not resolve" message; hasColumnInTable is refused here
+	// too, since a command node's raw text never has a SELECT-body rewrite
+	// pipeline of its own. A tokenizer error fails CLOSED regardless of SI
+	// state (mechanism (b)'s own words), unlike an ordinary internal-error
+	// propagation elsewhere in this file.
+	//
+	// Unconditional (both SI states): unlike SELECT/write dispatch, no later
+	// handler defers either concern for an active SI surface, so there is no
+	// other opportunity to catch them.
+	if kind, kerr := engine.NodeKind(ast); kerr != nil {
+		return nil, false, kerr
+	} else if kind == engine.NodeCommand {
+		text, cerr := engine.CommandSQL(ast)
+		if cerr != nil {
+			return nil, false, cerr
+		}
+		findings, cok := engine.CollectCommandTextFindings(e, text)
+		if !cok {
 			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-			rejectUnsupported(resp, engine.TableFunctionRefusedMessage(fnName))
-			resp.SqlAfterRewrite = sql
-			return resp, true, nil
-		case engine.TableFunctionUnknown:
-			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-			rejectUnsupported(resp, engine.TableFunctionUnknownMessage(fnName))
+			rejectUnsupported(resp, engine.UnsupportedStatementMessage)
 			resp.SqlAfterRewrite = sql
 			return resp, true, nil
 		}
-		for _, db := range argDBs {
-			if nameresolve.ProtectedDatabase(db, sel.Dynamic) {
+		for _, call := range findings.LookupCalls {
+			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+			rejectInvalid(resp, stringLookupUnresolvedMessage(call))
+			resp.SqlAfterRewrite = sql
+			return resp, true, nil
+		}
+		if findings.TargetIsFunctionCall {
+			switch engine.ClassifyTableFunction(findings.TargetFunctionName) {
+			case engine.TableFunctionRefused:
 				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-				recordAccessedDatabase(resp, db, sel.Dynamic)
-				rejectInvalid(resp, nameresolve.ProtectedDatabaseRejectMessage(db))
+				rejectUnsupported(resp, engine.TableFunctionRefusedMessage(findings.TargetFunctionName))
+				resp.SqlAfterRewrite = sql
+				return resp, true, nil
+			case engine.TableFunctionUnknown:
+				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+				rejectUnsupported(resp, engine.TableFunctionUnknownMessage(findings.TargetFunctionName))
 				resp.SqlAfterRewrite = sql
 				return resp, true, nil
 			}
+			for _, db := range findings.TargetArgDatabases {
+				if nameresolve.ProtectedDatabase(db, sel.Dynamic) {
+					resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+					recordAccessedDatabase(resp, db, sel.Dynamic)
+					rejectInvalid(resp, nameresolve.ProtectedDatabaseRejectMessage(db))
+					resp.SqlAfterRewrite = sql
+					return resp, true, nil
+				}
+			}
 		}
 	}
-	// T6 (spec 2026-09-26, controller ruling 2 / Task 7 fix round 1 finding
-	// 2): joinGet/dictGet-family calls are refused statement-wide, wherever
-	// they appear — SELECT bodies, INSERT/CTAS/VIEW embedded bodies,
-	// structured UPDATE/DELETE, CREATE TABLE column DEFAULT/MATERIALIZED/
-	// ALIAS/EPHEMERAL expressions, and the opaque ALTER TABLE …
-	// UPDATE/DELETE mutation shape — run after the protected-database step
-	// so a protected name still reports its own message first (e.g.
-	// joinGet('phys.`x`', …)). This is a strict superset of what
-	// rewriteSelectCore's own (still-present, now largely redundant but
-	// harmless) joinGet/dictGet handling reaches, since StringLookupCalls
-	// walks the whole original ast structurally, embedded SELECT bodies
-	// included.
-	//
-	// hasColumnInTable is rewritten only inside a SELECT body
-	// (rewriteSelectCore owns that, reached through StringLookupCalls too but
-	// filtered out below); everywhere else — a CREATE TABLE column
-	// expression, or an ALTER mutation — it is refused with the same
-	// message, since neither position has a rewrite pipeline of its own.
-	generalLookups, err := engine.StringLookupCalls(ast)
-	if err != nil {
-		return nil, false, err
+	// T6 mechanism (b), continued: a {"Raw":{"sql":…}} action embedded
+	// anywhere in the structured AST (e.g. an ALTER TABLE … MODIFY COLUMN …
+	// DEFAULT … action) is likewise opaque text with no structured
+	// "function" node — scanned the same way, independent of the command
+	// node case above (a Raw action is never itself a command node).
+	rawActionLookups, raOK := engine.CollectRawActionStringLookupCalls(e, ast)
+	if !raOK {
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
 	}
-	for _, call := range generalLookups {
-		if isHasColumnInTable(call.Function) {
-			continue
-		}
+	for _, call := range rawActionLookups {
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectInvalid(resp, stringLookupUnresolvedMessage(call))
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
-	alterLookups, err := engine.CollectAlterMutationStringLookups(e, ast, sql)
+	// T6 mechanism (a) (spec 2026-09-26, controller ruling 2 / Task 7 fix
+	// round 2): one generic, deterministic walk over the whole statement's
+	// structured AST finds every string-lookup call reachable through an
+	// actual "function" node — SELECT bodies, INSERT/CTAS/VIEW embedded
+	// bodies, structured UPDATE/DELETE, IN subqueries, CREATE TABLE column
+	// DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL expressions, PARTITION BY/TTL/
+	// CONSTRAINT CHECK expressions, and everywhere else a "function" node can
+	// appear — with no per-position collector needed (this replaces fix
+	// round 1's now-deleted CollectAlterMutationStringLookups/
+	// CollectColumnDefinitionStringLookups). joinGet/dictGet-family calls are
+	// refused wherever found (a strict superset of what rewriteSelectCore's
+	// own, still-present, now largely redundant but harmless joinGet/dictGet
+	// handling reaches). hasColumnInTable is refused everywhere EXCEPT when
+	// StringLookupCalls marks it InSelectBody — reachable from a select/
+	// union/intersect/except subtree — where rewriteSelectCore's own rewrite
+	// pipeline owns it instead.
+	astLookups, err := engine.StringLookupCalls(ast)
 	if err != nil {
 		return nil, false, err
 	}
-	columnLookups, err := engine.CollectColumnDefinitionStringLookups(ast)
-	if err != nil {
-		return nil, false, err
-	}
-	for _, call := range append(alterLookups, columnLookups...) {
+	for _, call := range astLookups {
+		if isHasColumnInTable(call.Function) && call.InSelectBody {
+			continue
+		}
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectInvalid(resp, stringLookupUnresolvedMessage(call))
 		resp.SqlAfterRewrite = sql
