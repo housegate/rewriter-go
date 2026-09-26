@@ -1033,8 +1033,10 @@ func TestTableRef_MutationAndColumnExpressionReads(t *testing.T) {
 		{sql: "CREATE TABLE db1.n (a UInt64, CONSTRAINT c CHECK a IN (SELECT 1 FROM db1.z)) ENGINE = MergeTree ORDER BY a", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree PARTITION BY a IN phys.x ORDER BY a", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
 		{sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a TTL d + 1 WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		// Residual round 3: a reserved qualifier in opaque ALTER text gets the
+		// SI physical-name message while the SI surface is active.
 		{sql: "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM hg_unsafe.db1__t)", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_unsafe"),
-			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_unsafe.db1__t is not directly addressable"},
 		{sql: "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM `db2.x`)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
@@ -1090,7 +1092,9 @@ func TestTableRef_ModifyQueryIsRefused(t *testing.T) {
 		hgSafe := tablerefCase{name: "hg_safe", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t", si: si,
 			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database hg_safe is not addressable"}
 		if si {
-			hgSafe.wantCode, hgSafe.wantMsg = pb.RewriteCode_UnsupportedStatement, "statement is not supported"
+			// Residual round 3: the reserved qualifier in the opaque MODIFY
+			// QUERY text gets the SI physical-name message.
+			hgSafe.wantCode, hgSafe.wantMsg = pb.RewriteCode_UnsupportedStatement, "storage-integrity physical table hg_safe.db1__t is not directly addressable"
 		}
 		cases = append(cases, hgSafe,
 			tablerefCase{name: "phys", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM phys.`db2.x`", si: si,
@@ -1609,6 +1613,69 @@ func TestTableRef_Residual2RefreshPositions(t *testing.T) {
 		} {
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
 		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual3KeywordCallableIn pins residual round 3, open A: a
+// keyword-tokenized callable `in(` / `IN(` is the callable IN form; its SECOND
+// argument is the table operand.
+func TestTableRef_Residual3KeywordCallableIn(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(42, `db2.x`)",
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT IN(42, `db2.x`)",
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (in(42, `db2.x`))",
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (in(42, `db2.x`))",
+			"ALTER TABLE db1.o UPDATE a = in(42, `db2.x`) WHERE 1",
+			"ALTER TABLE db1.o DELETE WHERE in(42, `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE In /* c */ (42, ((`db2.x`)))",
+			"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE in(42, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT in(42, `db2.x`)",
+			"SHOW DICTIONARIES FROM default WHERE in(7, `db2.x`)",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		cases = append(cases, tablerefCase{name: "literal_list_passes", si: si,
+			sql:      "ALTER TABLE db1.o DELETE WHERE in(42, (1, 2))",
+			wantCode: pb.RewriteCode_Success})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual3OpaqueReservedQualifiers pins residual round 3, open
+// B: a reserved hg_* qualifier found by an opaque-text scan is refused with the
+// SI physical-name message when the SI surface is active, and with the
+// protected-database message when it is not.
+func TestTableRef_Residual3OpaqueReservedQualifiers(t *testing.T) {
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, db, table string }{
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(7, hg_safe.db1__t) + 100", "hg_safe", "db1__t"},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(7, hg_unsafe.db1__t) + 100", "hg_unsafe", "db1__t"},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(7, hg_promote.x)", "hg_promote", "x"},
+		{"SHOW DICTIONARIES FROM default WHERE in(7, hg_safe.db1__t)", "hg_safe", "db1__t"},
+		{"SHOW FULL DICTIONARIES FROM default WHERE in(7, hg_unsafe.db1__t)", "hg_unsafe", "db1__t"},
+		{"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT in(7, hg_promote.x)", "hg_promote", "x"},
+	} {
+		cases = append(cases,
+			tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_InvalidRewriteRequest,
+				wantMsg: "protected database " + c.db + " is not addressable", wantSQL: c.sql},
+			tablerefCase{name: "si/" + c.sql, sql: c.sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement,
+				wantMsg: "storage-integrity physical table " + c.db + "." + c.table + " is not directly addressable", wantSQL: c.sql})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual3SettingsBackstopNeedsAssignment pins the residual
+// round 3 minor: the backstop needs `name =` after SETTINGS, so column aliases
+// named settings / dialect pass.
+func TestTableRef_Residual3SettingsBackstopNeedsAssignment(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases, tablerefCase{name: "aliases", si: si, sql: "SELECT 1 AS settings, 2 AS dialect",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SELECT 1 AS settings, 2 AS dialect"})
 	}
 	runTablerefCases(t, cases)
 }

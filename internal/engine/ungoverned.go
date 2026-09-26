@@ -154,6 +154,30 @@ func OpaqueAlterTexts(ast AST) ([]string, error) {
 	}
 }
 
+// OpaqueTextQualifiedNames returns, in token order, every `db.table` run in
+// an opaque text (the table half of a longer run is not a qualifier).
+// ok=false means the text could not be tokenized.
+func OpaqueTextQualifiedNames(e Engine, text string) (names []TableTarget, ok bool) {
+	toks, err := tokenizeRaw(e, text)
+	if err != nil {
+		return nil, false
+	}
+	return qualifiedNameRuns(toks, 0), true
+}
+
+func qualifiedNameRuns(toks []rawToken, from int) []TableTarget {
+	var out []TableTarget
+	for i := from; i+2 < len(toks); i++ {
+		if isNameTok(toks[i].TokenType) && toks[i+1].TokenType == "DOT" && isNameTok(toks[i+2].TokenType) {
+			if i > 0 && toks[i-1].TokenType == "DOT" {
+				continue
+			}
+			out = append(out, TableTarget{DB: toks[i].Text, Table: toks[i+2].Text})
+		}
+	}
+	return out
+}
+
 // OpaqueTextDatabases returns, in token order, the qualifier of every
 // `name.name` run in an opaque ALTER text, so the T3 protected-database check
 // covers a name the structured walker cannot see. ok=false means the text
@@ -197,7 +221,7 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 		return opaqueProjectionIsUngoverned(toks)
 	}
 	for i, tok := range toks {
-		if opaqueCallableInHasTable(toks, i) {
+		if OpaqueInTableAt(toks, i) {
 			return true
 		}
 		if !opaqueKeyword(tok) {
@@ -211,10 +235,6 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 				continue // ALTER … FREEZE WITH NAME 'x'
 			}
 			return true
-		case "IN":
-			if opaqueInOperandIsTable(toks, i+1) {
-				return true
-			}
 		}
 	}
 	for _, segment := range opaqueActionSegments(toks) {
@@ -241,14 +261,61 @@ func isCallableInName(tok rawToken) bool {
 	return ok
 }
 
-// opaqueCallableInHasTable reports a callable IN-family call at toks[i]
-// (bare or quoted name) whose second argument is a table operand.
-func opaqueCallableInHasTable(toks []rawToken, i int) bool {
-	if !isCallableInName(toks[i]) || i+1 >= len(toks) || toks[i+1].TokenType != "L_PAREN" {
+// OpaqueInTableAt is the one IN rule every opaque-text scanner applies at
+// toks[i] (spec 2026-09-26 R2 / R7, residual round 3). It covers every
+// spelling:
+//
+//   - the infix keyword IN (NOT IN / GLOBAL [NOT] IN end in the same token)
+//     whose operand is an identifier, quoted identifier, parameter, or any
+//     number of opening parentheses followed by one of those;
+//   - the callable form — the IN keyword immediately followed by "(" (`in(`,
+//     `IN(`: bare `in` lexes as the keyword) as well as every IN-family
+//     function name (in, notIn, globalIn, globalNotIn, nullIn, notNullIn,
+//     globalNullIn, globalNotNullIn and their IgnoreSet aliases) as a VAR or
+//     QUOTED_IDENTIFIER in any case — whose SECOND top-level argument is such
+//     an operand. The tokenizer has already dropped comments and whitespace.
+//
+// An IN keyword followed by "(" is the callable form when it starts an
+// expression (the previous token does not end an operand) and the infix form
+// otherwise, so `a IN (1, 2)` and `in(a, (1, 2))` both pass. A subquery
+// operand counts as a table read. An unterminated call is a table operand
+// (fail closed).
+func OpaqueInTableAt(toks []rawToken, i int) bool {
+	tok := toks[i]
+	inKeyword := tok.TokenType != "STRING" && tok.TokenType != "QUOTED_IDENTIFIER" && tok.TokenType != "VAR" &&
+		strings.EqualFold(tok.Text, "IN")
+	if inKeyword && !(i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" && !opaqueOperandEndsBefore(toks, i)) {
+		// Infix IN: its right operand.
+		return opaqueInOperandIsTable(toks, i+1)
+	}
+	if !(inKeyword || isCallableInName(tok)) || i+1 >= len(toks) || toks[i+1].TokenType != "L_PAREN" {
 		return false
 	}
 	groups, ok := rawCallArgGroups(toks, i+1)
-	return ok && len(groups) == 2 && len(groups[1]) > 0 && opaqueInOperandIsTable(groups[1], 0)
+	if !ok {
+		return true
+	}
+	return len(groups) >= 2 && opaqueInOperandIsTable(groups[1], 0)
+}
+
+// opaqueOperandEndsBefore reports whether the token before toks[i] ends an
+// operand — so an IN keyword at i is the infix operator, not a call: an
+// identifier, literal, closing bracket, or the NOT / GLOBAL of NOT IN /
+// GLOBAL IN.
+func opaqueOperandEndsBefore(toks []rawToken, i int) bool {
+	if i == 0 {
+		return false
+	}
+	prev := toks[i-1]
+	switch prev.TokenType {
+	case "VAR", "QUOTED_IDENTIFIER", "NUMBER", "STRING", "R_PAREN", "R_BRACKET", "R_BRACE":
+		return true
+	}
+	switch strings.ToUpper(prev.Text) {
+	case "NOT", "GLOBAL", "NULL", "TRUE", "FALSE":
+		return true
+	}
+	return false
 }
 
 // opaqueInOperandIsTable reports whether the tokens starting at i form a table
@@ -261,6 +328,9 @@ func opaqueInOperandIsTable(toks []rawToken, i int) bool {
 	}
 	if i >= len(toks) {
 		return false
+	}
+	if opaqueKeyword(toks[i]) && (strings.EqualFold(toks[i].Text, "SELECT") || strings.EqualFold(toks[i].Text, "WITH")) {
+		return true // a subquery operand reads a table
 	}
 	switch {
 	case toks[i].TokenType == "L_BRACE":
@@ -351,7 +421,7 @@ func opaqueProjectionBody(toks []rawToken) bool {
 func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 	selects := 0
 	for i, tok := range toks {
-		if opaqueCallableInHasTable(toks, i) {
+		if OpaqueInTableAt(toks, i) {
 			return true
 		}
 		if !opaqueKeyword(tok) {
@@ -362,10 +432,6 @@ func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 			selects++
 		case "WITH", "FROM", "JOIN":
 			return true
-		case "IN":
-			if opaqueInOperandIsTable(toks, i+1) {
-				return true
-			}
 		}
 	}
 	return selects > 1
@@ -519,7 +585,7 @@ func OpaqueInsertQueryIsUngoverned(e Engine, text string) bool {
 	}
 	selects := 0
 	for i, tok := range toks {
-		if opaqueCallableInHasTable(toks, i) {
+		if OpaqueInTableAt(toks, i) {
 			return true
 		}
 		if tok.TokenType != "STRING" && IsStringLookup(tok.Text) && i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
@@ -533,10 +599,6 @@ func OpaqueInsertQueryIsUngoverned(e Engine, text string) bool {
 			return true
 		case "SELECT":
 			selects++
-		case "IN":
-			if opaqueInOperandIsTable(toks, i+1) {
-				return true
-			}
 		}
 	}
 	return selects > 1

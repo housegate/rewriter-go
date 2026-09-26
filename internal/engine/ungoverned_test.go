@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestOpaqueTextIsUngoverned(t *testing.T) {
 	e := newTestEngine(t)
@@ -92,6 +95,72 @@ func TestExpressionPositionHasReads(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("ExpressionPositionHasReads(%s) = %v, want %v", sql, got, want)
+		}
+	}
+}
+
+// TestOpaqueInRuleCoversEverySpelling closes the IN class for every opaque
+// scanner (spec 2026-09-26 residual round 3): spelling (infix keyword,
+// keyword-callable, every callable IN-family name bare / quoted / mixed case,
+// a comment or whitespace before "(") × operand form × position. A table
+// operand is refused in every combination; a literal list passes — except in
+// a SHOW body, where every named function call is refused by the SHOW rule
+// (only the keyword spellings reach the literal-list case there).
+func TestOpaqueInRuleCoversEverySpelling(t *testing.T) {
+	e := newTestEngine(t)
+	type spelling struct {
+		form    string // %s = operand
+		keyword bool   // infix or keyword-callable (no named call)
+	}
+	spellings := []spelling{
+		{"a IN %s", true}, {"a NOT IN %s", true}, {"a GLOBAL IN %s", true}, {"a GLOBAL NOT IN %s", true},
+		{"in(a, %s)", true}, {"IN(a, %s)", true}, {"In /* c */ (a, %s)", true}, {"in  (a, %s)", true},
+	}
+	for _, name := range []string{"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn",
+		"globalNullIn", "globalNotNullIn", "inIgnoreSet", "NOTIN", "GlobalNotIn"} {
+		if name != "in" { // bare in( lexes as the IN keyword: the keyword-callable rows above
+			spellings = append(spellings, spelling{name + "(a, %s)", false})
+		}
+		spellings = append(spellings, spelling{"`" + name + "`(a, %s)", false}, spelling{`"` + name + `"(a, %s)`, false})
+	}
+	tables := []string{"p", "db1.p", "`db2.x`", "{p:Identifier}", "((db1.p))", "(`db2.x`)", "(SELECT 1)"}
+	const literalList = "(1, 2)"
+	type position struct {
+		name  string
+		wrap  string // %s = expression
+		check func(string) bool
+	}
+	positions := []position{
+		{"alter update", "ALTER TABLE db1.o UPDATE b = %s WHERE 1", func(s string) bool { return OpaqueTextIsUngoverned(e, s) }},
+		{"alter delete", "DELETE WHERE %s", func(s string) bool { return OpaqueTextIsUngoverned(e, s) }},
+		{"modify ttl", "MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE %s", func(s string) bool { return OpaqueTextIsUngoverned(e, s) }},
+		{"modify column default", "MODIFY COLUMN b UInt8 DEFAULT %s", func(s string) bool { return OpaqueTextIsUngoverned(e, s) }},
+		{"insert select", "SETTINGS max_threads = 1 SELECT %s", func(s string) bool { return OpaqueInsertQueryIsUngoverned(e, s) }},
+		{"insert values", "SETTINGS max_threads = 1 VALUES (%s)", func(s string) bool { return OpaqueInsertQueryIsUngoverned(e, s) }},
+		{"show body", "SHOW DICTIONARIES FROM default WHERE %s", func(s string) bool {
+			info, err := ParseDBLevel(e, s)
+			if err != nil {
+				return true
+			}
+			return ShowBodyIsUngoverned(e, info, s)
+		}},
+	}
+	for _, pos := range positions {
+		for _, sp := range spellings {
+			for _, table := range tables {
+				text := fmt.Sprintf(pos.wrap, fmt.Sprintf(sp.form, table))
+				if !pos.check(text) {
+					t.Errorf("%s: %q passed, want refused", pos.name, text)
+				}
+			}
+			text := fmt.Sprintf(pos.wrap, fmt.Sprintf(sp.form, literalList))
+			want := false
+			if pos.name == "show body" && !sp.keyword {
+				want = true
+			}
+			if got := pos.check(text); got != want {
+				t.Errorf("%s: %q ungoverned=%v, want %v", pos.name, text, got, want)
+			}
 		}
 	}
 }

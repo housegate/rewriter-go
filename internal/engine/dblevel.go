@@ -349,17 +349,17 @@ func ShowBodyIsUngoverned(e Engine, info DBLevelInfo, sql string) bool {
 		if tok.TokenType == "L_BRACE" {
 			return true
 		}
-		if opaqueKeyword(tok) && strings.EqualFold(tok.Text, "IN") && opaqueInOperandIsTable(toks, i+1) {
+		if OpaqueInTableAt(toks, i) {
 			return true
 		}
 	}
 	return false
 }
 
-// ShowBodyDatabases returns the qualifier of every `name.name` run in a
-// verbatim-forwarded SHOW statement's trailing clauses, for the T3 protected
-// check (the target itself is collected from ParseDBLevel).
-func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
+// ShowBodyQualifiedNames returns every `db.table` run in a verbatim-forwarded
+// SHOW statement's trailing clauses (the target itself is collected from
+// ParseDBLevel).
+func ShowBodyQualifiedNames(e Engine, info DBLevelInfo, sql string) []TableTarget {
 	if !showForwardedVerbatim(info) {
 		return nil
 	}
@@ -367,12 +367,16 @@ func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
 	if err != nil {
 		return nil
 	}
+	return qualifiedNameRuns(toks, showBodyStart(toks))
+}
+
+// ShowBodyDatabases returns the qualifier of every `name.name` run in a
+// verbatim-forwarded SHOW statement's trailing clauses, for the T3 protected
+// check.
+func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
 	var dbs []string
-	for i := showBodyStart(toks); i+2 < len(toks); i++ {
-		if isNameTok(toks[i].TokenType) && toks[i+1].TokenType == "DOT" && isNameTok(toks[i+2].TokenType) &&
-			toks[i-1].TokenType != "DOT" {
-			dbs = append(dbs, toks[i].Text)
-		}
+	for _, tt := range ShowBodyQualifiedNames(e, info, sql) {
+		dbs = append(dbs, tt.DB)
 	}
 	return dbs
 }

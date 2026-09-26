@@ -46,9 +46,11 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		TableRewrites: map[string]string{},
 	}
 	sel := nameresolve.FindActive(opts)
-	// selectSQL is the statement's source text when the caller has it (a
-	// top-level SELECT); an embedded body passes none, and its enclosing
-	// write statement's text was already checked by the write preflight.
+	// selectSQL is the source text the caller passes: the statement's own
+	// text for a top-level SELECT, and the enclosing write statement's text
+	// for an embedded INSERT … SELECT / CTAS / CREATE VIEW body
+	// (dispatchView and rewriteEmbeddedBody pass it). It feeds only the
+	// token-level checks in rejectUngovernedReads.
 	selectSQL := ""
 	if len(sourceSQL) > 0 {
 		selectSQL = sourceSQL[0]

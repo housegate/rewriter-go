@@ -238,6 +238,9 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 			return rejected, err
 		}
 	}
+	if rejected, err := rejectOpaqueReservedQualifiers(e, ast, sel, resp); err != nil || rejected {
+		return rejected, err
+	}
 	reads, err := engine.ExpressionPositionHasReads(ast)
 	if err != nil {
 		return false, err
@@ -444,4 +447,43 @@ func commandClassModelled(e engine.Engine, ast engine.AST, sql string, sel namer
 	}
 	_, isSet, _ := engine.SessionSettingAssignments(e, sql)
 	return isSet
+}
+
+// rejectOpaqueReservedQualifiers refuses a storage-integrity physical or
+// reserved database (hg_safe / hg_unsafe / hg_promote) named by a qualified
+// name in opaque text — an ALTER … UPDATE tail, a Raw ALTER action, or the
+// query text polyglot leaves after an INSERT column list — while the SI
+// surface is active (spec 2026-09-26 residual round 3). T3 defers those names
+// to the SI handlers, which never see opaque text, so the refusal carries the
+// SI handlers' physical-name message here. With the surface inactive T3
+// already refused them as protected databases.
+func rejectOpaqueReservedQualifiers(e engine.Engine, ast engine.AST, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (bool, error) {
+	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+		return false, nil
+	}
+	texts, err := engine.OpaqueAlterTexts(ast)
+	if err != nil {
+		return false, err
+	}
+	if text, ok, ierr := engine.OpaqueInsertQueryText(ast); ierr != nil {
+		return false, ierr
+	} else if ok {
+		texts = append(texts, text)
+	}
+	for _, text := range texts {
+		names, ok := engine.OpaqueTextQualifiedNames(e, text)
+		if !ok {
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+			return true, nil
+		}
+		for _, tt := range names {
+			if nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
+				recordAccessedWrite(resp, tt, sel)
+				resp.Code = pb.RewriteCode_UnsupportedStatement
+				resp.Message = nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table))
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

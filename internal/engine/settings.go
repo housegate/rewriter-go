@@ -123,7 +123,7 @@ func settingsListEnd(tok rawToken) bool {
 
 // SettingsBackstop is a token-level backstop for R5 (spec 2026-09-26): it
 // reports the first SQL-bearing or dialect setting name (quoted or not, any
-// case) that appears anywhere after a SETTINGS keyword in sql, so no AST shape
+// case) assigned (`name =`) anywhere after a SETTINGS keyword in sql, so no AST shape
 // can hide one from the structured check. A tokenizer failure reports
 // hit=false: the structured checks and the fail-closed tokenizer paths
 // elsewhere still apply.
@@ -138,15 +138,14 @@ func SettingsBackstop(e Engine, sql string) (name string, hit bool) {
 		return "", false
 	}
 	seen := false
-	for _, tok := range toks {
+	for i, tok := range toks {
 		if !seen {
 			seen = opaqueKeyword(tok) && strings.EqualFold(tok.Text, "SETTINGS")
 			continue
 		}
-		if tok.TokenType == "STRING" {
-			continue
-		}
-		if SQLBearingSetting(tok.Text) {
+		// An assignment: the denylisted name must be followed by "=", so a
+		// column alias named settings / dialect is not a setting.
+		if tok.TokenType != "STRING" && SQLBearingSetting(tok.Text) && i+1 < len(toks) && toks[i+1].TokenType == "EQ" {
 			return tok.Text, true
 		}
 	}

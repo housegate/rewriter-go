@@ -322,8 +322,8 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if rejectShowTargetStorageIntegrityNamespace(resp, sql, info, dyn) {
 			return resp, true, nil
 		}
-		if engine.ShowBodyIsUngoverned(e, info, sql) {
-			return rejectShowBody(sql, resp)
+		if r, rejected := showBodyRejection(e, info, sql, dyn, resp); rejected {
+			return r, true, nil
 		}
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
@@ -345,8 +345,8 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		}
 		return passthroughDB(e, ast, sql, resp)
 	case showTargetLess:
-		if engine.ShowBodyIsUngoverned(e, info, sql) {
-			return rejectShowBody(sql, resp)
+		if r, rejected := showBodyRejection(e, info, sql, dyn, resp); rejected {
+			return r, true, nil
 		}
 		return passthroughDB(e, ast, sql, resp)
 	case showUnknown:
@@ -596,4 +596,28 @@ func rejectShowBody(sql string, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResp
 	resp.SqlAfterRewrite = sql
 	rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
 	return resp, true, nil
+}
+
+// showBodyRejection refuses a verbatim-forwarded SHOW statement whose trailing
+// clauses name a storage-integrity physical or reserved database while the SI
+// surface is active (T3 defers those names to the SI handlers, which never see
+// the SHOW body), with the SI physical-name message; then one whose trailing
+// clauses carry SQL that could read a table.
+func showBodyRejection(e engine.Engine, info engine.DBLevelInfo, sql string, dyn *pb.RewriteTableDynamicArgs, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool) {
+	if nameresolve.StorageIntegritySurfaceActive(dyn) {
+		for _, tt := range engine.ShowBodyQualifiedNames(e, info, sql) {
+			if nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, dyn) {
+				recordAccessedStorageIntegrityPhysicalTable(resp, tt.DB, tt.Table)
+				resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+				resp.SqlAfterRewrite = sql
+				rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table)))
+				return resp, true
+			}
+		}
+	}
+	if engine.ShowBodyIsUngoverned(e, info, sql) {
+		r, _, _ := rejectShowBody(sql, resp)
+		return r, true
+	}
+	return nil, false
 }
