@@ -15,7 +15,7 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 	if sel.Mode != nameresolve.ModeDynamic {
 		return nil, false, nil
 	}
-	hit, err := engine.TablePositionParameter(ast)
+	hit, err := engine.TablePositionParameter(e, ast, sql)
 	if err != nil {
 		return nil, false, err
 	}

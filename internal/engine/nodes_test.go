@@ -1171,7 +1171,7 @@ func TestCollectEmbeddedReadSources_InTableOperandsRespectCTEScopeAndParameterOp
 	if err != nil {
 		t.Fatal(err)
 	}
-	hit, err := TablePositionParameter(ast)
+	hit, err := TablePositionParameter(e, ast, sql)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1320,7 +1320,7 @@ func TestCollectEmbeddedReadSources_QualifiedParameterTargetIsReported(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	hit, err := TablePositionParameter(ast)
+	hit, err := TablePositionParameter(e, ast, sql)
 	if err != nil {
 		t.Fatal(err)
 	}

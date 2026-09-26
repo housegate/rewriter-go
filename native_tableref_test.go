@@ -104,6 +104,9 @@ func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
 			"RENAME TABLE db1.{p:Identifier} TO db1.z",
 			"SHOW TABLES FROM {d:Identifier}",
 			"USE {d:Identifier}",
+			"ALTER TABLE db1.{p:Identifier} UPDATE a = 1 WHERE 1",
+			"CREATE DATABASE {d:Identifier}",
+			"DROP DATABASE {d:Identifier}",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg, wantSQL: sql})
@@ -112,10 +115,38 @@ func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
 	runTablerefCases(t, cases)
 }
 
+// TestTableRef_CommentBypassAttemptsAreRefused pins the exact concrete bypass
+// SQLs from the controller review of this task: a prior hand-rolled command-
+// text scanner recognized "--" and "/* */" but not "#", "#!" or "//" as
+// comment openers, so it treated the "'" inside "it's" as an opening quote and
+// swallowed the genuine parameter that followed as if it were unterminated
+// string content. The tokenizer-based scan in IdentifierParameterInText
+// recognizes all five ClickHouse comment openers regardless of what they
+// contain, so each of these must still be refused.
+func TestTableRef_CommentBypassAttemptsAreRefused(t *testing.T) {
+	const msg = "query parameters are not supported in a database or table position"
+	runTablerefCases(t, []tablerefCase{
+		{name: "exists_line_comment_slash_slash", sql: "EXISTS TABLE // it's\n db1.{p:Identifier}",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+		{name: "exists_line_comment_hash", sql: "EXISTS TABLE # it's\n db1.{p:Identifier}",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+		{name: "describe_line_comment_slash_slash", sql: "DESCRIBE TABLE // it's\n db1.{p:Identifier}",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+		{name: "show_create_line_comment_hash_bang", sql: "SHOW CREATE TABLE #! it's\n db1.{p:Identifier}",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+	})
+}
+
 func TestTableRef_ValueAndColumnParametersStayAllowed(t *testing.T) {
 	runTablerefCases(t, []tablerefCase{
 		{name: "value", sql: "SELECT * FROM db1.o WHERE a = {v:UInt64}", wantCode: pb.RewriteCode_Success,
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a = {v: UInt64}`},
 		{name: "column", sql: "SELECT {c:Identifier} FROM db1.o", wantCode: pb.RewriteCode_Success},
+		// Controller review (task-3 fix round), ruling 2: an ALTER ... UPDATE
+		// statement's assignment/predicate tail is a column/value position, not
+		// a table position -- only the target (between ALTER TABLE and UPDATE)
+		// is refused. The target itself still rewrites normally.
+		{name: "alter_update_assignment", sql: "ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1", wantCode: pb.RewriteCode_Success,
+			wantSQL: "ALTER TABLE phys.`db1.o` UPDATE a = {c:Identifier} WHERE 1"},
 	})
 }

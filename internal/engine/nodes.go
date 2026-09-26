@@ -2080,7 +2080,18 @@ func unresolvedIdentifierNode(node any) bool {
 	}
 	quoted, _ := m["quoted"].(bool)
 	name, _ := m["name"].(string)
-	if quoted || len(name) < len("{x: Identifier}") || name[0] != '{' || name[len(name)-1] != '}' {
+	if quoted {
+		return false
+	}
+	return looksLikeUnresolvedIdentifierName(name)
+}
+
+// looksLikeUnresolvedIdentifierName is unresolvedIdentifierNode's name-pattern
+// check ("{x: Identifier}"), factored out so a caller holding only the decoded
+// name string (e.g. DatabaseTarget's return, which has already thrown away the
+// node's "quoted" flag) can still recognize the same flattened shape.
+func looksLikeUnresolvedIdentifierName(name string) bool {
+	if len(name) < len("{x: Identifier}") || name[0] != '{' || name[len(name)-1] != '}' {
 		return false
 	}
 	colon := strings.LastIndexByte(name, ':')
