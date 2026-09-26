@@ -1134,3 +1134,65 @@ func TestTableRef_MaterializedViewStorageAllowlists(t *testing.T) {
 	cases = append(cases, regexp)
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_SQLBearingSettings pins spec 2026-09-26 R5 (final review
+// Critical 5, Minor SET subquery): a SQL-bearing setting is refused with the
+// table-setting message wherever it appears, and a setting value must be a
+// numeric literal, a string literal or a bare identifier / keyword.
+func TestTableRef_SQLBearingSettings(t *testing.T) {
+	const unsupported = "statement is not supported"
+	setting := func(name string) string { return "table setting " + name + " is not accepted" }
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"SELECT * FROM db1.o SETTINGS additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}", setting("additional_table_filters")},
+			{"SELECT * FROM db1.o SETTINGS additional_result_filter = 'a = (SELECT max(a) FROM `db2.x`)'", setting("additional_result_filter")},
+			{"SELECT * FROM db1.o SETTINGS parallel_replicas_custom_key = 'a'", setting("parallel_replicas_custom_key")},
+			{"SELECT * FROM db1.o SETTINGS max_threads = 1, additional_result_filter = 'a > 1'", setting("additional_result_filter")},
+			{"SELECT a FROM db1.o UNION ALL SELECT a FROM db1.p SETTINGS additional_result_filter = 'a > 1'", setting("additional_result_filter")},
+			{"INSERT INTO db1.o SELECT * FROM db1.p SETTINGS additional_table_filters = {'db1.p': 'a > 1'}", setting("additional_table_filters")},
+			{"INSERT INTO db1.o SETTINGS additional_result_filter = 'a > 1' VALUES (1)", setting("additional_result_filter")},
+			{"ALTER TABLE db1.o UPDATE b = 1 WHERE 1 SETTINGS additional_table_filters = '{}'", setting("additional_table_filters")},
+			{"SELECT * FROM db1.o SETTINGS max_threads = (SELECT 1)", unsupported},
+			{"SELECT * FROM db1.o SETTINGS max_threads = [1]", unsupported},
+		} {
+			msg := c.msg
+			if si && strings.HasPrefix(c.sql, "ALTER") {
+				// The SI mutation-surface probe cannot model a SETTINGS
+				// tail and refuses first (SI precedence).
+				msg = unsupported
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT * FROM db1.o SETTINGS max_threads = 1", `SELECT * FROM phys."db1.o" "db1.o" SETTINGS max_threads = 1`},
+			{"SELECT * FROM db1.o SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random",
+				`SELECT * FROM phys."db1.o" "db1.o" SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	// The session SET carve-out exists only while the SI surface is inactive.
+	for _, c := range []struct{ sql, msg string }{
+		{"SET additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}", setting("additional_table_filters")},
+		{"SET max_threads = 1, additional_result_filter = 'a > 1'", setting("additional_result_filter")},
+		{"SET max_threads = (SELECT count() FROM phys.`db2.x`)", unsupported},
+		{"SET max_threads = [1]", unsupported},
+		{"SET max_threads = 1 + 1", unsupported},
+		{"SET max_threads = {p:UInt64}", unsupported},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+	}
+	for _, sql := range []string{
+		"SET max_threads = 1",
+		"SET max_threads = 1, max_block_size = 'a', load_balancing = random",
+		"SET max_threads = -1, enable_optimize_predicate_expression = true, x = NULL",
+	} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_Success, wantSQL: sql})
+		cases = append(cases, tablerefCase{name: "si/" + sql, sql: sql, si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+	}
+	runTablerefCases(t, cases)
+}

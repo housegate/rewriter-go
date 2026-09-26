@@ -288,11 +288,17 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		finalize(resp, ast, sql, ec, siVersion, e, selection)
 		return resp, nil
 	}
-	if selection.Mode == nameresolve.ModeDynamic && !isSessionSet(e, ast) {
-		resp.Code = pb.RewriteCode_UnsupportedStatement
-		resp.Message = engine.UnsupportedStatementMessage
-		finalize(resp, ast, sql, ec, siVersion, e, selection)
-		return resp, nil
+	if selection.Mode == nameresolve.ModeDynamic {
+		isSet, refused, code, msg := sessionSet(e, ast)
+		if !isSet || refused {
+			resp.Code = pb.RewriteCode_UnsupportedStatement
+			resp.Message = engine.UnsupportedStatementMessage
+			if refused {
+				resp.Code, resp.Message = code, msg
+			}
+			finalize(resp, ast, sql, ec, siVersion, e, selection)
+			return resp, nil
+		}
 	}
 	if gen, gerr := e.Generate(ast); gerr == nil && gen != "" {
 		resp.SqlAfterRewrite = gen
@@ -302,23 +308,23 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	return resp, nil
 }
 
-// isSessionSet reports a top-level settings-assignment SET statement.
-// Measured 2026-09-26: the pinned polyglot renders `SET max_threads = 1` as
-// {"command": {"this": "SET max_threads = 1"}}, so the check reads the
-// command text. Task 7 fix round 1 finding 4: the carve-out must admit only
-// a settings assignment, not every statement that starts with the SET
-// keyword — SET ROLE r1 and SET DEFAULT ROLE r1 TO u1 are access-management
-// statements this repo does not model and must still be refused.
-// engine.IsSessionSettingAssignment tokenizes the text (whitespace-aware, so
-// `SET\tmax_threads = 1` qualifies too) and requires the token after SET to
-// be an identifier that is neither ROLE nor DEFAULT, followed by "=".
-func isSessionSet(e engine.Engine, ast engine.AST) bool {
+// sessionSet classifies a top-level session SET statement for the T7
+// carve-out (spec 2026-09-26 T7, R5). Measured 2026-09-26: the pinned
+// polyglot renders `SET max_threads = 1` as {"command": {"this": "SET
+// max_threads = 1"}}, so the check reads the command text. Only a settings
+// assignment qualifies — SET ROLE r1 and SET DEFAULT ROLE r1 TO u1 are
+// access-management statements this repo does not model (isSet=false) — and
+// the carve-out admits it only when every assignment is `<name> = <value>`
+// with a numeric literal, string literal or bare identifier / keyword value
+// and no SQL-bearing setting name (refused=true otherwise, with the code and
+// message to return).
+func sessionSet(e engine.Engine, ast engine.AST) (isSet, refused bool, code pb.RewriteCode, msg string) {
 	kind, _ := engine.NodeKind(ast)
 	if kind != engine.NodeCommand {
-		return false
+		return false, false, pb.RewriteCode_Success, ""
 	}
 	text, _ := engine.CommandSQL(ast)
-	return engine.IsSessionSettingAssignment(e, text)
+	return handlers.CheckSessionSet(e, text)
 }
 
 func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {

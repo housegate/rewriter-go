@@ -225,29 +225,3 @@ func firstDotSegment(s string) string {
 	}
 	return s
 }
-
-// IsSessionSettingAssignment reports whether text (the raw SQL of a
-// `command` node) is a session settings assignment: SET <name> = … (spec
-// 2026-09-26 T7, Task 7 fix round 1 finding 4). Tokenized rather than matched
-// against a literal "SET " prefix so any whitespace between SET and the
-// setting name qualifies — a tab, not just one ASCII space. SET ROLE … and
-// SET DEFAULT ROLE … TO … are access-management statements this repo does
-// not model, not settings assignments, and must not qualify even though they
-// share the SET keyword: the token right after SET must be an identifier
-// that is neither ROLE nor DEFAULT, and the token after THAT must be "=".
-func IsSessionSettingAssignment(e Engine, text string) bool {
-	toks, err := tokenizeRaw(e, text)
-	if err != nil || len(toks) < 3 {
-		return false
-	}
-	if !strings.EqualFold(toks[0].Text, "SET") {
-		return false
-	}
-	if !isNameTok(toks[1].TokenType) {
-		return false
-	}
-	if strings.EqualFold(toks[1].Text, "ROLE") || strings.EqualFold(toks[1].Text, "DEFAULT") {
-		return false
-	}
-	return toks[2].TokenType == "EQ" || toks[2].Text == "="
-}

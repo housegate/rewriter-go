@@ -192,9 +192,10 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
-	// Reads in positions no rewrite pipeline reaches (R2). While the SI
-	// surface is active the SI handlers run this same check after their own
-	// namespace policy, so an SI-owned message keeps precedence.
+	// SQL-bearing settings (R5) and reads in positions no rewrite pipeline
+	// reaches (R2). While the SI surface is active the SI handlers run these
+	// same checks after their own namespace policy, so an SI-owned message
+	// keeps precedence.
 	if !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		if rejected, rerr := rejectUngovernedReads(e, ast, resp); rerr != nil {
@@ -219,6 +220,9 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 // PreflightTableReferences (SI surface inactive) and the SI-active handler
 // paths.
 func rejectUngovernedReads(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLResponse) (bool, error) {
+	if rejected, err := rejectSQLBearingSettings(e, ast, resp); err != nil || rejected {
+		return rejected, err
+	}
 	reads, err := engine.ExpressionPositionHasReads(ast)
 	if err != nil {
 		return false, err
@@ -283,4 +287,84 @@ func rejectDisallowedCarriers(e engine.Engine, ast engine.AST, resp *pb.RewriteS
 		}
 	}
 	return false, nil
+}
+
+// rejectSQLBearingSettings applies spec 2026-09-26 R5 to every query-level
+// SETTINGS clause of a statement — structured (a SELECT / set operation /
+// INSERT, including an embedded body) or opaque (a command node's text, a Raw
+// ALTER action): a SQL-bearing setting name (engine.SQLBearingSetting) is
+// refused with the T5 table-setting message, and any value other than a
+// numeric literal, a string literal or a bare identifier / keyword with
+// "statement is not supported". A session SET statement is checked by the
+// SET carve-out instead (CheckSessionSet).
+func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLResponse) (bool, error) {
+	assignments, err := engine.QuerySettings(ast)
+	if err != nil {
+		return false, err
+	}
+	var texts []string
+	if kind, kerr := engine.NodeKind(ast); kerr != nil {
+		return false, kerr
+	} else if kind == engine.NodeCommand {
+		text, cerr := engine.CommandSQL(ast)
+		if cerr != nil {
+			return false, cerr
+		}
+		if _, isSet, _ := engine.SessionSettingAssignments(e, text); !isSet {
+			texts = append(texts, text)
+		}
+	} else {
+		opaque, oerr := engine.OpaqueAlterTexts(ast)
+		if oerr != nil {
+			return false, oerr
+		}
+		texts = append(texts, opaque...)
+	}
+	for _, text := range texts {
+		raw, ok := engine.RawSettingsClauses(e, text)
+		assignments = append(assignments, raw...)
+		if !ok {
+			assignments = append(assignments, engine.SettingAssignment{})
+		}
+	}
+	if code, msg, bad := settingsVerdict(assignments); bad {
+		resp.Code, resp.Message = code, msg
+		return true, nil
+	}
+	return false, nil
+}
+
+// settingsVerdict returns the first refusal among assignments, in order: a
+// SQL-bearing name wins over a non-plain value of the same assignment.
+func settingsVerdict(assignments []engine.SettingAssignment) (pb.RewriteCode, string, bool) {
+	for _, a := range assignments {
+		if engine.SQLBearingSetting(a.Name) {
+			return pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(a.Name), true
+		}
+		if !a.PlainValue {
+			return pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage, true
+		}
+	}
+	return pb.RewriteCode_Success, "", false
+}
+
+// CheckSessionSet applies the SET carve-out rule (spec 2026-09-26 T7, R5) to
+// a command node's text. isSet=false means the text is not a session
+// settings assignment (not SET, or SET ROLE / SET DEFAULT ROLE) and the
+// carve-out does not apply. Otherwise refused reports a SET the carve-out
+// does not admit, with its code and message: a SQL-bearing setting name, a
+// value that is not a numeric literal, string literal or bare identifier /
+// keyword, or an assignment list that does not parse.
+func CheckSessionSet(e engine.Engine, text string) (isSet, refused bool, code pb.RewriteCode, msg string) {
+	assignments, isSet, wellFormed := engine.SessionSettingAssignments(e, text)
+	if !isSet {
+		return false, false, pb.RewriteCode_Success, ""
+	}
+	if code, msg, bad := settingsVerdict(assignments); bad {
+		return true, true, code, msg
+	}
+	if !wellFormed {
+		return true, true, pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+	}
+	return true, false, pb.RewriteCode_Success, ""
 }
