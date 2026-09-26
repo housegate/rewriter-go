@@ -36,6 +36,8 @@ func TestTableEngineAllowed(t *testing.T) {
 		{"ReplicatedMergeTree", 2, false},
 		{"Buffer", 0, false},
 		{"Frob", 0, false},
+		{"memory", 0, false},
+		{"mergetree", 0, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -43,6 +45,26 @@ func TestTableEngineAllowed(t *testing.T) {
 				t.Fatalf("TableEngineAllowed(%q, %d) = %v, want %v", c.name, c.argCount, got, c.want)
 			}
 		})
+	}
+}
+
+func TestClassifyTableEngine(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		argCount int
+		want     TableEngineClass
+	}{
+		{"Memory", 0, TableEngineAllowedClass},
+		{"memory", 0, TableEngineUnknown},
+		{"MEMORY", 0, TableEngineUnknown},
+		{"replicatedMergeTree", 0, TableEngineUnknown},
+		{"ReplicatedMergeTree", 1, TableEngineRefused},
+		{"Merge", 2, TableEngineRefused},
+		{"Frob", 0, TableEngineRefused},
+	} {
+		if got := ClassifyTableEngine(c.name, c.argCount); got != c.want {
+			t.Errorf("ClassifyTableEngine(%q, %d) = %v, want %v", c.name, c.argCount, got, c.want)
+		}
 	}
 }
 

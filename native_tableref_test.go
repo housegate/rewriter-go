@@ -1326,3 +1326,28 @@ func TestTableRef_LookupNonLiteralTarget(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_MinorRulings pins spec 2026-09-26 R12: engine names are
+// case-sensitive (a list name in the wrong case is not recognised), and the
+// statements the generator does not round-trip — a refreshable view and
+// INSERT … FROM INFILE — are refused in dynamic mode.
+func TestTableRef_MinorRulings(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = memory", "table engine memory is not recognised"},
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = mergetree ORDER BY a", "table engine mergetree is not recognised"},
+			{"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o", unsupported},
+			{"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR ENGINE = Memory AS SELECT * FROM db1.o", unsupported},
+			{"INSERT INTO db1.o FROM INFILE 'x.csv' FORMAT CSV", unsupported},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+		}
+		cases = append(cases, tablerefCase{name: "memory_allowed", si: si,
+			sql:      "CREATE TABLE db1.n (a UInt64) ENGINE = Memory",
+			wantCode: pb.RewriteCode_Success, wantSQL: `CREATE TABLE phys."db1.n" (a UInt64) ENGINE=Memory`})
+	}
+	runTablerefCases(t, cases)
+}

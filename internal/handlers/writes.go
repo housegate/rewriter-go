@@ -492,6 +492,12 @@ func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.Write
 		stmt = pb.StatementType_STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW
 	}
 	resp := newWriteResp(stmt)
+	if sel.Mode == nameresolve.ModeDynamic && engine.CreateViewHasRefresh(e, sql) {
+		// Spec 2026-09-26 R12: the generator drops REFRESH … [APPEND] TO.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 
 	// 1+2. View name + MV TO target — strict, short-circuiting (C++ writes.cc:205-229).
 	rewritten, ok, err := applyStructuredSlots(ast, info, sel, resp)
@@ -562,6 +568,12 @@ func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.Write
 // round-trips through Generate).
 func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_INSERT)
+	if sel.Mode == nameresolve.ModeDynamic && engine.InsertFromInfile(e, sql) {
+		// Spec 2026-09-26 R12: polyglot reads FROM INFILE as a table source.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 	if info.AsTableFunction {
 		rejectUnsupported(resp, "INSERT INTO FUNCTION(...) is not supported")
 		return resp, true, nil

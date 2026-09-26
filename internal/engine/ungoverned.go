@@ -366,3 +366,59 @@ func opaqueProjectionIsUngoverned(toks []rawToken) bool {
 	}
 	return selects > 1
 }
+
+// CreateViewHasRefresh reports a CREATE [MATERIALIZED] VIEW whose header (the
+// depth-0 tokens before its body's first SELECT / WITH) carries REFRESH. The
+// pinned polyglot drops a refreshable view's REFRESH … [APPEND] TO clause when
+// it regenerates the statement, so dynamic mode refuses it rather than
+// forwarding a different statement (spec 2026-09-26 R12). A tokenizer failure
+// reports true (fail closed).
+func CreateViewHasRefresh(e Engine, sql string) bool {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return true
+	}
+	return headerHasWords(toks, "REFRESH")
+}
+
+// InsertFromInfile reports an INSERT … FROM INFILE statement: the pinned
+// polyglot parses it as INSERT … SELECT * FROM INFILE, which would read a
+// table named INFILE, so dynamic mode refuses it (spec 2026-09-26 R12). A
+// tokenizer failure reports true (fail closed).
+func InsertFromInfile(e Engine, sql string) bool {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return true
+	}
+	return headerHasWords(toks, "FROM", "INFILE")
+}
+
+// headerHasWords reports whether the depth-0 tokens before the first SELECT /
+// WITH keyword contain words as a consecutive keyword sequence.
+func headerHasWords(toks []rawToken, words ...string) bool {
+	depth := 0
+	for i, tok := range toks {
+		switch tok.TokenType {
+		case "L_PAREN":
+			depth++
+			continue
+		case "R_PAREN":
+			depth--
+			continue
+		}
+		if depth != 0 || !opaqueKeyword(tok) {
+			continue
+		}
+		if strings.EqualFold(tok.Text, "SELECT") || strings.EqualFold(tok.Text, "WITH") {
+			return false
+		}
+		match := i+len(words) <= len(toks)
+		for j := 0; match && j < len(words); j++ {
+			match = opaqueKeyword(toks[i+j]) && strings.EqualFold(toks[i+j].Text, words[j])
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}

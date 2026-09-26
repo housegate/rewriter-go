@@ -51,21 +51,53 @@ func ClassifyTableFunction(name string) TableFunctionClass {
 	}
 }
 
+// allowedTableEngines lists the spec's allowed engines in ClickHouse's own
+// spelling: engine names are case-sensitive in ClickHouse (`ENGINE = memory`
+// is an unknown engine), so a name is matched exactly.
 var allowedTableEngines = map[string]bool{
-	"mergetree": true, "replacingmergetree": true, "summingmergetree": true, "aggregatingmergetree": true,
-	"collapsingmergetree": true, "versionedcollapsingmergetree": true, "graphitemergetree": true,
-	"memory": true, "log": true, "tinylog": true, "stripelog": true, "null": true, "set": true, "join": true,
-	"view": true, "materializedview": true, "liveview": true,
+	"MergeTree": true, "ReplacingMergeTree": true, "SummingMergeTree": true, "AggregatingMergeTree": true,
+	"CollapsingMergeTree": true, "VersionedCollapsingMergeTree": true, "GraphiteMergeTree": true,
+	"Memory": true, "Log": true, "TinyLog": true, "StripeLog": true, "Null": true, "Set": true, "Join": true,
+	"View": true, "MaterializedView": true, "LiveView": true,
+}
+
+// TableEngineClass is the spec 2026-09-26 T5 classification of a table
+// engine name.
+type TableEngineClass int
+
+const (
+	TableEngineRefused      TableEngineClass = iota // not on the list: "not accepted"
+	TableEngineAllowedClass                         // on the list, in ClickHouse's spelling
+	TableEngineUnknown                              // a list name in the wrong case: ClickHouse does not know it
+)
+
+// ClassifyTableEngine classifies a CREATE TABLE / materialized-view engine.
+// A Replicated* MergeTree engine is allowed only without arguments. A name
+// that matches an allowed engine only case-insensitively is Unknown (spec
+// 2026-09-26 R12): ClickHouse rejects it as an unknown engine.
+func ClassifyTableEngine(name string, argCount int) TableEngineClass {
+	if strings.HasPrefix(name, "Replicated") && allowedTableEngines[strings.TrimPrefix(name, "Replicated")] {
+		if argCount == 0 {
+			return TableEngineAllowedClass
+		}
+		return TableEngineRefused
+	}
+	if allowedTableEngines[name] {
+		return TableEngineAllowedClass
+	}
+	lower := strings.ToLower(name)
+	for allowed := range allowedTableEngines {
+		if strings.ToLower(allowed) == lower || "replicated"+strings.ToLower(allowed) == lower {
+			return TableEngineUnknown
+		}
+	}
+	return TableEngineRefused
 }
 
 // TableEngineAllowed reports whether a CREATE TABLE engine is on the spec's
-// list. A Replicated* MergeTree engine is allowed only without arguments.
+// list, in ClickHouse's spelling (ClassifyTableEngine).
 func TableEngineAllowed(name string, argCount int) bool {
-	lower := strings.ToLower(name)
-	if strings.HasPrefix(lower, "replicated") && allowedTableEngines[strings.TrimPrefix(lower, "replicated")] {
-		return argCount == 0
-	}
-	return allowedTableEngines[lower]
+	return ClassifyTableEngine(name, argCount) == TableEngineAllowedClass
 }
 
 var refusedTableSettings = map[string]bool{"disk": true, "storage_policy": true}
@@ -85,6 +117,9 @@ func TableFunctionUnknownMessage(name string) string {
 }
 func TableEngineRefusedMessage(name string) string {
 	return "table engine " + name + " is not accepted"
+}
+func TableEngineUnknownMessage(name string) string {
+	return "table engine " + name + " is not recognised"
 }
 func TableSettingRefusedMessage(name string) string {
 	return "table setting " + name + " is not accepted"

@@ -300,9 +300,15 @@ func rejectDisallowedCarriers(e engine.Engine, ast engine.AST, resp *pb.RewriteS
 	if !ok {
 		return false, nil
 	}
-	if name != "" && !engine.TableEngineAllowed(name, argc) {
-		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineRefusedMessage(name)
-		return true, nil
+	if name != "" {
+		switch engine.ClassifyTableEngine(name, argc) {
+		case engine.TableEngineRefused:
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineRefusedMessage(name)
+			return true, nil
+		case engine.TableEngineUnknown:
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineUnknownMessage(name)
+			return true, nil
+		}
 	}
 	for _, s := range settings {
 		if engine.RefusedTableSetting(s) {
