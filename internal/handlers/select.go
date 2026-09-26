@@ -138,6 +138,11 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			} else if rejected {
 				return ast, resp, nil
 			}
+			if rejected, rerr := rejectUngovernedReads(e, ast, resp); rerr != nil {
+				return nil, nil, rerr
+			} else if rejected {
+				return ast, resp, nil
+			}
 		}
 		for _, tt := range originals {
 			if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {

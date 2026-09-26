@@ -49,6 +49,9 @@ func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) 
 				add(tt.DB)
 			}
 		}
+		if err := addOpaqueAlterDatabases(e, ast, add); err != nil {
+			return nil, err
+		}
 		return out, nil
 	}
 	var root any
@@ -72,12 +75,37 @@ func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) 
 	}); err != nil {
 		return nil, err
 	}
+	if err := addOpaqueAlterDatabases(e, ast, add); err != nil {
+		return nil, err
+	}
 	// Ruling 1 (controller review, spec 2026-09-26 T3): CollectDatabaseReferences
 	// must also see string-form lookup arguments (joinGet/dictGet/hasColumnInTable
 	// family) — those are ordinary scalar function calls, not source-role table
 	// functions, so the shared read-source visitor above never emits them.
 	collectStringLookupDatabases(root, add)
 	return out, nil
+}
+
+// addOpaqueAlterDatabases adds the qualifier of every qualified name in the
+// statement's opaque ALTER text (spec 2026-09-26 R2), so a protected database
+// named in an ALTER … UPDATE tail or a Raw ALTER action is refused with the
+// protected-database message before the tail is refused as ungoverned. A
+// tokenizer failure is an error the caller seals as UnsupportedStatement.
+func addOpaqueAlterDatabases(e Engine, ast AST, add func(string)) error {
+	texts, err := OpaqueAlterTexts(ast)
+	if err != nil {
+		return err
+	}
+	for _, text := range texts {
+		dbs, ok := OpaqueTextDatabases(e, text)
+		if !ok {
+			return fmt.Errorf("engine: tokenize opaque ALTER text")
+		}
+		for _, db := range dbs {
+			add(db)
+		}
+	}
+	return nil
 }
 
 // CollectSIHandlerBlindDatabaseReferences returns, in document order and

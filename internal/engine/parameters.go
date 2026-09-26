@@ -68,6 +68,18 @@ func TablePositionParameter(e Engine, ast AST, sql string) (bool, error) {
 	if found {
 		return true, nil
 	}
+	// An opaque Raw ALTER action (DELETE WHERE …, MODIFY TTL …, MODIFY QUERY
+	// …) is text the walker cannot see: any Identifier parameter in it is
+	// refused (spec 2026-09-26 R2).
+	texts, err := OpaqueAlterTexts(ast)
+	if err != nil {
+		return false, err
+	}
+	for _, text := range texts {
+		if IdentifierParameterInText(e, text) {
+			return true, nil
+		}
+	}
 	info, err := InspectWrite(ast)
 	if err != nil {
 		return false, err
@@ -101,11 +113,9 @@ func TablePositionParameter(e Engine, ast AST, sql string) (bool, error) {
 //   - RENAME TABLE / EXCHANGE TABLES (InspectWrite's Sub == CmdRename /
 //     CmdExchange): whole text scanned, same reasoning as EXISTS/DESCRIBE —
 //     both carry only names after the TABLE/TABLES keyword.
-//   - ALTER ... UPDATE (Sub == CmdAlterUpdate): only the target — the span
-//     between ALTER TABLE and the UPDATE keyword — is scanned, via the
-//     existing production alterMutationTail/consumeMutationQualifiedName
-//     grammar (mutation_reads.go) reused as-is; anything after UPDATE
-//     (assignments, WHERE) is a column/value position and must stay allowed.
+//   - ALTER ... UPDATE (Sub == CmdAlterUpdate): the whole text — its
+//     assignment / predicate tail is opaque, so a parameter anywhere in it is
+//     refused (spec 2026-09-26 R2).
 //   - Every other command class (SET, SYSTEM, KILL, CHECK, EXPLAIN, CREATE
 //     USER, GRANT, REVOKE, the CmdBareReject family, CmdNone, ...) is NOT
 //     text-scanned here at all: this policy only refuses table/database
@@ -140,7 +150,9 @@ func commandTextParameterHit(e Engine, ast AST, sql string) (bool, error) {
 	case CmdRename, CmdExchange:
 		return IdentifierParameterInText(e, sql), nil
 	case CmdAlterUpdate:
-		return alterUpdateTargetHoldsParameter(e, sql), nil
+		// The whole mutation text: an Identifier parameter in the opaque
+		// assignment / predicate tail is refused too (spec 2026-09-26 R2).
+		return IdentifierParameterInText(e, sql), nil
 	default:
 		return false, nil
 	}
@@ -176,28 +188,6 @@ func dbLevelHoldsParameter(info DBLevelInfo) bool {
 	default:
 		return false
 	}
-}
-
-// alterUpdateTargetHoldsParameter reports whether an ALTER ... UPDATE
-// statement's target (the span between ALTER TABLE and UPDATE) holds an
-// Identifier parameter, reusing mutation_reads.go's own
-// alterMutationTail/consumeMutationQualifiedName grammar instead of a second,
-// independently-written boundary scanner: consumeMutationQualifiedName
-// requires BOTH sides of a DOT to be a name token, so a target such as
-// "db1.{p:Identifier}" already fails that grammar (verified: the L_BRACE after
-// the dot is not a name token, and the trailing DOT-without-a-following-name
-// check catches the bare "{p:Identifier}" form too) — alterMutationTail
-// reports that as ok==false, which this function treats as a hit. A
-// tokenizer error is also a hit (fail closed); the tail after UPDATE
-// (assignments, WHERE) is never inspected here, so a genuinely allowed
-// column-position parameter there cannot trip this.
-func alterUpdateTargetHoldsParameter(e Engine, sql string) bool {
-	toks, err := tokenizeRaw(e, sql)
-	if err != nil {
-		return true
-	}
-	_, _, ok := alterMutationTail(toks)
-	return !ok
 }
 
 // commandScanSentinel is appended (on its own line) to the text IdentifierParameterInText

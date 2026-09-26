@@ -16,13 +16,17 @@ func TestTablePositionParameter(t *testing.T) {
 		"SELECT * FROM db1.o WHERE a = {v:UInt64}":                      false,
 		"SELECT * FROM db1.o WHERE a IN (1, 2)":                         false,
 
-		// Controller review (task-3 fix round), ruling 2: ALTER ... UPDATE only
-		// scans the target (between ALTER TABLE and UPDATE) -- a parameter in
-		// the assignment/predicate tail is a column/value position and stays
-		// allowed, while one in the target is refused exactly like every other
-		// table position.
-		"ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1": false,
-		"ALTER TABLE db1.{p:Identifier} UPDATE a = 1 WHERE 1": true,
+		// Spec 2026-09-26 R2/R8: an opaque ALTER … UPDATE tail cannot be
+		// proven column-only, so a parameter anywhere in the mutation text is
+		// a hit, like one in the target; so is one in a Raw ALTER action.
+		"ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1":                                       true,
+		"ALTER TABLE db1.{p:Identifier} UPDATE a = 1 WHERE 1":                                       true,
+		"ALTER TABLE db1.o DELETE WHERE a IN {p:Identifier}":                                        true,
+		"ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM {p:Identifier}":                              true,
+		"ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM {p:Identifier}) WHERE 1":                  true,
+		"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN {p:Identifier}":                          true,
+		"CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier})) ENGINE = Memory": true,
+		"DELETE FROM db1.o WHERE a IN {p:Identifier}":                                               true,
 
 		// Controller review, ruling 3: CREATE/DROP DATABASE's own target is a
 		// database position too (previously unmodelled -- neither the read walk

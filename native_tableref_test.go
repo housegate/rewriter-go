@@ -145,12 +145,13 @@ func TestTableRef_ValueAndColumnParametersStayAllowed(t *testing.T) {
 		{name: "value", sql: "SELECT * FROM db1.o WHERE a = {v:UInt64}", wantCode: pb.RewriteCode_Success,
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a = {v: UInt64}`},
 		{name: "column", sql: "SELECT {c:Identifier} FROM db1.o", wantCode: pb.RewriteCode_Success},
-		// Controller review (task-3 fix round), ruling 2: an ALTER ... UPDATE
-		// statement's assignment/predicate tail is a column/value position, not
-		// a table position -- only the target (between ALTER TABLE and UPDATE)
-		// is refused. The target itself still rewrites normally.
-		{name: "alter_update_assignment", sql: "ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1", wantCode: pb.RewriteCode_Success,
-			wantSQL: "ALTER TABLE phys.`db1.o` UPDATE a = {c:Identifier} WHERE 1"},
+		// Spec 2026-09-26 R2/R8: an opaque ALTER … UPDATE tail cannot be
+		// proven column-only, so an Identifier parameter anywhere in a command
+		// node's text is refused with the T2 message (this row used to pin the
+		// assignment position as allowed).
+		{name: "alter_update_assignment", sql: "ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest,
+			wantMsg:  "query parameters are not supported in a database or table position"},
 	})
 }
 
@@ -968,6 +969,105 @@ func TestTableRef_GoErrorsFailClosed(t *testing.T) {
 		} {
 			cases = append(cases, tablerefCase{name: c.name, sql: c.sql, si: si,
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_MutationAndColumnExpressionReads pins spec 2026-09-26 R2
+// (final review Critical 2, Important 3 and 6): structured UPDATE / DELETE
+// predicates and assignments, INSERT VALUES, column / constraint / storage-
+// property expressions and structured ALTER actions are visited by the walker
+// (so T2 / T3 apply), and opaque ALTER text is scanned by the tokenizer. A
+// read the rewriter cannot rewrite and report there is refused with
+// "statement is not supported" — protected and parameter messages win.
+func TestTableRef_MutationAndColumnExpressionReads(t *testing.T) {
+	const (
+		unsupported = "statement is not supported"
+		paramMsg    = "query parameters are not supported in a database or table position"
+	)
+	protected := func(db string) string { return "protected database " + db + " is not addressable" }
+	type row struct {
+		sql     string
+		code    pb.RewriteCode
+		msgOff  string // SI surface inactive
+		msgOn   string // SI surface active; "" = same as msgOff
+		codeOn  pb.RewriteCode
+		setCode bool
+	}
+	rows := []row{
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM remote('127.0.0.1','phys','db2.x')) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM {p:Identifier}) WHERE 1", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM merge(currentDatabase(),'^db2')) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM `db2.x`) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN phys.`db2.x`", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM phys.`db2.x`)", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN {p:Identifier}", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM merge(currentDatabase(),'^db2'))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN hg_safe.db1__t", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_safe"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM hg_promote.x) WHERE 1", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_promote"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_promote.x is not directly addressable"},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN phys.`db2.x`", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE in(a, db1.p)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE a IN ((db1.p))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "DELETE FROM db1.o WHERE a IN (SELECT a FROM `db2.x`)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "DELETE FROM db1.o WHERE a IN {p:Identifier}", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "UPDATE db1.o SET b = 1 WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "UPDATE db1.o SET b = (SELECT max(a) FROM db1.p) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "INSERT INTO db1.o VALUES ((SELECT max(a) FROM db1.p))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_promote"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_safe"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM phys.`db2.x`)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier})) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "CREATE TABLE db1.n (a UInt64 MATERIALIZED a IN `db2.x`) ENGINE = Memory", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64, CONSTRAINT c CHECK a IN (SELECT 1 FROM db1.z)) ENGINE = MergeTree ORDER BY a", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree PARTITION BY a IN phys.x ORDER BY a", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a TTL d + 1 WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM hg_unsafe.db1__t)", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_unsafe"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+		{sql: "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM `db2.x`)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ADD INDEX i a IN db1.q TYPE minmax", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ADD PROJECTION p (SELECT a FROM db1.x)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o REPLACE PARTITION tuple() FROM phys.`db2.x`", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o REPLACE PARTITION tuple() FROM db1.p", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ATTACH PARTITION tuple() FROM db1.p", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o MOVE PARTITION tuple() TO TABLE db1.p", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o FETCH PARTITION tuple() FROM '/clickhouse/tables/x'", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o FETCH PART 'p' FROM '/clickhouse/tables/x'", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+	}
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, r := range rows {
+			code, msg := r.code, r.msgOff
+			if si && r.setCode {
+				code, msg = r.codeOn, r.msgOn
+			}
+			cases = append(cases, tablerefCase{name: r.sql, sql: r.sql, si: si, wantCode: code, wantMsg: msg, wantSQL: r.sql})
+		}
+		// Reads-free mutations and column expressions keep working.
+		for _, c := range []struct{ sql, want string }{
+			{"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN (1, 2)", "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE a IN (1, 2)"},
+			{"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN tuple(1, 2)", "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE a IN tuple(1, 2)"},
+			{"ALTER TABLE db1.o DELETE WHERE a = 1", `ALTER TABLE phys."db1.o" DELETE WHERE a=1`},
+			{"DELETE FROM db1.o WHERE a IN (1, 2)", `DELETE FROM phys."db1.o" WHERE a IN (1, 2)`},
+			{"UPDATE db1.o SET b = 1 WHERE a = 1", `UPDATE phys."db1.o" SET b = 1 WHERE a = 1`},
+			{"ALTER TABLE db1.o ADD PROJECTION p (SELECT a ORDER BY b)", `ALTER TABLE phys."db1.o" ADD PROJECTION p(SELECT a ORDER BY b)`},
+			{"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a + 1", `ALTER TABLE phys."db1.o" ADD COLUMN c UInt8 DEFAULT a + 1`},
+			{"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY", `ALTER TABLE phys."db1.o" MODIFY TTL d + INTERVAL 1 DAY`},
+			{"ALTER TABLE db1.o FREEZE WITH NAME 'x'", `ALTER TABLE phys."db1.o" FREEZE WITH NAME 'x'`},
+			{"ALTER TABLE db1.o MOVE PARTITION tuple() TO DISK 'd'", `ALTER TABLE phys."db1.o" MOVE PARTITION tuple() TO DISK 'd'`},
+			{"ALTER TABLE db1.o ATTACH PART 'x'", `ALTER TABLE phys."db1.o" ATTACH PART 'x'`},
+			{"CREATE TABLE db1.n (a UInt64 DEFAULT 1, b UInt64 MATERIALIZED a * 2) ENGINE = MergeTree PARTITION BY a % 2 ORDER BY a",
+				`CREATE TABLE phys."db1.n" (a UInt64 DEFAULT 1, b UInt64 MATERIALIZED a * 2) ENGINE=MergeTree PARTITION BY a % 2 ORDER BY a`},
+		} {
+			cases = append(cases, tablerefCase{name: "allowed/" + c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
 		}
 	}
 	runTablerefCases(t, cases)

@@ -221,6 +221,12 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 		} else if rejected {
 			return namespaceResp, true, nil
 		}
+		if rejected, rerr := rejectUngovernedReads(e, ast, namespaceResp); rerr != nil {
+			return nil, false, rerr
+		} else if rejected {
+			namespaceResp.SqlAfterRewrite = sql
+			return namespaceResp, true, nil
+		}
 	}
 
 	// CREATE TABLE AS SELECT and INSERT ... SELECT embedded sources are no

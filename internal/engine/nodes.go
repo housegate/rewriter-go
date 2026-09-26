@@ -1072,13 +1072,20 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			if err := walkExpression(body["options"], scope, visitor); err != nil {
 				return err
 			}
-			return walkCreateProperties(body["table_properties"], scope, visitor)
-		case statementMap(n, NodeAlterTable) != nil:
-			body := statementMap(n, NodeAlterTable)
-			if err := walkExpression(body["actions"], scope, visitor); err != nil {
+			if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
 				return err
 			}
-			return walkExpression(body["partition"], scope, visitor)
+			return walkCreateProperties(body["table_properties"], scope, visitor)
+		case statementMap(n, NodeAlterTable) != nil:
+			// Structured ALTER actions (ADD COLUMN … DEFAULT, REPLACE PARTITION
+			// … FROM, …) have no per-field model; walkGenericExpression hands
+			// every read-bearing node to the ordinary walker (spec 2026-09-26
+			// R2). Raw actions are opaque text, governed by OpaqueAlterTexts.
+			body := statementMap(n, NodeAlterTable)
+			if err := walkGenericExpression(body["actions"], scope, visitor); err != nil {
+				return err
+			}
+			return walkGenericExpression(body["partition"], scope, visitor)
 		case statementMap(n, NodeDelete) != nil:
 			return walkDeleteObjects(statementMap(n, NodeDelete), scope, visitor)
 		case statementMap(n, NodeUpdate) != nil:
@@ -1166,6 +1173,15 @@ func walkCreateTableObjects(body map[string]any, scope readSourceScope, visitor 
 			return err
 		}
 	}
+	// Column definitions (DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL / TTL)
+	// and constraints (CHECK, INDEX … TYPE) are expression positions the
+	// walker sees like any other (spec 2026-09-26 R2).
+	if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
+		return err
+	}
+	if err := walkGenericExpression(body["constraints"], scope, visitor); err != nil {
+		return err
+	}
 	if err := walkCreateProperties(body["properties"], scope, visitor); err != nil {
 		return err
 	}
@@ -1227,7 +1243,9 @@ func walkCreateProperties(node any, scope readSourceScope, visitor readSourceVis
 			}
 			return rejectUnknownReadFields(n, fields("dict_property"), "CREATE dictionary property")
 		}
-		return rejectUnknownReadCarrier(n, "CREATE property")
+		// Every other storage property (PARTITION BY, ORDER BY, PRIMARY KEY,
+		// SAMPLE BY, TTL, SETTINGS, …) is an expression position.
+		return walkGenericExpression(n, scope, visitor)
 	default:
 		return nil
 	}

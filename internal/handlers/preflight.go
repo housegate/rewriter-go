@@ -192,7 +192,52 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
+	// Reads in positions no rewrite pipeline reaches (R2). While the SI
+	// surface is active the SI handlers run this same check after their own
+	// namespace policy, so an SI-owned message keeps precedence.
+	if !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		if rejected, rerr := rejectUngovernedReads(e, ast, resp); rerr != nil {
+			return nil, false, rerr
+		} else if rejected {
+			resp.SqlAfterRewrite = sql
+			return resp, true, nil
+		}
+	}
 	return nil, false, nil
+}
+
+// rejectUngovernedReads refuses, with UnsupportedStatement "statement is not
+// supported", a statement that carries a read the rewriter cannot rewrite and
+// report (spec 2026-09-26 R2): a table, IN-table operand, table function or
+// parameter in a structured UPDATE / DELETE, INSERT VALUES, column,
+// constraint, storage-property or ALTER-action expression, or ungoverned
+// content in opaque ALTER text (a subquery, a table-operand IN, a cross-table
+// partition action, ALTER … MODIFY QUERY). Runs after the T2 / T3 / T5 / T6
+// checks, so a parameter, protected-database, allowlist or lookup message
+// always wins. Shared, like rejectDisallowedCarriers, by
+// PreflightTableReferences (SI surface inactive) and the SI-active handler
+// paths.
+func rejectUngovernedReads(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLResponse) (bool, error) {
+	reads, err := engine.ExpressionPositionHasReads(ast)
+	if err != nil {
+		return false, err
+	}
+	if reads {
+		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+		return true, nil
+	}
+	texts, err := engine.OpaqueAlterTexts(ast)
+	if err != nil {
+		return false, err
+	}
+	for _, text := range texts {
+		if engine.OpaqueTextIsUngoverned(e, text) {
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // rejectDisallowedCarriers applies the T5 table-function / table-engine /
