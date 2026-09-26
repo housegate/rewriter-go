@@ -581,7 +581,15 @@ func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.Wri
 // is a no-op: the caller's `rewritten` AST is returned unchanged with ok=true
 // so it continues to Generate normally. A body rejection (bodyResp.Code !=
 // Success) is reported via resp and ok=false so the caller stops and returns
-// resp as-is.
+// resp as-is — but the CODE is forced to UnsupportedStatement (controller
+// ruling, cross-engine parity): the corpus convention is RewriteError for
+// SELECT-family statements and UnsupportedStatement for write statements, the
+// C++ engine's embedded-body path passes UnsupportedStatement explicitly, and
+// this statement is a write (INSERT/CREATE TABLE), not a SELECT, even though
+// its embedded body's rejection was classified by the SELECT pipeline. Only
+// the code changes; the SELECT pipeline's message text is kept verbatim.
+// dispatchView's OWN body-rejection code path (its bodyResp.Code assignment,
+// a few lines above dispatchView's call site) is untouched by this helper.
 func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts []*pb.RewriteOption,
 	extract func(engine.AST) (engine.AST, bool, error), set func(engine.AST, engine.AST) (engine.AST, error),
 	resp *pb.RewriteSQLResponse) (engine.AST, bool, error) {
@@ -595,7 +603,7 @@ func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts
 	}
 	mergeViewBody(resp, bodyResp)
 	if bodyResp.Code != pb.RewriteCode_Success {
-		resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
+		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, bodyResp.Message
 		return nil, false, nil
 	}
 	out, err := set(rewritten, newBody)

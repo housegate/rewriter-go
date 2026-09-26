@@ -265,13 +265,21 @@ func rejectCodeFor(db string, si bool) pb.RewriteCode {
 // RewriteError. Pre-existing, corpus-pinned SI dispatch; this task does not
 // touch it, only records which shapes hit it.
 //
-// NOT listed (spec 2026-09-26 T4, second half): the INSERT ... SELECT and
-// CREATE TABLE ... AS SELECT embedded-source shapes. Those bodies are now
-// routed through the same SELECT pipeline a view body uses
-// (rewriteEmbeddedBody), so they answer rejectCodeFor's plain-SELECT-read
-// RewriteError default now, exactly like CREATE VIEW's body already did
-// (CREATE VIEW's own shape was never in this map).
+// The INSERT ... SELECT and CREATE TABLE ... AS SELECT embedded-source shapes
+// ARE listed here (controller ruling, cross-engine parity, spec 2026-09-26
+// T4 second half): although the embedded body is classified by the SELECT
+// pipeline (rewriteEmbeddedBody -> rewriteSelectCore), the outer statement is
+// still a write (INSERT/CREATE TABLE), and the corpus convention pins
+// UnsupportedStatement for the write-statement family (RewriteError is
+// SELECT-family only, matching the C++ engine's embedded-body path, which
+// passes UnsupportedStatement explicitly). Only the CODE is forced; the
+// SELECT pipeline's message text is kept verbatim (see rewriteEmbeddedBody).
+// CREATE VIEW's body is genuinely different: dispatchView does NOT force the
+// code (it keeps bodyResp.Code as-is), so CREATE VIEW's own shape stays out
+// of this map.
 var siWriteSideShapes = map[string]bool{
+	"INSERT INTO db1.o SELECT * FROM %s.`db2.x`":                           true,
+	"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM %s.`db2.x`":       true,
 	"CREATE MATERIALIZED VIEW db1.mv TO %s.`db2.x` AS SELECT * FROM db1.o": true,
 	"INSERT INTO %s.`db2.x` VALUES (1)":                                    true,
 	"DROP TABLE %s.`db2.x`":                                                true,
