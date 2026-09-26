@@ -255,3 +255,25 @@ func DatabaseTarget(ast AST) (db string, ifNotExists, ifExists bool, err error) 
 	ifExists, _ = body["if_exists"].(bool)
 	return db, ifNotExists, ifExists, nil
 }
+
+// SpliceShowTable replaces the table name of a SHOW COLUMNS / INDEX family
+// statement's first FROM / IN clause — which must be a single unqualified
+// name token — with replacement (already quoted), leaving every other byte of
+// sql unchanged (spec 2026-09-26 R7).
+func SpliceShowTable(e Engine, sql, replacement string) (string, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return "", err
+	}
+	for i := 0; i+1 < len(toks); i++ {
+		if toks[i].TokenType != "FROM" && toks[i].TokenType != "IN" {
+			continue
+		}
+		name := toks[i+1]
+		if !isNameTok(name.TokenType) || (i+2 < len(toks) && toks[i+2].TokenType == "DOT") {
+			return "", fmt.Errorf("engine: SHOW table clause is not a single unqualified name")
+		}
+		return sql[:name.Span.Start] + replacement + sql[name.Span.End:], nil
+	}
+	return "", fmt.Errorf("engine: SHOW statement has no table clause")
+}

@@ -1196,3 +1196,47 @@ func TestTableRef_SQLBearingSettings(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_DescribeAndShowTargets pins spec 2026-09-26 R7 (final review
+// Critical 8, Minor empty EXISTS / SHOW CREATE): DESCRIBE (SELECT …) is
+// refused, an unqualified dotted quoted target of DESCRIBE / EXISTS / SHOW
+// CREATE / SHOW COLUMNS resolves exactly like FROM, and EXISTS / SHOW CREATE
+// with no target are refused.
+func TestTableRef_DescribeAndShowTargets(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"DESCRIBE (SELECT * FROM phys.`db2.x`)",
+			"DESCRIBE (SELECT * FROM hg_safe.db1__t)",
+			"DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
+			"DESC (SELECT a FROM db1.o)",
+			"EXISTS",
+			"SHOW CREATE",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"DESCRIBE TABLE `db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`"},
+			{"DESCRIBE `db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`"},
+			{"EXISTS TABLE `db2.x`", "EXISTS TABLE phys.`db1.db2.x`"},
+			{"SHOW CREATE TABLE `db2.x`", "SHOW CREATE TABLE phys.`db1.db2.x`"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{".db2.x"}})
+		}
+	}
+	// SHOW COLUMNS under an active SI surface is refused by the SI handler
+	// first (db1 owns an SI table), so its FROM-like resolution is pinned
+	// with the surface inactive.
+	cases = append(cases,
+		tablerefCase{name: "show_columns_dotted", sql: "SHOW COLUMNS FROM `db2.x`",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.db2.x`", wantAcc: []string{".db2.x"}},
+		tablerefCase{name: "show_columns_like", sql: "SHOW COLUMNS FROM o LIKE 'a%'",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` LIKE 'a%'", wantAcc: []string{".o"}},
+		tablerefCase{name: "show_columns_si", sql: "SHOW COLUMNS FROM `db2.x`", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "storage-integrity logical database db1 is not directly addressable"},
+	)
+	runTablerefCases(t, cases)
+}

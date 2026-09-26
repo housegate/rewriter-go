@@ -22,7 +22,21 @@ type ObjectTarget struct {
 	ObjType   string // "TABLE" (default) / "DATABASE" / "VIEW" / "DICTIONARY"
 	DB        string // "" when the name was bare
 	Table     string
+	// Shape classifies what follows the verb / object type (spec 2026-09-26
+	// R7): a plain [db.]name, a table-function call, a parenthesized
+	// subquery, or nothing at all.
+	Shape ObjectTargetShape
 }
+
+// ObjectTargetShape is ObjectTarget.Shape.
+type ObjectTargetShape int
+
+const (
+	ObjectTargetNone     ObjectTargetShape = iota // no target at all (`EXISTS`)
+	ObjectTargetName                              // [db.]name
+	ObjectTargetCall                              // name(…): a table function
+	ObjectTargetSubquery                          // (SELECT …)
+)
 
 // ParseObjectTarget extracts EXISTS / SHOW CREATE / DESCRIBE structure from the clickhouse
 // Tokenize stream. Returns Verb==VerbNone for anything else. EXISTS does not parse
@@ -72,11 +86,19 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 	}
 	// Name-run: `db DOT name` or `name`.
 	if i < len(toks) && isNameTok(toks[i].TokenType) {
+		next := i + 1
 		if i+2 < len(toks) && toks[i+1].TokenType == "DOT" && isNameTok(toks[i+2].TokenType) {
 			out.DB, out.Table = toks[i].Text, toks[i+2].Text
+			next = i + 3
 		} else {
 			out.Table = toks[i].Text
 		}
+		out.Shape = ObjectTargetName
+		if next < len(toks) && toks[next].TokenType == "L_PAREN" {
+			out.Shape = ObjectTargetCall
+		}
+	} else if i < len(toks) && toks[i].TokenType == "L_PAREN" {
+		out.Shape = ObjectTargetSubquery
 	}
 	return out, nil
 }

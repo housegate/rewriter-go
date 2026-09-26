@@ -325,6 +325,12 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
 		}
+		if info.HasTableClause && info.ShowTableResolved && !info.HasDBClause && info.ShowWhat != "DICTIONARIES" {
+			// Spec 2026-09-26 R7: an unqualified table (dotted or not) resolves
+			// exactly like FROM, in the session's logical database — passed
+			// through, ClickHouse would bind it in the physical database.
+			return dispatchShowUnqualifiedTable(e, sql, info, dyn, resp)
+		}
 		if info.HasTableClause {
 			// Echo the original text once the namespace is proved ordinary, as
 			// SHOW FULL DICTIONARIES already does. Polyglot's Generate happens to
@@ -546,4 +552,29 @@ func buildLikeClause(info engine.DBLevelInfo) string {
 // therefore doubled BEFORE quotes are doubled (Spec I D4).
 func escapeSQLLiteral(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
+}
+
+// dispatchShowUnqualifiedTable resolves the unqualified table of a SHOW
+// COLUMNS / INDEX family statement through decideWriteTarget, like EXISTS /
+// SHOW CREATE / DESCRIBE, and splices the physical name into the original text.
+func dispatchShowUnqualifiedTable(e engine.Engine, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+	sel := nameresolve.Selection{Mode: nameresolve.ModeDynamic, Dynamic: dyn}
+	if resp.TableRewrites == nil {
+		resp.TableRewrites = map[string]string{}
+	}
+	tt := engine.TableTarget{Table: info.ShowTable}
+	d, ok := decideWriteTarget(tt, "SHOW "+info.ShowWhat, sel, resp)
+	if !ok {
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
+	if d.Action != engine.ActionRename {
+		return passthroughOriginalDB(sql, resp)
+	}
+	out, err := engine.SpliceShowTable(e, sql, engine.QuoteQualified(d.NewDB, d.NewTable))
+	if err != nil {
+		return nil, false, err
+	}
+	resp.SqlAfterRewrite = out
+	return resp, true, nil
 }
