@@ -692,21 +692,95 @@ func TestTableRef_StringLookupsAreResolvedOrRefused(t *testing.T) {
 		{name: "CREATE TABLE with ordinary DEFAULT now() stays Success",
 			sql:      "CREATE TABLE db1.n (a DateTime DEFAULT now()) ENGINE = Memory",
 			wantCode: pb.RewriteCode_Success},
+		// Task 7 fix round 3 new breakage 1: a backquoted or double-quoted
+		// lookup-family function name defeats mechanism (b)'s raw-text scan
+		// (lookupCallsInRawTokens unconditionally skipped every
+		// QUOTED_IDENTIFIER token), so these opaque-command/Raw-action
+		// positions ran the quoted call as a real lookup instead of refusing
+		// it. Measured: ClickHouse accepts a quoted identifier as a function
+		// name regardless of spelling.
+		{name: "quoted dictGet (backtick) in ALTER UPDATE assignment",
+			sql:      "ALTER TABLE db1.o UPDATE a = `dictGet`('db1.a','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.a" does not resolve`},
+		{name: "quoted joinGet (backtick) in ALTER UPDATE assignment",
+			sql:      "ALTER TABLE db1.o UPDATE a = `joinGet`('default.j','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: `quoted joinGet (double-quote) in ALTER UPDATE assignment`,
+			sql:      `ALTER TABLE db1.o UPDATE a = "joinGet"('default.j','v',1) WHERE 1`,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "quoted joinGet (backtick) in ALTER MODIFY COLUMN DEFAULT (Raw action)",
+			sql:      "ALTER TABLE db1.o MODIFY COLUMN a String DEFAULT `joinGet`('default.j','v',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "quoted hasColumnInTable (backtick) in ALTER UPDATE assignment",
+			sql:      "ALTER TABLE db1.o UPDATE a = `hasColumnInTable`('default','x','v') WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		// Task 7 fix round 3 new breakage 2: InSelectBody was true inside a
+		// SELECT subtree reached via a structured UPDATE SET / DELETE WHERE
+		// IN / INSERT VALUES / CREATE TABLE column DEFAULT scalar or IN
+		// subquery — a position no rewrite pipeline ever reaches — so the
+		// call was neither refused nor rewritten (an unmapped logical name
+		// silently reached ClickHouse). Only the genuine SELECT-body-rewrite
+		// roots (top-level SELECT-family, CTAS as_select, view body, INSERT
+		// query) may elevate InSelectBody now; every other embedded SELECT
+		// stays refused.
+		{name: "hasColumnInTable in UPDATE SET scalar subquery, mapped-looking name still refused",
+			sql:      "UPDATE db1.o SET a = (SELECT hasColumnInTable('db1','j','v')) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "db1.j" does not resolve`},
+		{name: "hasColumnInTable in UPDATE SET scalar subquery",
+			sql:      "UPDATE db1.o SET a = (SELECT hasColumnInTable('default','x','v')) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in DELETE WHERE IN subquery",
+			sql:      "DELETE FROM db1.o WHERE b IN (SELECT hasColumnInTable('default','x','v'))",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in INSERT VALUES scalar subquery",
+			sql:      "INSERT INTO db1.o VALUES ((SELECT hasColumnInTable('default','x','v')))",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE column DEFAULT scalar subquery",
+			sql:      "CREATE TABLE db1.n (a UInt8 DEFAULT (SELECT hasColumnInTable('default','x','v'))) ENGINE = Memory",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		// Keep green: a genuine SELECT-body-rewrite root — INSERT … SELECT,
+		// CREATE TABLE … AS SELECT, CREATE VIEW … AS SELECT, and an
+		// IN-subquery nested inside a top-level SELECT — still resolves and
+		// rewrites hasColumnInTable exactly like a bare SELECT does (Task 7
+		// fix round 3 ruling: these roots must stay green after the breakage
+		// 2 fix narrows InSelectBody elevation).
+		{name: "hasColumnInTable in INSERT ... SELECT body stays rewritten",
+			sql:      "INSERT INTO db1.o SELECT hasColumnInTable('db1','j','v') FROM db1.p",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `INSERT INTO phys."db1.o" SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p"`,
+			wantAcc:  []string{"db1.o", "db1.p", "db1.j"}},
+		{name: "hasColumnInTable in CREATE TABLE ... AS SELECT body stays rewritten",
+			sql:      "CREATE TABLE db1.n ENGINE = Memory AS SELECT hasColumnInTable('db1','j','v') FROM db1.p",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `CREATE TABLE phys."db1.n" ENGINE=Memory AS (SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p")`,
+			wantAcc:  []string{"db1.n", "db1.p", "db1.j"}},
+		{name: "hasColumnInTable in CREATE VIEW ... AS SELECT body stays rewritten",
+			sql:      "CREATE VIEW db1.v AS SELECT hasColumnInTable('db1','j','v') FROM db1.p",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `CREATE VIEW phys."db1.v" AS SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p"`,
+			wantAcc:  []string{"db1.v", "db1.p", "db1.j"}},
+		{name: "hasColumnInTable in IN-subquery nested in a top-level SELECT stays rewritten",
+			sql:      "SELECT * FROM db1.o WHERE x IN (SELECT hasColumnInTable('db1','j','v') FROM db1.p)",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `SELECT * FROM phys."db1.o" "db1.o" WHERE x IN (SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p")`,
+			wantAcc:  []string{"db1.o", "db1.p", "db1.j"}},
 	})
 }
 
 // TestTableRef_StringLookupOrderIsDeterministic pins Task 7 fix round 1
 // finding 1 (measured over 200 runs of the original map-range-order
 // implementation: up to 24 distinct accessed orders for one statement, and
-// up to 3 distinct first-refusal messages for another) and its fix round 2
+// up to 3 distinct first-refusal messages for another), its fix round 2
 // refinement (document order, not just a stable order — the reviewer's own
-// probes below). collectStringLookupOccurrences (references.go) orders calls
-// by polyglot span when available, falling back to a SQL-clause-aware walk
-// order (stringLookupClauseOrder) otherwise, since a string-lookup call's
-// arguments carry a span only when they are column/identifier expressions,
-// never string/number literals — measured directly, and the overwhelmingly
-// common shape for these functions. Run with `-count=20` to prove stability,
-// not just `-count=1`.
+// probes below), and fix round 3 minor 3 (dropping the span-based secondary
+// sort entirely, since it wasn't a strict weak ordering: the comparator
+// returned false whenever either call lacked a span, so incomparability
+// wasn't transitive). collectStringLookupOccurrences (references.go) now
+// orders calls purely by the structural walk order — clause rank
+// (stringLookupClauseOrder), then sorted key, then array index — which
+// already reproduces every probe below, including the reviewer's own
+// WHERE/GROUP BY/HAVING/ORDER BY/LIMIT and JOIN ON cases. Run with
+// `-count=20` to prove stability, not just `-count=1`.
 func TestTableRef_StringLookupOrderIsDeterministic(t *testing.T) {
 	runTablerefCases(t, []tablerefCase{
 		{name: "four hasColumnInTable calls, stable accessed order",
@@ -732,6 +806,19 @@ func TestTableRef_StringLookupOrderIsDeterministic(t *testing.T) {
 		{name: "CTE body's dictHas precedes main body's dictGet",
 			sql:      "WITH (SELECT dictHas('db1.a',1)) AS c SELECT dictGet('db1.j','v',1), c",
 			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.a" does not resolve`},
+		// Task 7 fix round 3 minor 3's own probes: with the span-based
+		// secondary sort dropped entirely, the walk order (clause rank, then
+		// sorted key, then array index) alone must still reproduce the
+		// clause-grammar-ordered accessed list.
+		{name: "WHERE/GROUP BY/HAVING/ORDER BY/LIMIT accessed order",
+			sql: "SELECT hasColumnInTable('db1','a','v') FROM db1.o WHERE hasColumnInTable('db1','b','v') " +
+				"GROUP BY 1 HAVING hasColumnInTable('db1','c','v') ORDER BY hasColumnInTable('db1','z','v') LIMIT 10",
+			wantCode: pb.RewriteCode_Success,
+			wantAcc:  []string{"db1.o", "db1.a", "db1.b", "db1.c", "db1.z"}},
+		{name: "JOIN ON accessed order",
+			sql:      "SELECT * FROM db1.o JOIN db1.p ON hasColumnInTable('db1','a','v') AND hasColumnInTable('db1','b','v')",
+			wantCode: pb.RewriteCode_Success,
+			wantAcc:  []string{"db1.o", "db1.p", "db1.a", "db1.b"}},
 	})
 }
 

@@ -328,69 +328,127 @@ func StringLookupCalls(ast AST) ([]StringLookup, error) {
 
 // stringLookupOccurrence is one matched call plus enough context to mutate
 // it in place (fn/args reference the live decoded node) and to order it
-// deterministically (span/hasSpan/walkIndex).
+// deterministically (walkIndex — the structural walk order below is already a
+// single total order, so no secondary sort is applied; Task 7 fix round 3
+// minor 3).
 type stringLookupOccurrence struct {
 	call      StringLookup
 	fn        map[string]any // fn["args"] is replaced to rewrite this call
 	args      []any
-	span      int
-	hasSpan   bool
 	walkIndex int
+}
+
+// selectBodyRootField reports which field of stmtBody — the value of root's
+// single top-level "kind" key — is a genuine embedded SELECT-body-rewrite
+// root, using the exact same classification ExtractInsertBody /
+// ExtractCreateSelectBody / ExtractViewBody rely on: "query" for insert
+// (INSERT … SELECT only — a nil query (VALUES) or a {"command":{"this":
+// "FORMAT …"}} query doesn't count), "as_select" for create_table (CREATE
+// TABLE … AS SELECT only), "query" for create_view. ok=false for every other
+// kind, a missing field, or a field that isn't a (optionally parenthesized)
+// read body — matching the set of embedded bodies rewriteEmbeddedBody's
+// Extract*/Set* pairs actually splice a rewrite into (Task 7 fix round 3
+// breakage 2 ruling).
+func selectBodyRootField(kind string, stmtBody map[string]any) (field string, ok bool) {
+	switch kind {
+	case NodeInsert:
+		field = "query"
+	case NodeCreateTable:
+		field = "as_select"
+	case NodeCreateView:
+		field = "query"
+	default:
+		return "", false
+	}
+	q, isMap := stmtBody[field].(map[string]any)
+	if !isMap {
+		return "", false
+	}
+	inner, _ := subqueryShells(q)
+	if !isReadBody(inner) {
+		return "", false
+	}
+	return field, true
 }
 
 // collectStringLookupOccurrences performs the ONE generic recursive walk
 // mechanism (a) specifies: every map is visited (children in a SQL-clause-
-// aware, otherwise alphabetically sorted order — stringLookupWalkKeys),
-// every "function" node matching IsStringLookup is recorded, and
-// InSelectBody is tracked while descending (sticky once a select/union/
-// intersect/except key is seen, exactly at the node that key's value roots —
-// a CTAS/INSERT/VIEW/IN-subquery body all nest one of these keys at their
-// own root, so no per-statement-kind special-casing is needed here). The
-// result is stable-sorted by span for any pair that both carry one,
-// preserving the walk order everywhere else (T6 fix round 2 finding 1).
+// aware, otherwise alphabetically sorted order — stringLookupWalkKeys), and
+// every "function" node matching IsStringLookup is recorded, in that walk
+// order (a single total order: clause rank, then sorted key, then array
+// index — Task 7 fix round 3 minor 3 drops the earlier span-based secondary
+// sort entirely, since it wasn't a strict weak ordering and the walk order
+// alone already reproduces every pinned probe).
+//
+// InSelectBody is elevated only at a genuine SELECT-body-rewrite root — the
+// whole tree when root itself is a top-level select/union/intersect/except
+// statement, or the insert/as_select/view "query" field selectBodyRootField
+// names for insert/create_table/create_view — and is then sticky for every
+// descendant (covering a CTE, and any IN/scalar subquery, nested arbitrarily
+// deep beneath that root). A SELECT reached any other way — a structured
+// UPDATE SET / DELETE WHERE / INSERT VALUES / CREATE TABLE column expression,
+// or any other statement kind — never elevates, because the rewrite pipeline
+// never reaches those positions to resolve a logical name there (Task 7 fix
+// round 3 breakage 2: the earlier "any select/union/intersect/except key
+// anywhere" detection was over-broad and let such a call pass through
+// unresolved and unrefused).
 func collectStringLookupOccurrences(root any) []stringLookupOccurrence {
 	var out []stringLookupOccurrence
 	idx := 0
 	var walk func(node any, insideSelectBody bool)
+	// checkAndDescend is walk's map[string]any case, factored out so the
+	// top-level dispatch below can also invoke it directly on a statement's
+	// own body map (recording a "function" node hanging directly off that
+	// body, exactly like an ordinary recursive walk into it would) while
+	// choosing per-child which single field elevates to insideSelectBody=true.
+	checkAndDescend := func(n map[string]any, insideSelectBody bool, elevatedField string) {
+		if fn, ok := n["function"].(map[string]any); ok {
+			name, _ := fn["name"].(string)
+			args, _ := fn["args"].([]any)
+			if IsStringLookup(name) && len(args) > 0 {
+				call := decodeStringLookupCall(name, args)
+				call.InSelectBody = insideSelectBody
+				out = append(out, stringLookupOccurrence{
+					call: call, fn: fn, args: args, walkIndex: idx,
+				})
+				idx++
+			}
+		}
+		for _, k := range stringLookupWalkKeys(n) {
+			child := insideSelectBody || k == elevatedField
+			walk(n[k], child)
+		}
+	}
 	walk = func(node any, insideSelectBody bool) {
 		switch n := node.(type) {
 		case map[string]any:
-			inside := insideSelectBody
-			for _, k := range []string{"select", "union", "intersect", "except"} {
-				if _, ok := n[k]; ok {
-					inside = true
-					break
-				}
-			}
-			if fn, ok := n["function"].(map[string]any); ok {
-				name, _ := fn["name"].(string)
-				args, _ := fn["args"].([]any)
-				if IsStringLookup(name) && len(args) > 0 {
-					call := decodeStringLookupCall(name, args)
-					call.InSelectBody = inside
-					span, hasSpan := firstSpanStart(args)
-					out = append(out, stringLookupOccurrence{
-						call: call, fn: fn, args: args, span: span, hasSpan: hasSpan, walkIndex: idx,
-					})
-					idx++
-				}
-			}
-			for _, k := range stringLookupWalkKeys(n) {
-				walk(n[k], inside)
-			}
+			checkAndDescend(n, insideSelectBody, "")
 		case []any:
 			for _, v := range n {
 				walk(v, insideSelectBody)
 			}
 		}
 	}
-	walk(root, false)
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].hasSpan && out[j].hasSpan {
-			return out[i].span < out[j].span
+
+	m, ok := root.(map[string]any)
+	if !ok || len(m) != 1 {
+		walk(root, false) // defensive fallback; never a genuine polyglot AST shape
+		return out
+	}
+	for kind, bodyVal := range m {
+		switch kind {
+		case NodeSelect, NodeUnion, NodeIntersect, NodeExcept:
+			walk(bodyVal, true)
+		default:
+			stmtBody, isMap := bodyVal.(map[string]any)
+			if !isMap {
+				walk(bodyVal, false)
+				continue
+			}
+			elevatedField, _ := selectBodyRootField(kind, stmtBody)
+			checkAndDescend(stmtBody, false, elevatedField)
 		}
-		return false // preserve walk order otherwise (both fallback and mixed span/no-span pairs)
-	})
+	}
 	return out
 }
 
@@ -450,35 +508,6 @@ func sortedMapKeys(n map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// firstSpanStart searches node depth-first (a deterministic, sorted-key
-// order; the result is only ever "found" or "not found", so which
-// deterministic order is used does not matter) for the first {"span":
-// {"start": …}} it can reach, returning ok=false when none exists anywhere
-// in node's subtree (measured: a string/number literal argument carries no
-// span at all; only a column/identifier argument does).
-func firstSpanStart(node any) (int, bool) {
-	switch n := node.(type) {
-	case map[string]any:
-		if span, ok := n["span"].(map[string]any); ok {
-			if start, ok := span["start"].(float64); ok {
-				return int(start), true
-			}
-		}
-		for _, k := range sortedMapKeys(n) {
-			if v, ok := firstSpanStart(n[k]); ok {
-				return v, true
-			}
-		}
-	case []any:
-		for _, v := range n {
-			if v, ok := firstSpanStart(v); ok {
-				return v, true
-			}
-		}
-	}
-	return 0, false
 }
 
 // decodeStringLookupCall decodes one already-matched (IsStringLookup, len(args)>0)
@@ -662,11 +691,26 @@ func collectRawActionTexts(node any, out *[]string) {
 // top-level arguments (its db/table pair — an optional leading
 // host[, user[, pw]] shifts the index exactly like stringLookupArgDatabase
 // documents) joined with '.'; every other name's first top-level argument.
+//
+// A backquoted or double-quoted function name — for example a backtick-
+// quoted dictGet or a double-quote-quoted joinGet immediately followed by an
+// argument list — lexes as a single QUOTED_IDENTIFIER token whose .Text is
+// already the fully decoded name: quotes stripped, any doubled-quote escape
+// resolved to one (measured directly against the engine: a backtick-quoted
+// "weird`name" with its embedded backtick doubled decodes to the Go string
+// weird`name with one backtick; a double-quote-quoted "weird""name" with its
+// embedded quote doubled decodes to weird"name) — so IsStringLookup is
+// checked against that decoded text exactly like a plain VAR name (Task 7 fix
+// round 3 new breakage 1: unconditionally skipping every QUOTED_IDENTIFIER
+// let a quoted lookup name bypass this scan entirely, even though ClickHouse
+// accepts a quoted identifier as a function name and runs it as a real
+// lookup). Only a STRING token (a quoted string literal, never a callable
+// name in ClickHouse) is still skipped outright.
 func lookupCallsInRawTokens(toks []rawToken) []StringLookup {
 	var out []StringLookup
 	for i := 0; i+1 < len(toks); i++ {
-		if toks[i].TokenType == "STRING" || toks[i].TokenType == "QUOTED_IDENTIFIER" {
-			continue // a literal/quoted-identifier's decoded text is never a call name
+		if toks[i].TokenType == "STRING" {
+			continue // a string literal's decoded text is never a call name
 		}
 		if !IsStringLookup(toks[i].Text) || toks[i+1].TokenType != "L_PAREN" {
 			continue
