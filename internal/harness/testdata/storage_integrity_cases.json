@@ -13321,5 +13321,2961 @@
     "want_code": "Success", "want_stmt": "CREATE_MATERIALIZED_VIEW",
     "want_sql": "CREATE MATERIALIZED VIEW phys.\"db1.mv\" TO phys.\"db1.o\" AS SELECT * FROM phys.\"db1.p\" \"db1.p\"",
     "want_table_rewrites": {"db1.mv": "phys.db1.mv", "db1.o": "phys.db1.o", "db1.p": "phys.db1.p"}, "want_accessed": [{"original_database": "db1", "original_table": "mv", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "p", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_nested_paren_phys_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN ((phys.`db2.x`))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_nested_paren_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN ((phys.`db2.x`))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_nested_paren_hg_safe_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_safe is not addressable",
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_nested_paren_hg_safe_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_safe is not addressable",
+    "want_accessed": [{"original_database": "hg_safe", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_in_nested_paren_param_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN (({p:Identifier}))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_nested_paren_param_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN (({p:Identifier}))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_in_paren_param_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN ({p:Identifier})",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_paren_param_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN ({p:Identifier})",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_in_call_nested_paren_phys_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE in(a, ((phys.`db2.x`)))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_call_nested_paren_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE in(a, ((phys.`db2.x`)))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_nested_paren_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN ((`db2.x`))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_nested_paren_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN ((`db2.x`))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_paren_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN (`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_paren_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN (`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_call_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE in(a, `db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE in(a, phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_call_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE in(a, `db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE in(a, phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_not_in_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a NOT IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a NOT IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_not_in_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a NOT IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a NOT IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_global_in_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a GLOBAL IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a GLOBAL IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_global_in_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a GLOBAL IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a GLOBAL IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_nullin_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE nullIn(a, `db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE nullIn(a, phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_nullin_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE nullIn(a, `db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE nullIn(a, phys.\"db1.db2.x\")",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_tuple_in_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE (a, b) IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE (a, b) IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_tuple_in_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE (a, b) IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE (a, b) IN phys.\"db1.db2.x\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o", "db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}, {"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_in_bare_identifier_rewritten",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN (b)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.b\")",
+    "want_table_rewrites": {"b": "phys.db1.b", "db1.o": "phys.db1.o"}, "want_accessed": [{"original_table": "b", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_in_bare_identifier_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a IN (b)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (phys.\"db1.b\")",
+    "want_table_rewrites": {"b": "phys.db1.b", "db1.o": "phys.db1.o"}, "want_accessed": [{"original_table": "b", "logical_database": "db1", "physical_database": "phys"}, {"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_update_remote_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM remote('127.0.0.1','phys','db2.x')) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_remote_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM remote('127.0.0.1','phys','db2.x')) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_update_param_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM {p:Identifier}) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_param_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM {p:Identifier}) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_alter_update_merge_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM merge(currentDatabase(),'^db2')) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_merge_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM merge(currentDatabase(),'^db2')) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_update_dotted_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM `db2.x`) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_dotted_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM `db2.x`) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_update_hg_promote_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM hg_promote.x) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_promote is not addressable",
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_hg_promote_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM hg_promote.x) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_promote.x is not directly addressable",
+    "want_accessed": [{"original_database": "hg_promote", "original_table": "x", "physical_database": "hg_promote", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_alter_update_param_assignment_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_param_assignment_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_alter_delete_in_phys_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_delete_in_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_delete_in_phys_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_delete_in_phys_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_delete_in_param_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN {p:Identifier}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_delete_in_param_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN {p:Identifier}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_alter_delete_in_merge_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM merge(currentDatabase(),'^db2'))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_delete_in_merge_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM merge(currentDatabase(),'^db2'))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_delete_in_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_delete_in_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_delete_in_hg_safe_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN hg_safe.db1__t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_safe is not addressable",
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_delete_in_hg_safe_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o DELETE WHERE a IN hg_safe.db1__t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_alter_multi_delete_in_phys_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_multi_delete_in_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_multi_delete_in_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_multi_delete_in_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_delete_in_dotted_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "DELETE FROM db1.o WHERE a IN (SELECT a FROM `db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_delete_in_dotted_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "DELETE FROM db1.o WHERE a IN (SELECT a FROM `db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_update_in_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "UPDATE db1.o SET b = 1 WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_update_in_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "UPDATE db1.o SET b = 1 WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_insert_values_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "INSERT INTO db1.o VALUES ((SELECT max(a) FROM db1.p))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_insert_values_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "INSERT INTO db1.o VALUES ((SELECT max(a) FROM db1.p))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_create_default_hg_promote_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_promote is not addressable",
+    "want_accessed": [{"original_database": "hg_promote", "logical_database": "hg_promote"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_create_default_hg_promote_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_create_default_hg_safe_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_safe is not addressable",
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_create_default_hg_safe_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_create_default_phys_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM phys.`db2.x`)) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_create_default_phys_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM phys.`db2.x`)) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_create_materialized_in_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE TABLE db1.n (a UInt64 MATERIALIZED a IN `db2.x`) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_create_materialized_in_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.n (a UInt64 MATERIALIZED a IN `db2.x`) ENGINE = Memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_modify_column_hg_unsafe_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM hg_unsafe.db1__t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_unsafe is not addressable",
+    "want_accessed": [{"original_database": "hg_unsafe", "logical_database": "hg_unsafe"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_modify_column_hg_unsafe_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM hg_unsafe.db1__t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_modify_ttl_in_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_modify_ttl_in_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_add_column_in_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_add_column_in_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_replace_partition_phys_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o REPLACE PARTITION tuple() FROM phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_replace_partition_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o REPLACE PARTITION tuple() FROM phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_fetch_partition_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o FETCH PARTITION tuple() FROM '/clickhouse/tables/x'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_fetch_partition_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o FETCH PARTITION tuple() FROM '/clickhouse/tables/x'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_attach_partition_from_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o ATTACH PARTITION tuple() FROM db1.p",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_attach_partition_from_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o ATTACH PARTITION tuple() FROM db1.p",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_move_partition_to_table_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o MOVE PARTITION tuple() TO TABLE db1.p",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_move_partition_to_table_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o MOVE PARTITION tuple() TO TABLE db1.p",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_update_literal_in_allowed",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = 1 WHERE a IN (1, 2)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "ALTER_TABLE",
+    "want_sql": "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE a IN (1, 2)",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_update_literal_in_v2_allowed",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = 1 WHERE a IN (1, 2)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "ALTER_TABLE",
+    "want_sql": "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE a IN (1, 2)",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_add_projection_allowed",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o ADD PROJECTION p (SELECT a ORDER BY b)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "ALTER_TABLE",
+    "want_sql": "ALTER TABLE phys.\"db1.o\" ADD PROJECTION p(SELECT a ORDER BY b)",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_add_projection_v2_allowed",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o ADD PROJECTION p (SELECT a ORDER BY b)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "ALTER_TABLE",
+    "want_sql": "ALTER TABLE phys.\"db1.o\" ADD PROJECTION p(SELECT a ORDER BY b)",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_modify_query_hg_safe_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database hg_safe is not addressable",
+    "want_accessed": [{"original_database": "hg_safe", "logical_database": "hg_safe"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_modify_query_hg_safe_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_alter_modify_query_phys_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_modify_query_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM phys.`db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_accessed": [{"original_database": "phys", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_alter_modify_query_param_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM {p:Identifier}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_modify_query_param_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM {p:Identifier}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_alter_modify_query_dotted_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_alter_modify_query_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_mv_engine_merge_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(currentDatabase(),'^db2') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Merge is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_engine_merge_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(currentDatabase(),'^db2') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Merge is not accepted"
+  },
+  {
+    "name": "si_tr_mv_engine_buffer_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Buffer(currentDatabase(), `db2.x`, 1, 10, 100, 10000, 1000000, 10000000, 100000000) AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Buffer is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_engine_buffer_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Buffer(currentDatabase(), `db2.x`, 1, 10, 100, 10000, 1000000, 10000000, 100000000) AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Buffer is not accepted"
+  },
+  {
+    "name": "si_tr_mv_engine_distributed_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Distributed('c', currentDatabase(), `db2.x`) AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Distributed is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_engine_distributed_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Distributed('c', currentDatabase(), `db2.x`) AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Distributed is not accepted"
+  },
+  {
+    "name": "si_tr_mv_engine_kafka_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Kafka('h:9092', 't', 'g', 'JSONEachRow') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Kafka is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_engine_kafka_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Kafka('h:9092', 't', 'g', 'JSONEachRow') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Kafka is not accepted"
+  },
+  {
+    "name": "si_tr_mv_setting_disk_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS disk = disk(type=local, path='/') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting disk is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_setting_disk_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS disk = disk(type=local, path='/') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting disk is not accepted"
+  },
+  {
+    "name": "si_tr_mv_setting_storage_policy_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS storage_policy = 'p' AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting storage_policy is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_setting_storage_policy_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS storage_policy = 'p' AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting storage_policy is not accepted"
+  },
+  {
+    "name": "si_tr_mv_engine_merge_regexp_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(REGEXP('hg_.*'),'.*') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine Merge is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_engine_merge_regexp_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(REGEXP('hg_.*'),'.*') AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity Merge table engine namespace is not statically resolvable",
+    "want_accessed": [{"original_database": "hg_promote", "physical_database": "hg_promote", "is_storage_integrity": true}, {"original_database": "hg_safe", "physical_database": "hg_safe", "is_storage_integrity": true}, {"original_database": "hg_unsafe", "physical_database": "hg_unsafe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_settings_additional_table_filters_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o SETTINGS additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_table_filters is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_settings_additional_table_filters_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o SETTINGS additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_table_filters is not accepted",
+    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_settings_additional_result_filter_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o SETTINGS additional_result_filter = 'a = (SELECT max(a) FROM `db2.x`)'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_result_filter is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_settings_additional_result_filter_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o SETTINGS additional_result_filter = 'a = (SELECT max(a) FROM `db2.x`)'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_result_filter is not accepted",
+    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_settings_parallel_replicas_custom_key_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o SETTINGS parallel_replicas_custom_key = 'a'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting parallel_replicas_custom_key is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_settings_parallel_replicas_custom_key_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o SETTINGS parallel_replicas_custom_key = 'a'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting parallel_replicas_custom_key is not accepted",
+    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_settings_subquery_value_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o SETTINGS max_threads = (SELECT 1)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_settings_subquery_value_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o SETTINGS max_threads = (SELECT 1)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_insert_settings_additional_table_filters_rejected",
+    "contract_version": "V1",
+    "sql": "INSERT INTO db1.o SELECT * FROM db1.p SETTINGS additional_table_filters = {'db1.p': 'a > 1'}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_table_filters is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_insert_settings_additional_table_filters_v2_rejected",
+    "contract_version": "V2",
+    "sql": "INSERT INTO db1.o SELECT * FROM db1.p SETTINGS additional_table_filters = {'db1.p': 'a > 1'}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_table_filters is not accepted"
+  },
+  {
+    "name": "si_tr_settings_plain_values_allowed",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_settings_plain_values_v2_allowed",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_set_additional_table_filters_rejected",
+    "contract_version": "V1",
+    "sql": "SET additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table setting additional_table_filters is not accepted",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_set_additional_table_filters_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SET additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_set_subquery_value_rejected",
+    "contract_version": "V1",
+    "sql": "SET max_threads = (SELECT count() FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_set_subquery_value_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SET max_threads = (SELECT count() FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_set_plain_values_passthrough",
+    "contract_version": "V1",
+    "sql": "SET max_threads = 1, max_block_size = 'a', load_balancing = random",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "",
+    "want_sql": "SET max_threads = 1, max_block_size = 'a', load_balancing = random",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_goerr_lambda_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT arrayMap(x -> x IN (SELECT a FROM phys.`db2.x`), [1]) FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_goerr_lambda_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT arrayMap(x -> x IN (SELECT a FROM phys.`db2.x`), [1]) FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_goerr_any_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a = ANY (SELECT a FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_goerr_any_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM db1.o WHERE a = ANY (SELECT a FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_goerr_values_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM values('a UInt64', (SELECT max(a) FROM phys.`db2.x`))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_goerr_values_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM values('a UInt64', (SELECT max(a) FROM phys.`db2.x`))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_goerr_nested_in_60_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_goerr_nested_in_60_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_goerr_union_500_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_goerr_union_500_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o UNION ALL SELECT a FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_describe_subquery_phys_rejected",
+    "contract_version": "V1",
+    "sql": "DESCRIBE (SELECT * FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_describe_subquery_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "DESCRIBE (SELECT * FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_describe_subquery_hg_safe_rejected",
+    "contract_version": "V1",
+    "sql": "DESCRIBE (SELECT * FROM hg_safe.db1__t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_describe_subquery_hg_safe_v2_rejected",
+    "contract_version": "V2",
+    "sql": "DESCRIBE (SELECT * FROM hg_safe.db1__t)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_describe_table_subquery_rejected",
+    "contract_version": "V1",
+    "sql": "DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_describe_table_subquery_v2_rejected",
+    "contract_version": "V2",
+    "sql": "DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_describe_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "DESCRIBE TABLE `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "DESCRIBE",
+    "want_sql": "DESCRIBE TABLE phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_describe_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "DESCRIBE TABLE `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "DESCRIBE",
+    "want_sql": "DESCRIBE TABLE phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_exists_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "EXISTS TABLE `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "EXISTS_TABLE",
+    "want_sql": "EXISTS TABLE phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_exists_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "EXISTS TABLE `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "EXISTS_TABLE",
+    "want_sql": "EXISTS TABLE phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_show_create_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SHOW CREATE TABLE `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SHOW_CREATE_TABLE",
+    "want_sql": "SHOW CREATE TABLE phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_show_create_dotted_v2_rewritten",
+    "contract_version": "V2",
+    "sql": "SHOW CREATE TABLE `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SHOW_CREATE_TABLE",
+    "want_sql": "SHOW CREATE TABLE phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_show_columns_dotted_rewritten",
+    "contract_version": "V1",
+    "sql": "SHOW COLUMNS FROM `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SHOW_TABLES",
+    "want_sql": "SHOW COLUMNS FROM phys.`db1.db2.x`",
+    "want_table_rewrites": {"db2.x": "phys.db1.db2.x"}, "want_accessed": [{"original_table": "db2.x", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_show_columns_dotted_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SHOW COLUMNS FROM `db2.x`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity logical database db1 is not directly addressable",
+    "want_accessed": [{"original_database": "db1", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_tr_exists_empty_rejected",
+    "contract_version": "V1",
+    "sql": "EXISTS",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_exists_empty_v2_rejected",
+    "contract_version": "V2",
+    "sql": "EXISTS",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_show_create_empty_rejected",
+    "contract_version": "V1",
+    "sql": "SHOW CREATE",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_show_create_empty_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SHOW CREATE",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_explain_param_rejected",
+    "contract_version": "V1",
+    "sql": "EXPLAIN SELECT * FROM {p:Identifier}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_explain_param_v2_rejected",
+    "contract_version": "V2",
+    "sql": "EXPLAIN SELECT * FROM {p:Identifier}",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "query parameters are not supported in a database or table position"
+  },
+  {
+    "name": "si_tr_detach_phys_rejected",
+    "contract_version": "V1",
+    "sql": "DETACH TABLE phys.x",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_accessed": [{"original_database": "phys", "original_table": "x", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_detach_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "DETACH TABLE phys.x",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
+    "want_accessed": [{"original_database": "phys", "original_table": "x", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_optimize_phys_rejected",
+    "contract_version": "V1",
+    "sql": "OPTIMIZE TABLE phys.x",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_accessed": [{"original_database": "phys", "original_table": "x", "logical_database": "phys"}],
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_optimize_phys_v2_rejected",
+    "contract_version": "V2",
+    "sql": "OPTIMIZE TABLE phys.x",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
+    "want_accessed": [{"original_database": "phys", "original_table": "x", "logical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_kill_v2_rejected",
+    "contract_version": "V2",
+    "sql": "KILL QUERY WHERE query_id = 'x'",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_attach_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ATTACH TABLE db1.x",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
+    "want_accessed": [{"original_database": "db1", "original_table": "x", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_detach_v2_rejected",
+    "contract_version": "V2",
+    "sql": "DETACH TABLE db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded",
+    "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_tr_explain_v2_rejected",
+    "contract_version": "V2",
+    "sql": "EXPLAIN SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_lookup_non_literal_select_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT dictGet(currentDatabase() || '.d', 'v', 1)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "dictGet target \"\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_lookup_non_literal_select_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT dictGet(currentDatabase() || '.d', 'v', 1)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "dictGet target \"\" does not resolve through the caller's databases"
+  },
+  {
+    "name": "si_tr_lookup_non_literal_alter_rejected",
+    "contract_version": "V1",
+    "sql": "ALTER TABLE db1.o UPDATE b = dictGet(currentDatabase() || '.d', 'v', 1) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "dictGet target \"\" does not resolve through the caller's databases",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_lookup_non_literal_alter_v2_rejected",
+    "contract_version": "V2",
+    "sql": "ALTER TABLE db1.o UPDATE b = dictGet(currentDatabase() || '.d', 'v', 1) WHERE 1",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "dictGet target \"\" does not resolve through the caller's databases"
+  },
+  {
+    "name": "si_tr_engine_lowercase_memory_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE TABLE db1.n (a UInt64) ENGINE = memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine memory is not recognised",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_engine_lowercase_memory_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE TABLE db1.n (a UInt64) ENGINE = memory",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "table engine memory is not recognised"
+  },
+  {
+    "name": "si_tr_mv_refresh_rejected",
+    "contract_version": "V1",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_mv_refresh_v2_rejected",
+    "contract_version": "V2",
+    "sql": "CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_insert_from_infile_rejected",
+    "contract_version": "V1",
+    "sql": "INSERT INTO db1.o FROM INFILE 'x.csv' FORMAT CSV",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_insert_from_infile_v2_rejected",
+    "contract_version": "V2",
+    "sql": "INSERT INTO db1.o FROM INFILE 'x.csv' FORMAT CSV",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "name": "si_tr_top_level_paren_select_rejected",
+    "contract_version": "V1",
+    "sql": "(SELECT * FROM db1.o)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_top_level_paren_select_v2_rejected",
+    "contract_version": "V2",
+    "sql": "(SELECT * FROM db1.o)",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_tr_hascolumnintable_accessed_once",
+    "contract_version": "V1",
+    "sql": "SELECT hasColumnInTable('db1', 'o', 'a'), hasColumnInTable('db1', 'o', 'b') FROM db1.o",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "want_code": "Success", "want_stmt": "SELECT",
+    "want_sql": "SELECT hasColumnInTable('phys', 'db1.o', 'a'), hasColumnInTable('phys', 'db1.o', 'b') FROM phys.\"db1.o\" \"db1.o\"",
+    "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
   }
 ]
