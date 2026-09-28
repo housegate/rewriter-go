@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/ebitengine/purego v0.10.0
-	github.com/housegate/rewriter-proto v0.3.1-0.20260926155709-df3c3b3620ff
+	github.com/housegate/rewriter-proto v0.4.0
 	github.com/tobilg/polyglot/packages/go v0.12.1
 	golang.org/x/sys v0.42.0
 	google.golang.org/grpc v1.81.1
