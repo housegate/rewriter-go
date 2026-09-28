@@ -45,6 +45,13 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 	}
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_DESCRIBE)
 	sel := nameresolve.FindActive(opts)
+	if sel.Mode == nameresolve.ModeDynamic && (t.Shape == engine.ObjectTargetSubquery || t.Shape == engine.ObjectTargetNone) {
+		// Spec 2026-09-26 R7: DESCRIBE (SELECT …) is not run through the
+		// SELECT pipeline, so its subquery is refused rather than forwarded
+		// unrewritten; so is a DESCRIBE with no target at all.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	if sel.Mode == nameresolve.ModeDynamic {
 		if t.ObjType == "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.Table, sel.Dynamic) {
 			recordAccessedDatabase(resp, t.Table, sel.Dynamic)
@@ -83,6 +90,25 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 			return resp, true, nil
 		}
 	}
-	resp.SqlAfterRewrite = sql // pass through (Spec E D6 will resolve non-SI targets)
+	if sel.Mode == nameresolve.ModeDynamic && t.Shape == engine.ObjectTargetName && tt.DB == "" {
+		// Spec 2026-09-26 R7: an unqualified target (dotted or not) resolves
+		// exactly like FROM, in the session's logical database, as EXISTS /
+		// SHOW CREATE already do — passed through, ClickHouse would bind it
+		// in the physical database. A qualified ordinary target still passes
+		// through unchanged (it names a logical database ClickHouse does not
+		// have); a protected one was refused by the preflight.
+		resp.OriginalAccessedTables = nil
+		d, ok := decideWriteTarget(tt, "DESCRIBE TABLE", sel, resp)
+		if !ok {
+			return resp, true, nil
+		}
+		db, table := t.DB, t.Table
+		if d.Action == engine.ActionRename {
+			db, table = d.NewDB, d.NewTable
+		}
+		resp.SqlAfterRewrite = buildObjectSQL("DESCRIBE", t.Temporary, db, table)
+		return resp, true, nil
+	}
+	resp.SqlAfterRewrite = sql // a table-function target (T5-classified by the preflight) or static mode
 	return resp, true, nil
 }

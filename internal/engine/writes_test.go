@@ -549,6 +549,403 @@ func TestSetViewBody_nonViewRejected(t *testing.T) {
 	}
 }
 
+// --- Task 6: INSERT … SELECT / CTAS embedded body extraction (spec T4, second half) ---
+//
+// ExtractInsertBody/SetInsertBody and ExtractCreateSelectBody/SetCreateSelectBody
+// are the same contract as ExtractViewBody/SetViewBody, keyed on insert.query and
+// create_table.as_select respectively (measured shapes, Step 1).
+
+func TestInsertBody_extractRewriteSet(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("INSERT INTO db.t SELECT * FROM db.s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractInsertBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	tts, err := CollectSelectTables(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tts) != 1 || tts[0].Table != "s" {
+		t.Fatalf("body tables=%+v", tts)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetInsertBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Back-alias on the renamed source, same Phase-1 SELECT-rewrite contract as
+	// TestViewBody_extractRewriteSet.
+	if !sqlEq(t, e, got, `INSERT INTO db.t SELECT * FROM phys.s2 "db.s"`) {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestInsertBody_roundTripNoChange confirms extract -> (no change) -> SetInsertBody
+// -> Generate is semantically identical to the original: the {"select":...} body
+// splices back without loss.
+func TestInsertBody_roundTripNoChange(t *testing.T) {
+	e := newTestEngine(t)
+	const src = "INSERT INTO db.t SELECT * FROM db.s"
+	ast, err := e.ParseOne(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractInsertBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	out, err := SetInsertBody(ast, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, got, src) {
+		t.Errorf("round-trip got %q want semantically %q", got, src)
+	}
+}
+
+// TestInsertBody_extractRewriteSet_paren pins the fix-round-1 finding: a
+// PARENTHESIZED INSERT ... SELECT body (`INSERT INTO t (SELECT ...)`) is
+// polyglot's {"subquery":{"this":{"select":...}, ...}} wrapper around the
+// same read body (verified via probe), not a bare {"select":...} — so
+// isReadBody would see only "subquery" and reject it as not-a-read-body
+// without subqueryShells peeling it first. Confirms the body is still
+// extracted, rewritten and reported, and the parenthesization survives
+// Set/Generate.
+func TestInsertBody_extractRewriteSet_paren(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("INSERT INTO db.t (SELECT * FROM db.s)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractInsertBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	tts, err := CollectSelectTables(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tts) != 1 || tts[0].Table != "s" {
+		t.Fatalf("body tables=%+v (paren wrapper not peeled)", tts)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetInsertBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// INSERT's paren wrapper round-trips stably (unlike CTAS's, see
+	// TestCreateSelectBody_extractRewriteSet's note) — sqlEq is safe here.
+	if !sqlEq(t, e, got, `INSERT INTO db.t (SELECT * FROM phys.s2 "db.s")`) {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestInsertBody_roundTripNoChange_paren confirms extract -> (no change) ->
+// SetInsertBody -> Generate keeps the parenthesization exactly, for a
+// parenthesized INSERT ... SELECT body.
+func TestInsertBody_roundTripNoChange_paren(t *testing.T) {
+	e := newTestEngine(t)
+	const src = "INSERT INTO db.t (SELECT * FROM db.s)"
+	ast, err := e.ParseOne(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractInsertBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	out, err := SetInsertBody(ast, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sqlEq(t, e, got, src) {
+		t.Errorf("round-trip got %q want semantically %q", got, src)
+	}
+}
+
+// TestExtractInsertBody_valuesAndFormatNotOk pins the Step-1 measured shapes
+// that are NOT a read body: a VALUES insert (insert.query is absent/nil) and a
+// FORMAT data clause (insert.query is a {"command":{"this":"FORMAT ..."}} node,
+// not a SELECT) both return ok=false — there is no embedded source to rewrite.
+func TestExtractInsertBody_valuesAndFormatNotOk(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		"INSERT INTO db.t (x) VALUES (1)",
+		"INSERT INTO db.t FORMAT CSV\n1,2",
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", sql, err)
+		}
+		if _, ok, err := ExtractInsertBody(ast); err != nil || ok {
+			t.Errorf("%s: ExtractInsertBody ok=%v err=%v, want ok=false err=nil", sql, ok, err)
+		}
+	}
+}
+
+// TestSetInsertBody_nonInsertRejected confirms SetInsertBody guards its kind:
+// calling it on a non-insert AST is an error, not a silent splice.
+func TestSetInsertBody_nonInsertRejected(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("DROP TABLE db.t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetInsertBody(ast, AST(`{"select":{}}`)); err == nil {
+		t.Errorf("SetInsertBody on non-insert kind: err=nil want error")
+	}
+}
+
+func TestCreateSelectBody_extractRewriteSet(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("CREATE TABLE db.n ENGINE = Memory AS SELECT * FROM db.s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractCreateSelectBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	tts, err := CollectSelectTables(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tts) != 1 || tts[0].Table != "s" {
+		t.Fatalf("body tables=%+v", tts)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetCreateSelectBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exact match, not sqlEq: the generator wraps a CTAS body in parens on every
+	// Generate call (AS (SELECT ...)), which is NOT idempotent under a second
+	// parse+generate round trip (it double-wraps), so sqlEq's two-sided
+	// normalization would compare an extra paren layer against none. Comparing
+	// this single Generate() call's exact output sidesteps that and matches how
+	// native_tableref_test.go pins CTAS wantSQL (exact, not sqlEq).
+	if want := `CREATE TABLE db.n ENGINE=Memory AS (SELECT * FROM phys.s2 "db.s")`; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// TestCreateSelectBody_roundTripNoChange confirms extract -> (no change) ->
+// SetCreateSelectBody -> Generate is semantically identical to the original
+// (modulo the generator's unconditional AS (...) wrapping around a CTAS body —
+// see the exact-match note in TestCreateSelectBody_extractRewriteSet).
+func TestCreateSelectBody_roundTripNoChange(t *testing.T) {
+	e := newTestEngine(t)
+	const src = "CREATE TABLE db.n ENGINE = Memory AS SELECT * FROM db.s"
+	ast, err := e.ParseOne(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractCreateSelectBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	out, err := SetCreateSelectBody(ast, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `CREATE TABLE db.n ENGINE=Memory AS (SELECT * FROM db.s)`; got != want {
+		t.Errorf("round-trip got %q want %q", got, want)
+	}
+}
+
+// TestCreateSelectBody_extractRewriteSet_paren pins the fix-round-1 finding: a
+// PARENTHESIZED CTAS body (`AS (SELECT ...)`) is polyglot's
+// {"subquery":{"this":{"select":...}, ...}} wrapper around the same read body
+// (verified via probe), not a bare {"select":...}. Confirms the body is still
+// extracted, rewritten and reported, and the parenthesization survives
+// Set/Generate — with the generator's own unconditional extra paren layer on
+// top (see the exact-match note above): a singly-parenthesized original
+// therefore renders with TWO paren layers, matching a plain parse+Generate
+// round trip of the same original SQL with no rewriting at all (verified via
+// probe: `AS (SELECT ...)` alone round-trips to `AS ((SELECT ...))`).
+func TestCreateSelectBody_extractRewriteSet_paren(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("CREATE TABLE db.n ENGINE = Memory AS (SELECT * FROM db.s)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractCreateSelectBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	tts, err := CollectSelectTables(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tts) != 1 || tts[0].Table != "s" {
+		t.Fatalf("body tables=%+v (paren wrapper not peeled)", tts)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetCreateSelectBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `CREATE TABLE db.n ENGINE=Memory AS ((SELECT * FROM phys.s2 "db.s"))`; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// TestCreateSelectBody_roundTripNoChange_paren confirms extract -> (no
+// change) -> SetCreateSelectBody -> Generate for a parenthesized CTAS body
+// matches a plain parse+Generate round trip with no rewriting (both add the
+// generator's unconditional extra paren layer).
+func TestCreateSelectBody_roundTripNoChange_paren(t *testing.T) {
+	e := newTestEngine(t)
+	const src = "CREATE TABLE db.n ENGINE = Memory AS (SELECT * FROM db.s)"
+	ast, err := e.ParseOne(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractCreateSelectBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	out, err := SetCreateSelectBody(ast, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `CREATE TABLE db.n ENGINE=Memory AS ((SELECT * FROM db.s))`; got != want {
+		t.Errorf("round-trip got %q want %q", got, want)
+	}
+}
+
+// TestCreateSelectBody_extractRewriteSet_doubleParen pins subqueryShells'
+// RECURSIVE peel: `AS ((SELECT ...))` nests polyglot's subquery wrapper
+// around itself (verified via probe: {"subquery":{"this":{"subquery":
+// {"this":{"select":...}, ...}}, ...}}). A single-level peel would leave the
+// inner shell in place and isReadBody would still see "subquery", not
+// "select". Confirms two levels of parenthesization survive Set/Generate.
+func TestCreateSelectBody_extractRewriteSet_doubleParen(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("CREATE TABLE db.n ENGINE = Memory AS ((SELECT * FROM db.s))")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok, err := ExtractCreateSelectBody(ast)
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	tts, err := CollectSelectTables(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tts) != 1 || tts[0].Table != "s" {
+		t.Fatalf("body tables=%+v (nested paren wrapper not fully peeled)", tts)
+	}
+	body2, err := RewriteSelectTables(body, func(tt TableTarget) TableDecision {
+		return TableDecision{Action: ActionRename, NewDB: "phys", NewTable: "s2"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := SetCreateSelectBody(ast, body2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Generate(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `CREATE TABLE db.n ENGINE=Memory AS (((SELECT * FROM phys.s2 "db.s")))`; got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+// TestExtractCreateSelectBody_emptyDropsBody pins the Step-1 measured shape: a
+// plain CREATE TABLE (no AS SELECT at all) and `EMPTY AS SELECT` (polyglot
+// drops the body entirely) both leave create_table.as_select absent, so there
+// is nothing to rewrite or report.
+func TestExtractCreateSelectBody_emptyDropsBody(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		"CREATE TABLE db.n (a UInt64) ENGINE = Memory",
+		"CREATE TABLE db.n ENGINE = Memory EMPTY AS SELECT * FROM db.s",
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", sql, err)
+		}
+		if _, ok, err := ExtractCreateSelectBody(ast); err != nil || ok {
+			t.Errorf("%s: ExtractCreateSelectBody ok=%v err=%v, want ok=false err=nil", sql, ok, err)
+		}
+	}
+}
+
+// TestSetCreateSelectBody_nonCreateTableRejected confirms SetCreateSelectBody
+// guards its kind: calling it on a non-create_table AST is an error, not a
+// silent splice.
+func TestSetCreateSelectBody_nonCreateTableRejected(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("DROP TABLE db.t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetCreateSelectBody(ast, AST(`{"select":{}}`)); err == nil {
+		t.Errorf("SetCreateSelectBody on non-create_table kind: err=nil want error")
+	}
+}
+
 // --- Task 5: insert (target flags + FORMAT-payload-preserving GenerateInsert) ---
 
 func TestInspectWrite_insert(t *testing.T) {

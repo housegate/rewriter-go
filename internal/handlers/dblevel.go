@@ -223,6 +223,14 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 		rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalDatabaseRejectMessage(origin))
 		return resp, true, nil
 	}
+	// Defensive: PreflightTableReferences (spec 2026-09-26 T3, Task 4) already
+	// rejects a protected USE target before RewriteDBLevel ever runs. This only
+	// matters for a caller that invokes RewriteDBLevel directly.
+	if nameresolve.ProtectedDatabase(origin, dyn) {
+		recordAccessedDatabase(resp, origin, dyn)
+		rejectDBInvalid(resp, nameresolve.ProtectedDatabaseRejectMessage(origin))
+		return resp, true, nil
+	}
 	physical, ok := nameresolve.ResolvePhysicalDatabase(origin, dyn)
 	if !ok {
 		rejectDBInvalid(resp, "USE target '"+origin+"' is not in database_map and not a known physical database; user does not have this database")
@@ -314,8 +322,17 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if rejectShowTargetStorageIntegrityNamespace(resp, sql, info, dyn) {
 			return resp, true, nil
 		}
+		if r, rejected := showBodyRejection(e, info, sql, dyn, resp); rejected {
+			return r, true, nil
+		}
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
+		}
+		if info.HasTableClause && info.ShowTableResolved && !info.HasDBClause && info.ShowWhat != "DICTIONARIES" {
+			// Spec 2026-09-26 R7: an unqualified table (dotted or not) resolves
+			// exactly like FROM, in the session's logical database — passed
+			// through, ClickHouse would bind it in the physical database.
+			return dispatchShowUnqualifiedTable(e, sql, info, dyn, resp)
 		}
 		if info.HasTableClause {
 			// Echo the original text once the namespace is proved ordinary, as
@@ -328,8 +345,14 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		}
 		return passthroughDB(e, ast, sql, resp)
 	case showTargetLess:
+		if r, rejected := showBodyRejection(e, info, sql, dyn, resp); rejected {
+			return r, true, nil
+		}
 		return passthroughDB(e, ast, sql, resp)
 	case showUnknown:
+		if !nameresolve.StorageIntegritySurfaceActive(dyn) && engine.ShowBodyIsUngoverned(e, info, sql) {
+			return rejectShowBody(sql, resp)
+		}
 		if nameresolve.StorageIntegritySurfaceActive(dyn) {
 			// Fall through unhandled: native.go's pass-through tail is the Spec I
 			// D1 catch-all and answers with the generic unmodelled-statement
@@ -538,4 +561,63 @@ func buildLikeClause(info engine.DBLevelInfo) string {
 // therefore doubled BEFORE quotes are doubled (Spec I D4).
 func escapeSQLLiteral(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
+}
+
+// dispatchShowUnqualifiedTable resolves the unqualified table of a SHOW
+// COLUMNS / INDEX family statement through decideWriteTarget, like EXISTS /
+// SHOW CREATE / DESCRIBE, and splices the physical name into the original text.
+func dispatchShowUnqualifiedTable(e engine.Engine, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+	sel := nameresolve.Selection{Mode: nameresolve.ModeDynamic, Dynamic: dyn}
+	if resp.TableRewrites == nil {
+		resp.TableRewrites = map[string]string{}
+	}
+	tt := engine.TableTarget{Table: info.ShowTable}
+	d, ok := decideWriteTarget(tt, "SHOW "+info.ShowWhat, sel, resp)
+	if !ok {
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
+	if d.Action != engine.ActionRename {
+		return passthroughOriginalDB(sql, resp)
+	}
+	out, err := engine.SpliceShowTable(e, sql, engine.QuoteQualified(d.NewDB, d.NewTable))
+	if err != nil {
+		return nil, false, err
+	}
+	resp.SqlAfterRewrite = out
+	return resp, true, nil
+}
+
+// rejectShowBody refuses a verbatim-forwarded SHOW statement whose trailing
+// clauses carry SQL that could read a table (spec 2026-09-26 R7): the
+// statement is forwarded as written, so nothing there would be rewritten.
+func rejectShowBody(sql string, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+	return resp, true, nil
+}
+
+// showBodyRejection refuses a verbatim-forwarded SHOW statement whose trailing
+// clauses name a storage-integrity physical or reserved database while the SI
+// surface is active (T3 defers those names to the SI handlers, which never see
+// the SHOW body), with the SI physical-name message; then one whose trailing
+// clauses carry SQL that could read a table.
+func showBodyRejection(e engine.Engine, info engine.DBLevelInfo, sql string, dyn *pb.RewriteTableDynamicArgs, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool) {
+	if nameresolve.StorageIntegritySurfaceActive(dyn) {
+		for _, tt := range engine.ShowBodyQualifiedNames(e, info, sql) {
+			if nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, dyn) {
+				recordAccessedStorageIntegrityPhysicalTable(resp, tt.DB, tt.Table)
+				resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+				resp.SqlAfterRewrite = sql
+				rejectDBUnsupported(resp, nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table)))
+				return resp, true
+			}
+		}
+	}
+	if engine.ShowBodyIsUngoverned(e, info, sql) {
+		r, _, _ := rejectShowBody(sql, resp)
+		return r, true
+	}
+	return nil, false
 }

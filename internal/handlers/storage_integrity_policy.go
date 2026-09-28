@@ -33,7 +33,19 @@ func rejectStorageIntegrityNamespaces(e engine.Engine, resp *pb.RewriteSQLRespon
 			// must remain protected even when ClickHouse executes in a different
 			// physical database. Then resolve the actual physical execution context
 			// for protocol-owned hg_safe/hg_unsafe namespace checks.
-			if target.Table != "" {
+			//
+			// An IN-table ref is exempted from this exact-key check (but not from
+			// the physical-context check just below, which still applies): unlike
+			// a table function or table-engine source, an IN operand now has a
+			// real rewrite path of its own (RewriteSelectTables's inTable
+			// callback -> storageIntegrityDecision -> ActionSubquery), so an
+			// unqualified operand naming an Active, authorized logical table (spec
+			// 2026-09-26 T4) must reach that path instead of being blanket-rejected
+			// here the way a table function still is (controller review round 2,
+			// finding: `a IN t` under context db1 with db1.t Active was refused
+			// instead of reading through the derived safe/unsafe surface, exactly
+			// like the qualified `a IN db1.t` case already does).
+			if target.Table != "" && ref.Source != engine.NamespaceRefInTable {
 				if _, key, ok := nameresolve.LookupStorageIntegrity("", target.Table, sel.Dynamic); ok {
 					logical, authorized := nameresolve.AuthorizeStorageIntegrityLogical("", sel.Dynamic)
 					recordAccessedWriteUnique(resp, target, sel)
@@ -182,11 +194,31 @@ func tableFunctionExecutionDatabase(dyn *pb.RewriteTableDynamicArgs) string {
 	return ""
 }
 
+// recordAccessedWriteUnique adds tt to resp's accessed tables unless an
+// identical entry is already recorded. tt.DB is here the current-database
+// context this function (or its caller) already resolved — but by the time an
+// unqualified (UsesCurrentDatabase) operand's own TableTarget reached
+// buildAccessed earlier in the pipeline, that resolution hadn't happened yet,
+// so an unresolved placeholder ({OriginalDatabase: "", OriginalTable: tt.Table})
+// may already sit in resp.OriginalAccessedTables for the very same table.
+// Drop that placeholder before appending the resolved entry so the two don't
+// coexist as if they named different tables (controller review round 1,
+// finding 1).
 func recordAccessedWriteUnique(resp *pb.RewriteSQLResponse, tt engine.TableTarget, sel nameresolve.Selection) {
 	for _, accessed := range resp.GetOriginalAccessedTables() {
 		if accessed.GetOriginalDatabase() == tt.DB && accessed.GetOriginalTable() == tt.Table {
 			return
 		}
+	}
+	if tt.DB != "" {
+		filtered := make([]*pb.AccessedTable, 0, len(resp.GetOriginalAccessedTables()))
+		for _, accessed := range resp.GetOriginalAccessedTables() {
+			if accessed.GetOriginalDatabase() == "" && accessed.GetOriginalTable() == tt.Table {
+				continue
+			}
+			filtered = append(filtered, accessed)
+		}
+		resp.OriginalAccessedTables = filtered
 	}
 	recordAccessedWrite(resp, tt, sel)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
@@ -56,21 +57,38 @@ func TestStorageIntegrityContractV2_EmptyMapRefusesUnmodelledStatements(t *testi
 	}
 }
 
-func TestStorageIntegrityContractV1_EmptyMapStaysLegacy(t *testing.T) {
+// TestStorageIntegrityContractV1_EmptyMapRefusesUnmodelledButPassesSet pins
+// spec 2026-09-26 T7 (Task 7) for the V1-empty-map legacy path (storage
+// integrity inactive, per StorageIntegritySurfaceActive): SYSTEM RELOAD
+// CONFIG is now refused like every other unmodelled class, but a session SET
+// carries no table and keeps the pre-existing pass-through (isSessionSet's
+// carve-out applies only while the SI surface is inactive; see
+// TestStorageIntegrityContractV2_EmptyMapRefusesUnmodelledStatements for the
+// active-surface case, where SET stays refused too).
+func TestStorageIntegrityContractV1_EmptyMapRefusesUnmodelledButPassesSet(t *testing.T) {
 	e := newEngine(t)
 	opts := []*pb.RewriteOption{tableRewriteDynamic(v2Dynamic(siV1, false))}
-	for _, sql := range []string{"SYSTEM RELOAD CONFIG", "SET max_threads = 1"} {
-		t.Run(sql, func(t *testing.T) {
-			resp, err := doRewrite(e, sql, opts)
-			if err != nil {
-				t.Fatalf("doRewrite: %v", err)
-			}
-			if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != sql ||
-				resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
-				t.Fatalf("resp = %+v, want legacy Success pass-through without acknowledgement", resp)
-			}
-		})
-	}
+	t.Run("SYSTEM RELOAD CONFIG", func(t *testing.T) {
+		resp, err := doRewrite(e, "SYSTEM RELOAD CONFIG", opts)
+		if err != nil {
+			t.Fatalf("doRewrite: %v", err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage ||
+			resp.GetSqlAfterRewrite() != "SYSTEM RELOAD CONFIG" ||
+			resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+			t.Fatalf("resp = %+v, want unacknowledged UnsupportedStatement %q", resp, engine.UnsupportedStatementMessage)
+		}
+	})
+	t.Run("SET max_threads = 1", func(t *testing.T) {
+		resp, err := doRewrite(e, "SET max_threads = 1", opts)
+		if err != nil {
+			t.Fatalf("doRewrite: %v", err)
+		}
+		if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != "SET max_threads = 1" ||
+			resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+			t.Fatalf("resp = %+v, want legacy Success pass-through without acknowledgement", resp)
+		}
+	})
 }
 
 func TestStorageIntegrityContractV2_AcknowledgedOnEveryPath(t *testing.T) {

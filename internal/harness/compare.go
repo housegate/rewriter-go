@@ -32,6 +32,9 @@ func Compare(got, want *pb.RewriteSQLResponse, semanticEq SemanticEq) Diff {
 	if got.GetCode() != want.GetCode() {
 		add("code", got.GetCode(), want.GetCode())
 	}
+	if got.GetMessage() != want.GetMessage() {
+		add("message", got.GetMessage(), want.GetMessage())
+	}
 	if got.GetStatementType() != want.GetStatementType() {
 		add("statement_type", got.GetStatementType(), want.GetStatementType())
 	}
@@ -49,6 +52,9 @@ func Compare(got, want *pb.RewriteSQLResponse, semanticEq SemanticEq) Diff {
 	}
 	if !reflect.DeepEqual(got.GetFailedCteAliases(), want.GetFailedCteAliases()) {
 		add("failed_cte_aliases", got.GetFailedCteAliases(), want.GetFailedCteAliases())
+	}
+	if !accessedTablesEqual(got.GetOriginalAccessedTables(), want.GetOriginalAccessedTables()) {
+		add("original_accessed_tables", got.GetOriginalAccessedTables(), want.GetOriginalAccessedTables())
 	}
 	if !privilegeDeltasEqual(got.GetPrivilegesDeltas(), want.GetPrivilegesDeltas()) {
 		add("privileges_deltas", got.GetPrivilegesDeltas(), want.GetPrivilegesDeltas())
@@ -85,6 +91,31 @@ func privilegeDeltasEqual(a, b []*pb.PrivilegeDelta) bool {
 			x.GetGrantOption() != y.GetGrantOption() ||
 			!reflect.DeepEqual(x.GetPrivileges(), y.GetPrivileges()) ||
 			!granteesEqual(x.GetGrantees(), y.GetGrantees()) {
+			return false
+		}
+	}
+	return true
+}
+
+// accessedTablesEqual compares two AccessedTable lists field-by-field, in
+// order (proto messages can't be reflect.DeepEqual'd — they carry unexported
+// state). Order is significant: original_accessed_tables' emission order is
+// itself part of the pinned contract (spec 2026-09-26 §10.5). Every field is
+// diffed, in the same order the proto declares them:
+// original_database, original_table, logical_database, physical_database,
+// is_remote, is_storage_integrity. A length mismatch is a divergence too.
+func accessedTablesEqual(a, b []*pb.AccessedTable) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.GetOriginalDatabase() != y.GetOriginalDatabase() ||
+			x.GetOriginalTable() != y.GetOriginalTable() ||
+			x.GetLogicalDatabase() != y.GetLogicalDatabase() ||
+			x.GetPhysicalDatabase() != y.GetPhysicalDatabase() ||
+			x.GetIsRemote() != y.GetIsRemote() ||
+			x.GetIsStorageIntegrity() != y.GetIsStorageIntegrity() {
 			return false
 		}
 	}

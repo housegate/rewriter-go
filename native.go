@@ -76,12 +76,16 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 	}
 }
 
-// sealStorageIntegrityHandlerError closes the last fail-open escape hatch in
-// the active SI pipeline. A handler/collector error means the engine could not
-// prove the complete statement surface; exposing that as a Go error would make
-// legacy callers forward the original SQL. Empty-SI requests retain that legacy
-// error channel, while active SI converts it to an ordinary, acknowledged
-// UnsupportedStatement response that HouseGate must reject (Spec I D1/D2).
+// sealStorageIntegrityHandlerError closes the fail-open escape hatch a Go
+// error would otherwise be. A handler/collector/generator error (including a
+// polyglot recursion-limit error) means the engine could not prove the
+// complete statement surface; exposing that as a Go error would make legacy
+// callers forward the original SQL. Every dynamic-mode request therefore
+// converts it to an ordinary UnsupportedStatement response HouseGate must
+// reject: with the SI surface active the message is the SI catch-all (Spec I
+// D1/D2), otherwise the table-reference policy's "statement is not
+// supported" (spec 2026-09-26 §5). Static and no-rewrite requests keep the
+// legacy error channel.
 func sealStorageIntegrityHandlerError(
 	resp *pb.RewriteSQLResponse,
 	ast engine.AST,
@@ -93,7 +97,13 @@ func sealStorageIntegrityHandlerError(
 	handlerErr error,
 ) (*pb.RewriteSQLResponse, error) {
 	if siVersion == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
-		return nil, handlerErr
+		if sel.Mode != nameresolve.ModeDynamic {
+			return nil, handlerErr
+		}
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = engine.UnsupportedStatementMessage
+		finalize(resp, ast, sql, ec, siVersion, e, sel)
+		return resp, nil
 	}
 	resp.Code = pb.RewriteCode_UnsupportedStatement
 	resp.Message = StorageIntegrityUnmodelledMessage
@@ -119,14 +129,11 @@ func New(e engine.Engine, opts ...Option) *NativeRewriter {
 	return r
 }
 
-// StorageIntegrityUnmodelledMessage is returned when a request activates the
-// storage-integrity surface (a V1 request with a non-empty tables map, or any
-// V2 request) and execution reaches the unmodelled-statement pass-through.
-// The rewriter cannot prove such a statement is harmless to the
-// protocol-owned namespaces, so it refuses to forward it (Spec I D1).
+// StorageIntegrityUnmodelledMessage is the SI-active refusal of an
+// unmodelled statement class (nameresolve.StorageIntegrityUnmodelledMessage).
 // Enumerated classes replace this text with a more specific one; see
 // handlers.AnnotateStorageIntegrityReject.
-const StorageIntegrityUnmodelledMessage = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+const StorageIntegrityUnmodelledMessage = nameresolve.StorageIntegrityUnmodelledMessage
 
 // StorageIntegrityContractMessage rejects an active storage-integrity request
 // whose contract_version this engine does not implement.
@@ -134,9 +141,10 @@ const StorageIntegrityContractMessage = "storage-integrity contract version V1 o
 
 // doRewrite is the engine-level rewrite pipeline shared by NativeRewriter
 // (per-connection, options via callback) and Service (stateless, options
-// from the request). A non-nil error means an unexpected/internal failure
-// the caller should treat as fail-open; rewrite rejections travel inside
-// the response Code instead.
+// from the request). A non-nil error means an unexpected/internal failure on
+// a static or no-rewrite request; a dynamic-mode request never returns one
+// (sealStorageIntegrityHandlerError turns it into an UnsupportedStatement
+// response). Rewrite rejections travel inside the response Code.
 func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
 	siVersion := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
@@ -156,6 +164,13 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		}
 		siVersion = version
 		resp.StorageIntegrityContractVersion = siVersion
+	}
+	if selection.Mode == nameresolve.ModeDynamic {
+		if err := nameresolve.ValidateProtectedDatabases(selection.Dynamic); err != nil {
+			resp.Code = pb.RewriteCode_InvalidRewriteRequest
+			resp.Message = err.Error()
+			return resp, nil
+		}
 	}
 	ast, err := e.ParseOne(sql)
 	if err != nil {
@@ -190,6 +205,15 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 			finalize(resp, ast, sql, ec, siVersion, e, selection)
 			return resp, nil
 		}
+	}
+
+	// Table-reference policy (spec 2026-09-26 §5): identifier parameters and
+	// protected databases are refused before any handler can rewrite them.
+	if presp, handled, perr := handlers.PreflightTableReferences(e, ast, sql, opts); perr != nil {
+		return sealStorageIntegrityHandlerError(resp, ast, sql, ec, siVersion, e, selection, perr)
+	} else if handled {
+		finalize(presp, ast, sql, ec, siVersion, e, selection)
+		return presp, nil
 	}
 
 	// Phase 2: route writes (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME/EXCHANGE/
@@ -250,16 +274,28 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		return hresp, nil
 	}
 
-	// Pass-through: regenerate (proves the engine round-trips); fall back to
-	// the input on any generate hiccup so SQL is always runnable. With an
-	// active storage-integrity contract this branch is a refusal instead:
-	// reaching it means no handler modelled the statement, so no handler
-	// checked it against the protocol-owned namespaces (Spec I D1).
+	// Spec 2026-09-26 T7: no handler modelled the statement. Without the SI
+	// surface this used to pass through as Success; every unmodelled class is
+	// now refused, except a session SET, which names no table and which
+	// clients send routinely. Under an active SI surface SET stays refused
+	// (H6), so the carve-out is inside the inactive branch only.
 	if siVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = StorageIntegrityUnmodelledMessage
 		finalize(resp, ast, sql, ec, siVersion, e, selection)
 		return resp, nil
+	}
+	if selection.Mode == nameresolve.ModeDynamic {
+		isSet, refused, code, msg := sessionSet(e, ast)
+		if !isSet || refused {
+			resp.Code = pb.RewriteCode_UnsupportedStatement
+			resp.Message = engine.UnsupportedStatementMessage
+			if refused {
+				resp.Code, resp.Message = code, msg
+			}
+			finalize(resp, ast, sql, ec, siVersion, e, selection)
+			return resp, nil
+		}
 	}
 	if gen, gerr := e.Generate(ast); gerr == nil && gen != "" {
 		resp.SqlAfterRewrite = gen
@@ -269,6 +305,25 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	return resp, nil
 }
 
+// sessionSet classifies a top-level session SET statement for the T7
+// carve-out (spec 2026-09-26 T7, R5). Measured 2026-09-26: the pinned
+// polyglot renders `SET max_threads = 1` as {"command": {"this": "SET
+// max_threads = 1"}}, so the check reads the command text. Only a settings
+// assignment qualifies — SET ROLE r1 and SET DEFAULT ROLE r1 TO u1 are
+// access-management statements this repo does not model (isSet=false) — and
+// the carve-out admits it only when every assignment is `<name> = <value>`
+// with a numeric literal, string literal or bare identifier / keyword value
+// and no SQL-bearing setting name (refused=true otherwise, with the code and
+// message to return).
+func sessionSet(e engine.Engine, ast engine.AST) (isSet, refused bool, code pb.RewriteCode, msg string) {
+	kind, _ := engine.NodeKind(ast)
+	if kind != engine.NodeCommand {
+		return false, false, pb.RewriteCode_Success, ""
+	}
+	text, _ := engine.CommandSQL(ast)
+	return handlers.CheckSessionSet(e, text)
+}
+
 func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (RewriteResult, error) {
 	var opts []*pb.RewriteOption
 	if r.options != nil {
@@ -276,7 +331,7 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	}
 	resp, err := doRewrite(r.engine, sql, opts)
 	if err != nil {
-		return RewriteResult{}, err // unexpected/internal → fail-open Go error
+		return RewriteResult{}, err // static/no-rewrite internal failure → legacy Go error
 	}
 	r.stash(sql, account, resp)
 	return resultFromPB(resp), nil

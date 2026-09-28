@@ -39,3 +39,12 @@ func storageIntegrityReservedDatabase(db string, a *pb.RewriteTableDynamicArgs) 
 	}
 	return false
 }
+
+// StorageIntegrityUnmodelledMessage is returned when a request activates the
+// storage-integrity surface (a V1 request with a non-empty tables map, or any
+// V2 request) and the statement is of a class the rewriter does not model.
+// The rewriter cannot prove such a statement is harmless to the
+// protocol-owned namespaces, so it refuses to forward it (Spec I D1). With the
+// surface inactive the same classes are refused with the table-reference
+// policy's "statement is not supported" (spec 2026-09-26 T7).
+const StorageIntegrityUnmodelledMessage = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"

@@ -40,6 +40,12 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	}
 	resp := newWriteResp(stmt)
 	sel := nameresolve.FindActive(opts)
+	if sel.Mode == nameresolve.ModeDynamic && t.Table == "" {
+		// Spec 2026-09-26 R7: EXISTS / SHOW CREATE with no target names
+		// nothing to resolve; refuse rather than emit an empty identifier.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	if sel.Mode == nameresolve.ModeDynamic {
 		if t.ObjType == "DATABASE" && nameresolve.IsStorageIntegrityPhysicalDatabase(t.Table, sel.Dynamic) {
 			recordAccessedDatabase(resp, t.Table, sel.Dynamic)

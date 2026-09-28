@@ -107,6 +107,15 @@ func CollectSelectTables(ast AST) ([]TableTarget, error) {
 	var out []TableTarget
 	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
 		table: func(_, _ map[string]any, tt TableTarget) { out = append(out, tt) },
+		// An IN operand that decodes to a column/dot identifier is a real table
+		// reference (spec 2026-09-26 T4); a literal or other non-identifier
+		// operand is reported to the SI namespace policy instead (see
+		// walkInExpression/walkFunctionExpression) and never reaches here.
+		inTable: func(_ map[string]any, d namespaceRefDetail) {
+			if tt := d.ref.Target; tt.Table != "" && d.tableOrigin == namespaceValueIdentifier {
+				out = append(out, tt)
+			}
+		},
 	}); err != nil {
 		return nil, err
 	}
@@ -209,19 +218,50 @@ func (detail namespaceRefDetail) refWithOrigins() NamespaceRef {
 // namespace reference, while a qualified target and an unbound bare target
 // remain real references (Spec I D7b).
 func CollectNamespaceRefs(ast AST) ([]NamespaceRef, error) {
+	namespaces, _, err := collectNamespaceAndInTableRefs(ast)
+	return namespaces, err
+}
+
+// CollectInTableIdentifierRefs returns every IN/GLOBAL IN/callable-IN-family
+// table operand that decodes as an identifier — the complement of what
+// CollectNamespaceRefs excludes (spec 2026-09-26 T4): an identifier operand is
+// a real table target that CollectSelectTables/RewriteSelectTables handle
+// through visitor.inTable, routed through an ordinary TableDecision
+// (including ActionSubquery for an Active SI table) instead of a blanket
+// namespace rejection.
+func CollectInTableIdentifierRefs(ast AST) ([]NamespaceRef, error) {
+	_, inTables, err := collectNamespaceAndInTableRefs(ast)
+	return inTables, err
+}
+
+// CollectNamespaceAndInTableRefs returns CollectNamespaceRefs followed by
+// CollectInTableIdentifierRefs from one walk. A caller with no rewrite
+// pipeline over the statement's embedded reads (the SI write preflight) needs
+// both checked against the storage-integrity / protected-database policy.
+func CollectNamespaceAndInTableRefs(ast AST) ([]NamespaceRef, error) {
+	namespaces, inTables, err := collectNamespaceAndInTableRefs(ast)
+	return append(namespaces, inTables...), err
+}
+
+func collectNamespaceAndInTableRefs(ast AST) (namespaces, inTables []NamespaceRef, err error) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
-		return nil, fmt.Errorf("engine: decode namespace references: %w", err)
+		return nil, nil, fmt.Errorf("engine: decode namespace references: %w", err)
 	}
-	var out []NamespaceRef
-	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
+	err = walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
 		namespace: func(_ map[string]any, detail namespaceRefDetail) {
-			out = append(out, detail.refWithOrigins())
+			namespaces = append(namespaces, detail.refWithOrigins())
 		},
-	}); err != nil {
-		return nil, err
+		inTable: func(_ map[string]any, detail namespaceRefDetail) {
+			if detail.tableOrigin == namespaceValueIdentifier {
+				inTables = append(inTables, detail.refWithOrigins())
+			}
+		},
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return out, nil
+	return namespaces, inTables, nil
 }
 
 // CollectTableFunctionRefs returns recognized source-role table functions and
@@ -256,6 +296,213 @@ func CollectTableFunctionTargets(ast AST) ([]TableTarget, error) {
 	for _, ref := range refs {
 		if ref.Resolved {
 			out = append(out, ref.Target)
+		}
+	}
+	return out, nil
+}
+
+// CollectSourceFunctionNames returns every function name reached through a
+// source role — FROM/JOIN (walkTableSource), INSERT INTO FUNCTION
+// (walkInsertObjects), and CREATE … AS function(…) (walkCreateTableFunctionSource)
+// — in document order, regardless of whether the name is one this package
+// otherwise recognizes as a namespace-bearing table function (spec
+// 2026-09-26 T5): the allowlist must see an unrecognized name too, so it can
+// refuse it as "not recognised" rather than silently forwarding it.
+func CollectSourceFunctionNames(ast AST) ([]string, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode source functions: %w", err)
+	}
+	var out []string
+	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
+		sourceFunction: func(name string) {
+			if name != "" {
+				out = append(out, name)
+			}
+		},
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateTableStorage returns the CREATE TABLE / CREATE MATERIALIZED VIEW
+// engine name/arg-count and every SETTINGS key from either of the two shapes
+// the T5 policy inspects (spec 2026-09-26 §5, R4):
+//
+//   - a CREATE TABLE's engine_property (decoded the same way
+//     decodeTableEngineNamespaceRef reads it: property.this.anonymous.this.
+//     identifier for a parenthesized engine, or property.this.identifier for
+//     a bare one) and settings_property (each SETTINGS key, read from its
+//     "eq" expressions' left-hand column name).
+//   - an ALTER TABLE … MODIFY SETTING action. Polyglot leaves this one
+//     unstructured — a {"Raw":{"sql":"MODIFY SETTING <k>=<v>[, …]"}} action,
+//     the same shape alterCrossTableTargets already reads for other raw ALTER
+//     forms — so its setting keys are recovered by tokenizing, not by a
+//     structured field read. There is no engine to check for an ALTER, so
+//     engineName is always "" here; the caller must not treat that as a bare
+//     engine name.
+//
+// ok=false when ast is neither shape (or a CREATE TABLE with no engine and no
+// settings at all — nothing for the allowlist to check).
+func CreateTableStorage(e Engine, ast AST) (engineName string, argCount int, settings []string, ok bool, err error) {
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return "", 0, nil, false, fmt.Errorf("engine: decode create table storage: %w", err)
+	}
+	// A materialized view with its own storage (CREATE MATERIALIZED VIEW …
+	// ENGINE = … [SETTINGS …] AS SELECT …) carries the same engine and
+	// settings properties as a CREATE TABLE, under table_properties (spec
+	// 2026-09-26 R4).
+	createBody, isCreateTable := root[NodeCreateTable].(map[string]any)
+	propsKey := "properties"
+	if !isCreateTable {
+		createBody, isCreateTable = root[NodeCreateView].(map[string]any)
+		propsKey = "table_properties"
+	}
+	if body := createBody; isCreateTable {
+		props, _ := body[propsKey].([]any)
+		for _, p := range props {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if engProp, ok := pm["engine_property"].(map[string]any); ok {
+				engineName, argCount = decodeEngineProperty(engProp)
+			}
+			if setProp, ok := pm["settings_property"].(map[string]any); ok {
+				settings = append(settings, settingsPropertyKeys(setProp)...)
+			}
+		}
+		if engineName == "" && len(settings) == 0 {
+			return "", 0, nil, false, nil
+		}
+		return engineName, argCount, settings, true, nil
+	}
+	if body, isAlterTable := root[NodeAlterTable].(map[string]any); isAlterTable {
+		actions, _ := body["actions"].([]any)
+		for _, a := range actions {
+			am, ok := a.(map[string]any)
+			if !ok {
+				continue
+			}
+			raw, ok := am["Raw"].(map[string]any)
+			if !ok {
+				continue
+			}
+			sql, _ := raw["sql"].(string)
+			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "MODIFY SETTING") {
+				continue
+			}
+			keys, kerr := modifySettingKeys(e, sql)
+			if kerr != nil {
+				return "", 0, nil, false, kerr
+			}
+			settings = append(settings, keys...)
+		}
+		if len(settings) == 0 {
+			return "", 0, nil, false, nil
+		}
+		return "", 0, settings, true, nil
+	}
+	return "", 0, nil, false, nil
+}
+
+// decodeEngineProperty reads one engine_property node's identifier/argument
+// count, matching the two shapes polyglot emits: a parenthesized engine
+// ({"this":{"anonymous":{"this":{"identifier":{"name":…}},"expressions":[…]}}})
+// or a bare one ({"this":{"identifier":{"name":…}}}, no arguments).
+func decodeEngineProperty(property map[string]any) (name string, argCount int) {
+	outer, ok := property["this"].(map[string]any)
+	if !ok {
+		return "", 0
+	}
+	if anon, ok := outer["anonymous"].(map[string]any); ok {
+		nameHolder, _ := anon["this"].(map[string]any)
+		args, _ := anon["expressions"].([]any)
+		return identName(nameHolder["identifier"]), len(args)
+	}
+	return identName(outer["identifier"]), 0
+}
+
+// settingsPropertyKeys reads every SETTINGS key from a CREATE TABLE
+// settings_property node: {"expressions":[{"eq":{"left":{"column":{"name":
+// {"name":"<key>"}}},"right":…}},…]}.
+func settingsPropertyKeys(property map[string]any) []string {
+	exprs, _ := property["expressions"].([]any)
+	var out []string
+	for _, e := range exprs {
+		em, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		eq, ok := em["eq"].(map[string]any)
+		if !ok {
+			continue
+		}
+		left, ok := eq["left"].(map[string]any)
+		if !ok {
+			continue
+		}
+		col, ok := left["column"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name := identName(col["name"]); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// modifySettingKeys extracts every setting key from an ALTER TABLE … MODIFY
+// SETTING action's raw SQL text (e.g. "MODIFY SETTING disk='d'") by
+// tokenizing (mirrors alterCrossTableTargets's precedent for raw ALTER
+// actions polyglot cannot structure): the first name token after the
+// "SETTING" keyword text is a key, and so is the first name token after every
+// subsequent top-level comma. Parenthesized argument lists inside a setting's
+// value (e.g. a function call) are skipped by paren depth so an argument's
+// own comma is never mistaken for a new setting.
+func modifySettingKeys(e Engine, sql string) ([]string, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, err
+	}
+	settingIdx := -1
+	for i, tok := range toks {
+		if strings.EqualFold(tok.Text, "SETTING") || strings.EqualFold(tok.Text, "SETTINGS") {
+			settingIdx = i
+			break
+		}
+	}
+	if settingIdx < 0 {
+		return nil, nil
+	}
+	var out []string
+	depth := 0
+	expectKey := true
+	for i := settingIdx + 1; i < len(toks); i++ {
+		tok := toks[i]
+		switch tok.TokenType {
+		case "L_PAREN":
+			depth++
+			continue
+		case "R_PAREN":
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth > 0 {
+			continue
+		}
+		if expectKey && isNameTok(tok.TokenType) {
+			out = append(out, tok.Text)
+			expectKey = false
+			continue
+		}
+		if tok.TokenType == "COMMA" {
+			expectKey = true
 		}
 	}
 	return out, nil
@@ -374,41 +621,135 @@ func canonicalCallableInName(name string) (string, bool) {
 	}
 }
 
+var callableInDisplayNames = map[string]string{
+	"in": "IN", "notin": "NOT IN", "nullin": "NULL IN", "notnullin": "NOT NULL IN",
+	"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN", "globalnullin": "GLOBAL NULL IN", "globalnotnullin": "GLOBAL NOT NULL IN",
+}
+
 func decodeCallableInNamespaceRefDetail(name string, args []any) (namespaceRefDetail, bool) {
-	if len(args) != 2 || !isNamespaceIdentifierArg(args[1]) {
+	if len(args) != 2 {
 		return namespaceRefDetail{}, false
 	}
-	display := map[string]string{
-		"in": "IN", "notin": "NOT IN", "nullin": "NULL IN", "notnullin": "NOT NULL IN",
-		"globalin": "GLOBAL IN", "globalnotin": "GLOBAL NOT IN", "globalnullin": "GLOBAL NULL IN", "globalnotnullin": "GLOBAL NOT NULL IN",
-	}[name]
-	detail := decodeNamespaceSingleDetail(NamespaceRefInTable, display, args[1])
+	kind, detail := decodeInOperand(args[1], false)
+	if kind != inOperandTable {
+		return namespaceRefDetail{}, false
+	}
+	detail.ref.Name = callableInDisplayNames[name]
+	return detail, true
+}
+
+// inOperandKind is decodeInOperand's classification of one IN operand.
+type inOperandKind uint8
+
+const (
+	// inOperandValue: not a table position (a literal value list, a
+	// subquery, an arbitrary expression); the caller walks it as an
+	// ordinary expression.
+	inOperandValue inOperandKind = iota
+	// inOperandTable: a table reference; the detail names it.
+	inOperandTable
+	// inOperandParameter: an Identifier query parameter in the table or
+	// database part (spec 2026-09-26 T2).
+	inOperandParameter
+)
+
+// decodeInOperand is the one decoder every consumer uses to decide whether a
+// single IN operand (`x IN <op>`, `x IN (<op>)`, `in(x, <op>)` and the rest of
+// the callable IN family) is a table reference (spec 2026-09-26 T2-T4):
+//
+//   - `paren` wrappers are unwrapped to any depth, so `x IN ((db.t))` is the
+//     same operand as `x IN db.t`;
+//   - a parameter node, or an identifier whose table or database part is an
+//     Identifier parameter, is a T2 hit;
+//   - an identifier operand is decoded structurally from the node's own
+//     fields: `db.t` is qualified, and a bare quoted name such as
+//     `db2.x` is an unqualified table named "db2.x" in the session's logical
+//     database, exactly like FROM, never split on its dot;
+//   - a literal is a value, except that literalIsTable (only the bare,
+//     is_field-tagged infix form) keeps treating a lone literal as a
+//     namespace question for the storage-integrity policy, as before.
+func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespaceRefDetail) {
+	node, _ := operand.(map[string]any)
+	for node != nil {
+		paren, ok := node["paren"].(map[string]any)
+		if !ok {
+			break
+		}
+		node, _ = paren["this"].(map[string]any)
+	}
+	if node == nil {
+		return inOperandValue, namespaceRefDetail{}
+	}
+	if _, ok := node["parameter"]; ok {
+		return inOperandParameter, namespaceRefDetail{}
+	}
+	if col, ok := node["column"].(map[string]any); ok {
+		target, parameter, ok := decodeColumnIdentifier(col)
+		switch {
+		case parameter:
+			return inOperandParameter, namespaceRefDetail{}
+		case !ok:
+			return inOperandValue, namespaceRefDetail{}
+		}
+		detail := namespaceRefDetail{
+			ref:         NamespaceRef{Source: NamespaceRefInTable, Target: target},
+			tableOrigin: namespaceValueIdentifier,
+		}
+		if target.DB != "" {
+			detail.ref.Resolved = true
+			detail.databaseOrigin = namespaceValueIdentifier
+		} else {
+			detail.ref.UsesCurrentDatabase = true
+		}
+		return inOperandTable, detail
+	}
+	if _, ok := node["dot"]; ok {
+		if inOperandHoldsParameter(node) {
+			return inOperandParameter, namespaceRefDetail{}
+		}
+		return inOperandFromSingleDetail(decodeNamespaceSingleDetail(NamespaceRefInTable, "", node))
+	}
+	if _, ok := node["literal"]; ok {
+		if !literalIsTable {
+			return inOperandValue, namespaceRefDetail{}
+		}
+		return inOperandFromSingleDetail(decodeNamespaceSingleDetail(NamespaceRefInTable, "", node))
+	}
+	if unresolvedIdentifierNode(node) {
+		return inOperandParameter, namespaceRefDetail{}
+	}
+	return inOperandValue, namespaceRefDetail{}
+}
+
+func inOperandFromSingleDetail(detail namespaceRefDetail) (inOperandKind, namespaceRefDetail) {
 	if detail.ref.Target.Table == "" && !detail.ref.Resolved {
+		return inOperandValue, namespaceRefDetail{}
+	}
+	return inOperandTable, detail
+}
+
+// decodeInNamespaceRefDetail decodes an infix `in` node's single operand
+// through decodeInOperand. A multi-element list is a value list.
+func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
+	kind, detail := decodeInNodeOperand(in)
+	if kind != inOperandTable {
 		return namespaceRefDetail{}, false
 	}
 	return detail, true
 }
 
-func isNamespaceIdentifierArg(arg any) bool {
-	m, ok := arg.(map[string]any)
-	if !ok {
-		return false
-	}
-	_, column := m["column"]
-	_, dot := m["dot"]
-	return column || dot
-}
-
-func decodeInNamespaceRef(in map[string]any) (NamespaceRef, bool) {
-	detail, ok := decodeInNamespaceRefDetail(in)
-	return detail.refWithOrigins(), ok
-}
-
-func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
-	isField, _ := in["is_field"].(bool)
+// decodeInNodeOperand classifies an infix `in` node's operand. is_field marks
+// only the syntactic bare (unparenthesized) form; it matters solely for the
+// lone-literal case decodeInOperand documents.
+func decodeInNodeOperand(in map[string]any) (inOperandKind, namespaceRefDetail) {
 	exprs, _ := in["expressions"].([]any)
-	if !isField || len(exprs) != 1 {
-		return namespaceRefDetail{}, false
+	if len(exprs) != 1 {
+		return inOperandValue, namespaceRefDetail{}
+	}
+	isField, _ := in["is_field"].(bool)
+	kind, detail := decodeInOperand(exprs[0], isField)
+	if kind != inOperandTable {
+		return kind, detail
 	}
 	name := "IN"
 	if not, _ := in["not"].(bool); not {
@@ -417,11 +758,8 @@ func decodeInNamespaceRefDetail(in map[string]any) (namespaceRefDetail, bool) {
 	if global, _ := in["global"].(bool); global {
 		name = "GLOBAL " + name
 	}
-	detail := decodeNamespaceSingleDetail(NamespaceRefInTable, name, exprs[0])
-	if detail.ref.Target.Table == "" && !detail.ref.Resolved {
-		return namespaceRefDetail{}, false
-	}
-	return detail, true
+	detail.ref.Name = name
+	return kind, detail
 }
 
 func decodeTableEngineNamespaceRef(property map[string]any) (NamespaceRef, bool) {
@@ -513,6 +851,20 @@ func decodeNamespaceSingleDetail(source NamespaceRefSource, name string, arg any
 		detail.ref.UsesCurrentDatabase = true
 		return detail
 	}
+	// A qualified `column` node (e.g. an IN-table operand `db.\`table.with.dots\``)
+	// already carries its database/table split structurally. Decode it directly
+	// instead of round-tripping through tableFunctionArgValue's single joined
+	// "db.table" string and exactFunctionQualified's dot-count heuristic, which
+	// cannot tell a genuine qualifier from a backtick-quoted table name that
+	// itself contains a literal '.' (spec 2026-09-26 T3/T4).
+	if target, origin, ok := qualifiedColumnArgTarget(arg); ok {
+		detail.ref.Target = target
+		detail.ref.Resolved = true
+		detail.ref.UsesCurrentDatabase = false
+		detail.databaseOrigin = origin
+		detail.tableOrigin = origin
+		return detail
+	}
 	value, origin, ok := tableFunctionArgValue(arg)
 	if !ok {
 		return detail
@@ -528,6 +880,46 @@ func decodeNamespaceSingleDetail(source NamespaceRefSource, name string, arg any
 	detail.ref.Target.Table = value
 	detail.tableOrigin = origin
 	return detail
+}
+
+// qualifiedColumnArgTarget recovers an already-split (database, table) pair
+// directly from a qualified `column` node (`{"column":{"name":...,"table":...}}`),
+// the shape polyglot uses for a bare `db.table` reference such as an IN-table
+// operand. Returns ok=false for anything else, including an unqualified
+// column (whose bare name is decided by the caller's existing single-string
+// path) — a `dot`-chain or literal-string argument keeps its existing
+// dot-count-based split, which is this function's only known limitation
+// (inherent to an opaque string with no structural database/table boundary).
+func qualifiedColumnArgTarget(arg any) (TableTarget, namespaceValueOrigin, bool) {
+	m, ok := arg.(map[string]any)
+	if !ok {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	col, ok := m["column"].(map[string]any)
+	if !ok {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	target, parameter, ok := decodeColumnIdentifier(col)
+	if parameter || !ok || target.DB == "" {
+		return TableTarget{}, namespaceValueUnknown, false
+	}
+	return target, namespaceValueIdentifier, true
+}
+
+// decodeColumnIdentifier is the one structural decode of a `column` node used
+// as a table reference: its "table" field is the database and its "name" the
+// table, so a quoted name containing a literal '.' is never split. parameter
+// reports an Identifier query parameter in either part; ok=false means the
+// node names no table.
+func decodeColumnIdentifier(col map[string]any) (target TableTarget, parameter, ok bool) {
+	if unresolvedIdentifierNode(col["name"]) || unresolvedIdentifierNode(col["table"]) {
+		return TableTarget{}, true, false
+	}
+	name := identName(col["name"])
+	if name == "" {
+		return TableTarget{}, false, false
+	}
+	return TableTarget{DB: identName(col["table"]), Table: name}, false, true
 }
 
 func decodeNamespacePair(source NamespaceRefSource, name string, args []any, first int) NamespaceRef {
@@ -624,34 +1016,22 @@ func CollectEmbeddedReadSources(ast AST) ([]ReadSourceRef, error) {
 	return out, nil
 }
 
-// CollectEmbeddedSelectSources is the compatibility split view for ordinary
-// tables and table functions. IN-table events remain in the ordered union only.
-func CollectEmbeddedSelectSources(ast AST) ([]TableTarget, []TableFunctionRef, error) {
-	refs, err := CollectEmbeddedReadSources(ast)
-	if err != nil {
-		return nil, nil, err
-	}
-	var tables []TableTarget
-	var functions []TableFunctionRef
-	for _, ref := range refs {
-		switch ref.Kind {
-		case ReadSourceTable:
-			tables = append(tables, ref.Target)
-		case ReadSourceTableFunction:
-			functions = append(functions, TableFunctionRef{
-				Target: ref.Target, Resolved: ref.Resolved,
-				UsesCurrentDatabase: ref.UsesCurrentDatabase,
-			})
-		}
-	}
-	return tables, functions, nil
-}
-
 type readSourceVisitor struct {
 	table     func(expr, table map[string]any, target TableTarget)
 	function  func(function map[string]any, detail namespaceRefDetail)
 	inTable   func(expression map[string]any, detail namespaceRefDetail)
 	namespace func(expression map[string]any, detail namespaceRefDetail)
+	// parameter fires once for every database or table position that holds
+	// an Identifier query parameter (spec 2026-09-26 T2). Callers that do not
+	// set it keep dropping those positions, as before.
+	parameter func(node map[string]any)
+	// sourceFunction fires once for EVERY function reached through a source
+	// role (FROM/JOIN, INSERT INTO FUNCTION, CREATE … AS function(…)) —
+	// before decodeNamespaceFunctionRefDetail's recognized-namespace check,
+	// so an unrecognized name is reported too (spec 2026-09-26 T5:
+	// CollectSourceFunctionNames must see it to refuse it as "not
+	// recognised" rather than silently accepting it).
+	sourceFunction func(name string)
 }
 
 type readSourceScope struct {
@@ -691,13 +1071,20 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			if err := walkExpression(body["options"], scope, visitor); err != nil {
 				return err
 			}
-			return walkCreateProperties(body["table_properties"], scope, visitor)
-		case statementMap(n, NodeAlterTable) != nil:
-			body := statementMap(n, NodeAlterTable)
-			if err := walkExpression(body["actions"], scope, visitor); err != nil {
+			if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
 				return err
 			}
-			return walkExpression(body["partition"], scope, visitor)
+			return walkCreateProperties(body["table_properties"], scope, visitor)
+		case statementMap(n, NodeAlterTable) != nil:
+			// Structured ALTER actions (ADD COLUMN … DEFAULT, REPLACE PARTITION
+			// … FROM, …) have no per-field model; walkGenericExpression hands
+			// every read-bearing node to the ordinary walker (spec 2026-09-26
+			// R2). Raw actions are opaque text, governed by OpaqueAlterTexts.
+			body := statementMap(n, NodeAlterTable)
+			if err := walkGenericExpression(body["actions"], scope, visitor); err != nil {
+				return err
+			}
+			return walkGenericExpression(body["partition"], scope, visitor)
 		case statementMap(n, NodeDelete) != nil:
 			return walkDeleteObjects(statementMap(n, NodeDelete), scope, visitor)
 		case statementMap(n, NodeUpdate) != nil:
@@ -735,6 +1122,9 @@ func walkInsertObjects(body map[string]any, parent readSourceScope, visitor read
 	}
 	if target, ok := body["function_target"].(map[string]any); ok {
 		if function, ok := target["function"].(map[string]any); ok {
+			if visitor.sourceFunction != nil {
+				visitor.sourceFunction(nameOf(function))
+			}
 			if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 				detail.ref.Source == NamespaceRefTableFunction && visitor.namespace != nil {
 				visitor.namespace(function, detail)
@@ -782,6 +1172,15 @@ func walkCreateTableObjects(body map[string]any, scope readSourceScope, visitor 
 			return err
 		}
 	}
+	// Column definitions (DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL / TTL)
+	// and constraints (CHECK, INDEX … TYPE) are expression positions the
+	// walker sees like any other (spec 2026-09-26 R2).
+	if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
+		return err
+	}
+	if err := walkGenericExpression(body["constraints"], scope, visitor); err != nil {
+		return err
+	}
 	if err := walkCreateProperties(body["properties"], scope, visitor); err != nil {
 		return err
 	}
@@ -806,6 +1205,9 @@ func walkCreateTableFunctionSource(node any, scope readSourceScope, visitor read
 	function, ok := identifierFunc["function"].(map[string]any)
 	if !ok {
 		return rejectUnknownReadCarrier(identifierFunc, "CREATE AS table function")
+	}
+	if visitor.sourceFunction != nil {
+		visitor.sourceFunction(nameOf(function))
 	}
 	if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 		detail.ref.Source == NamespaceRefTableFunction && visitor.namespace != nil {
@@ -840,7 +1242,9 @@ func walkCreateProperties(node any, scope readSourceScope, visitor readSourceVis
 			}
 			return rejectUnknownReadFields(n, fields("dict_property"), "CREATE dictionary property")
 		}
-		return rejectUnknownReadCarrier(n, "CREATE property")
+		// Every other storage property (PARTITION BY, ORDER BY, PRIMARY KEY,
+		// SAMPLE BY, TTL, SETTINGS, …) is an expression position.
+		return walkGenericExpression(n, scope, visitor)
 	default:
 		return nil
 	}
@@ -1270,6 +1674,9 @@ func walkTableSource(node any, scope readSourceScope, visitor readSourceVisitor)
 			return nil
 		}
 		if function, ok := n["function"].(map[string]any); ok {
+			if visitor.sourceFunction != nil {
+				visitor.sourceFunction(nameOf(function))
+			}
 			if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 				detail.ref.Source == NamespaceRefTableFunction {
 				if visitor.namespace != nil {
@@ -1322,6 +1729,13 @@ func isTableRefPayload(node map[string]any) bool {
 }
 
 func emitTableSource(expr, table map[string]any, scope readSourceScope, visitor readSourceVisitor) {
+	if unresolvedIdentifierNode(table["name"]) ||
+		(table["schema"] != nil && unresolvedIdentifierNode(table["schema"])) {
+		if visitor.parameter != nil {
+			visitor.parameter(table)
+		}
+		return
+	}
 	target := decodeTableTarget(table)
 	if target.Table == "" || (target.DB == "" && scope.ctes[target.Table]) {
 		return
@@ -1544,12 +1958,46 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 	if err := walkExpression(inNode["this"], scope, visitor); err != nil {
 		return err
 	}
-	if detail, ok := decodeInNamespaceRefDetail(inNode); ok {
+	// decodeInNodeOperand is the shared IN-operand decoder (spec 2026-09-26
+	// T2-T4): a parameter operand is reported to visitor.parameter, a table
+	// operand below, and anything else is walked as an ordinary expression.
+	kind, detail := decodeInNodeOperand(inNode)
+	if kind == inOperandParameter {
+		if visitor.parameter != nil {
+			visitor.parameter(inNode)
+		}
+	} else if kind == inOperandTable {
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
-			if visitor.namespace != nil {
+			// A plain identifier/dot operand is now a real table target handled
+			// by CollectSelectTables/RewriteSelectTables through visitor.inTable
+			// below (spec 2026-09-26 T4); routing it through the SI namespace
+			// policy too would fail-closed-reject it a second time instead of
+			// letting the ordinary TableDecision (including ActionSubquery for
+			// an Active SI table) apply. A literal or otherwise-unrewritable
+			// operand can't go through that path, so it still reaches
+			// visitor.namespace as a namespace question — and so does a bare,
+			// unqualified identifier operand (UsesCurrentDatabase): resolving
+			// "current database" against dynamic args is exactly what the SI
+			// namespace policy already does (tableFunctionExecutionDatabase),
+			// and CollectSelectTables/RewriteSelectTables have no access to
+			// those dynamic args to reproduce it, so a qualified operand is the
+			// only shape that gets the new subquery-rewrite treatment; an
+			// unqualified one keeps the old conservative reject-or-pass-through
+			// namespace path (controller review round 1, finding 1).
+			if visitor.namespace != nil && (detail.tableOrigin != namespaceValueIdentifier || detail.ref.UsesCurrentDatabase) {
 				visitor.namespace(inNode, detail)
 			}
 			if visitor.inTable != nil {
+				// visitor.inTable's RewriteSelectTables consumer may replace an
+				// ActionSubquery target's operand in place by populating
+				// "query" (applyInOperandDecision) — decode-ok is only ever
+				// true when "expressions" held exactly one element, which a
+				// genuine pre-existing `a IN (SELECT …)` node never does (its
+				// "expressions" is empty and its "query" already holds the
+				// statement), so nothing pre-existing in "query" is skipped by
+				// not walking it here. Walking it anyway would re-discover the
+				// just-injected derived-table body (e.g. hg_safe.db1__t) as a
+				// second, user-authored table reference in this same pass.
 				visitor.inTable(inNode, detail)
 			}
 		}
@@ -1557,9 +2005,12 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 		if err := walkExpression(inNode["expressions"], scope, visitor); err != nil {
 			return err
 		}
-	}
-	if err := walkExpression(inNode["query"], scope, visitor); err != nil {
-		return err
+		// A genuine subquery IN (`a IN (SELECT …)`) reaches this branch
+		// (decode-ok is false: "expressions" is empty, not length 1) with its
+		// tables/IN-operands still to be walked/rewritten.
+		if err := walkExpression(inNode["query"], scope, visitor); err != nil {
+			return err
+		}
 	}
 	if err := walkExpression(inNode["unnest"], scope, visitor); err != nil {
 		return err
@@ -1571,6 +2022,13 @@ func walkInExpression(inNode map[string]any, scope readSourceScope, visitor read
 
 func walkFunctionExpression(function map[string]any, scope readSourceScope, visitor readSourceVisitor) error {
 	args, _ := function["args"].([]any)
+	// The callable IN family's second argument goes through the same shared
+	// decoder as the infix form; a parameter operand is a T2 hit.
+	if _, ok := canonicalCallableInName(strings.ToLower(nameOf(function))); ok && len(args) == 2 {
+		if kind, _ := decodeInOperand(args[1], false); kind == inOperandParameter && visitor.parameter != nil {
+			visitor.parameter(function)
+		}
+	}
 	if detail, recognized := decodeNamespaceFunctionRefDetail(function); recognized &&
 		detail.ref.Source == NamespaceRefInTable {
 		if len(args) > 0 {
@@ -1579,7 +2037,15 @@ func walkFunctionExpression(function map[string]any, scope readSourceScope, visi
 			}
 		}
 		if !isScopedCurrentDatabaseRef(detail.ref, scope) {
-			if visitor.namespace != nil {
+			// Same reasoning as walkInExpression above: a qualified identifier
+			// operand is now handled as an ordinary table target via
+			// visitor.inTable; an unqualified (UsesCurrentDatabase) one still
+			// needs the SI namespace policy's dynamic-args-aware current-database
+			// resolution, which this package cannot reproduce (controller review
+			// round 1, finding 1). The plain non-identifier case is never
+			// reachable here today since decodeCallableInNamespaceRefDetail
+			// already requires a column/dot arg.
+			if visitor.namespace != nil && (detail.tableOrigin != namespaceValueIdentifier || detail.ref.UsesCurrentDatabase) {
 				visitor.namespace(function, detail)
 			}
 			if visitor.inTable != nil {
@@ -2040,7 +2506,18 @@ func unresolvedIdentifierNode(node any) bool {
 	}
 	quoted, _ := m["quoted"].(bool)
 	name, _ := m["name"].(string)
-	if quoted || len(name) < len("{x: Identifier}") || name[0] != '{' || name[len(name)-1] != '}' {
+	if quoted {
+		return false
+	}
+	return looksLikeUnresolvedIdentifierName(name)
+}
+
+// looksLikeUnresolvedIdentifierName is unresolvedIdentifierNode's name-pattern
+// check ("{x: Identifier}"), factored out so a caller holding only the decoded
+// name string (e.g. DatabaseTarget's return, which has already thrown away the
+// node's "quoted" flag) can still recognize the same flattened shape.
+func looksLikeUnresolvedIdentifierName(name string) bool {
+	if len(name) < len("{x: Identifier}") || name[0] != '{' || name[len(name)-1] != '}' {
 		return false
 	}
 	colon := strings.LastIndexByte(name, ':')
@@ -2068,6 +2545,13 @@ func RewriteSelectTables(ast AST, decide func(TableTarget) TableDecision) (AST, 
 	if err := walkStatementObjects(root, readSourceScope{}, readSourceVisitor{
 		table: func(expr, tbl map[string]any, tt TableTarget) {
 			applyDecision(expr, tbl, tt, decide(tt))
+		},
+		inTable: func(container map[string]any, d namespaceRefDetail) {
+			tt := d.ref.Target
+			if tt.Table == "" || d.tableOrigin != namespaceValueIdentifier {
+				return
+			}
+			applyInOperandDecision(container, tt, decide(tt))
 		},
 	}); err != nil {
 		return nil, err
@@ -2166,6 +2650,100 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 		}
 	case ActionSkip:
 		// no-op
+	}
+}
+
+// applyInOperandDecision rewrites the table operand of an IN expression. The
+// container is either the `in` node (infix/parenthesised form: operand at
+// expressions[0], or — once a subquery replaces it — at "query" instead) or
+// the callable-IN `function` node (operand at args[1]). ActionRename installs
+// a qualified column node in place of the operand; ActionSubquery replaces it
+// with the derived-table body the FROM path uses, so an Active SI table is
+// read through hg_safe / hg_unsafe here too (spec 2026-09-26 T4); ActionRemote
+// installs a bare remote(...) call, mirroring applyDecision's ActionRemote
+// branch for FROM. An IN operand takes no back-alias/alias at all — unlike a
+// FROM table, nothing ever qualifies a column against it.
+func applyInOperandDecision(container map[string]any, tt TableTarget, d TableDecision) {
+	// The infix and parenthesised forms both carry "expressions" (Step 1: only
+	// the identifier-vs-value-list distinction, not parens, is is_field-gated);
+	// the callable form carries "args" instead.
+	_, isInNode := container["expressions"]
+	setOperand := func(node any) {
+		if isInNode {
+			container["expressions"] = []any{node}
+			return
+		}
+		if args, ok := container["args"].([]any); ok && len(args) == 2 {
+			container["args"] = []any{args[0], node}
+		}
+	}
+	switch d.Action {
+	case ActionRename:
+		col := map[string]any{"name": ident(d.NewTable)}
+		if d.NewDB != "" {
+			col["table"] = ident(d.NewDB)
+		}
+		setOperand(map[string]any{"column": col})
+	case ActionSubquery:
+		if len(d.Subquery) == 0 {
+			return // misconfigured decision — leave the operand untouched
+		}
+		var body any
+		if err := json.Unmarshal(d.Subquery, &body); err != nil {
+			return
+		}
+		if isInNode {
+			// Measured shape (spec 2026-09-26 T4 Step 1, confirmed by parsing
+			// `a IN (SELECT …)` directly): {"in": {"this": …, "expressions": [],
+			// "query": {"select": …}}} — polyglot's generator requires the
+			// "expressions" key to still be present (an empty array), even
+			// though it carries no operand once "query" is populated; is_field
+			// must read false once the identifier operand is gone (it may have
+			// been true for the bare unparenthesized form, or absent for the
+			// parenthesised one — either way the query field, not a field-list,
+			// now governs).
+			container["expressions"] = []any{}
+			container["is_field"] = false
+			container["query"] = body
+			return
+		}
+		// Callable form has no documented subquery spelling in Step 1, but
+		// measured directly (parsing `in(a, (SELECT …))`): the generator
+		// requires the full subquery-wrapper field set, not just "this" —
+		// mirrors what polyglot itself emits for a parenthesized subquery
+		// argument. No alias fields are populated: an IN operand is never
+		// column-qualified against its subquery, unlike a FROM table.
+		setOperand(map[string]any{"subquery": map[string]any{
+			"this":                body,
+			"alias":               nil,
+			"alias_explicit_as":   false,
+			"column_aliases":      []any{},
+			"order_by":            nil,
+			"limit":               nil,
+			"offset":              nil,
+			"lateral":             false,
+			"modifiers_inside":    false,
+			"trailing_comments":   []any{},
+			opaqueDerivedTableKey: true,
+		}})
+	case ActionRemote:
+		// Mirrors applyDecision's ActionRemote branch (the FROM path): a
+		// remote-mapped logical database renders as a bare remote(addr, db,
+		// table, user, password) call. decideTable already recorded this in
+		// table_rewrites/accessed as a real rewrite (controller review round
+		// 1, finding 3 — the prior comment claiming the SELECT handler's
+		// remote rules catch this operand was wrong: nothing rejects it, and
+		// leaving the operand untouched left a logical name in the generated
+		// SQL that table_rewrites falsely claimed had been rewritten). An IN
+		// operand takes no alias, so — unlike applyDecision — the function
+		// call is installed directly as the operand rather than wrapped in an
+		// alias node.
+		if d.Remote == nil {
+			return // misconfigured decision — leave the operand untouched
+		}
+		setOperand(map[string]any{"function": remoteFunc(d.Remote)})
+	default:
+		// ActionSkip: leave the operand as written.
 	}
 }
 

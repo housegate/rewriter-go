@@ -46,6 +46,15 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		TableRewrites: map[string]string{},
 	}
 	sel := nameresolve.FindActive(opts)
+	// selectSQL is the source text the caller passes: the statement's own
+	// text for a top-level SELECT, and the enclosing write statement's text
+	// for an embedded INSERT … SELECT / CTAS / CREATE VIEW body
+	// (dispatchView and rewriteEmbeddedBody pass it). It feeds only the
+	// token-level checks in rejectUngovernedReads.
+	selectSQL := ""
+	if len(sourceSQL) > 0 {
+		selectSQL = sourceSQL[0]
+	}
 
 	// CTE injection (CommonTableExprRewrite): parse bodies, then inject ONLY the
 	// aliases actually referenced by the query (referenced-only, non-transitive).
@@ -125,6 +134,24 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	if sel.Mode == nameresolve.ModeDynamic {
 		if rejectStorageIntegrityNamespaces(e, resp, namespaceRefs, sel, pb.RewriteCode_RewriteError) {
 			return ast, resp, nil
+		}
+		// Controller ruling 1 (spec 2026-09-26 T5, Task 7): while the
+		// storage-integrity surface is active, PreflightTableReferences does
+		// NOT run the table-function/table-engine/table-setting allowlists
+		// (that would risk pre-empting an SI-owned message this corpus
+		// pins) — run the same check here instead, now that the SI
+		// namespace policy above has already had first refusal.
+		if nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+			if rejected, cerr := rejectDisallowedCarriers(e, ast, resp); cerr != nil {
+				return nil, nil, cerr
+			} else if rejected {
+				return ast, resp, nil
+			}
+			if rejected, rerr := rejectUngovernedReads(e, ast, selectSQL, sel, resp); rerr != nil {
+				return nil, nil, rerr
+			} else if rejected {
+				return ast, resp, nil
+			}
 		}
 		for _, tt := range originals {
 			if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
@@ -224,6 +251,18 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			resp.Message = fmt.Sprintf(reservedColumnRejectFmt, rid)
 			return ast, resp, nil
 		}
+	}
+
+	// T6 (spec 2026-09-26): string-form lookups (joinGet/dictGet-family,
+	// hasColumnInTable) run before RewriteSelectTables so an embedded
+	// view/INSERT/CTAS body gets the same treatment as a top-level SELECT.
+	var lookupHandled bool
+	ast, lookupHandled, err = rewriteStringLookups(ast, sel, resp)
+	if err != nil {
+		return nil, nil, err
+	}
+	if lookupHandled {
+		return ast, resp, nil
 	}
 
 	var siErr error

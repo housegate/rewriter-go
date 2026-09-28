@@ -53,6 +53,7 @@ type SIDynamic struct {
 	UpstreamLogical                      string                        `json:"upstream_logical_database_in_context,omitempty"`
 	UpstreamPhysical                     string                        `json:"upstream_physical_database_in_context,omitempty"`
 	Delim                                string                        `json:"delim,omitempty"`
+	ProtectedDatabases                   []string                      `json:"protected_databases,omitempty"`
 	LogicalDatabaseToRemoteUpstreamIndex map[string]string             `json:"logical_database_to_remote_upstream_index,omitempty"`
 	RemoteUpstreams                      map[string]remoteUpstreamJSON `json:"remote_upstreams,omitempty"`
 	StorageIntegrity                     *SIArgs                       `json:"storage_integrity,omitempty"`
@@ -165,6 +166,11 @@ func ValidateSICorpus(cases []SICase) []string {
 		if _, ok := siContractByName[c.ContractVersion]; !ok {
 			add("R8", fmt.Sprintf("contract_version must be \"V1\" or \"V2\", got %q", c.ContractVersion))
 		}
+		if strings.HasPrefix(c.Name, "si_tr_") {
+			if c.Dynamic == nil || len(c.Dynamic.ProtectedDatabases) == 0 {
+				add("R9", "a si_tr_ case must set a non-empty dynamic.protected_databases")
+			}
+		}
 		if c.WantCode == "" {
 			add("R6", "want_code must be non-empty")
 		} else if _, ok := siKnownCodes[c.WantCode]; !ok {
@@ -242,9 +248,9 @@ func siContainsEquivalent(sql, sub string) bool {
 // Intentional updates require paired PRs, an explicit byte-for-byte cmp, and a
 // recorded SHA-256 in each PR description.
 const (
-	SICorpusFingerprint uint64 = 7051648083520101593
-	SICorpusBytes       int    = 254170
-	SICorpusCases       int    = 256
+	SICorpusFingerprint uint64 = 6257544148321398470
+	SICorpusBytes       int    = 916237
+	SICorpusCases       int    = 987
 )
 
 // siCorpusFingerprint is FNV-1a/64 over the exact file bytes, mirrored by

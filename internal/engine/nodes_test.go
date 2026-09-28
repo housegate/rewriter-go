@@ -401,6 +401,18 @@ func TestCollectTableFunctionRefs_preservesUnresolvedNamespace(t *testing.T) {
 	}
 }
 
+// Every qualified IN/GLOBAL-IN/callable-IN-family case below decodes as a
+// *qualified* column/dot identifier operand, so spec 2026-09-26 T4 moved it
+// out of CollectNamespaceRefs (want: nil) — it is a real table target now,
+// collected via CollectSelectTables / CollectInTableIdentifierRefs instead of
+// being reported as a namespace question (see
+// walkInExpression/walkFunctionExpression's inTable/namespace split, and
+// TestCollectInTableIdentifierRefs). The table-function/table-engine/
+// dictionary-source cases further down are untouched by that change. A *bare,
+// unqualified* identifier operand (UsesCurrentDatabase) stays reachable here
+// too (controller review round 1, finding 1): resolving "current database"
+// needs the dynamic args this package doesn't have, so only a qualified
+// operand gets the new subquery-rewrite treatment.
 func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
@@ -409,7 +421,7 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 	}{
 		{
 			`SELECT * FROM other.u WHERE id GLOBAL IN hg_safe.db1__t`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT * FROM other.u WHERE id IN db1__t`,
@@ -417,75 +429,75 @@ func TestCollectNamespaceRefs_localCatalogSurfaces(t *testing.T) {
 		},
 		{
 			`SELECT * FROM other.u WHERE id NOT IN hg_safe.db1__t`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT * FROM other.u WHERE id GLOBAL NOT IN hg_unsafe.db1__t`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT in(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT notIn(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalIn(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalNotIn(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT nullIn(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT notNullIn(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalNullIn(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalNotNullIn(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT inIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT notInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalNotInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT nullInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT notNullInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalNullInIgnoreSet(id, hg_safe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NULL IN", Target: TableTarget{DB: "hg_safe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT globalNotNullInIgnoreSet(id, hg_unsafe.db1__t) FROM other.u`,
-			[]NamespaceRef{{Source: NamespaceRefInTable, Name: "GLOBAL NOT NULL IN", Target: TableTarget{DB: "hg_unsafe", Table: "db1__t"}, Resolved: true}},
+			nil,
 		},
 		{
 			`SELECT * FROM mergeTreeIndex(currentDatabase(), db1__t)`,
@@ -600,9 +612,12 @@ func TestCollectNamespaceRefs_RespectsCTEAndCSEScopes(t *testing.T) {
 			sql:  `WITH 1 AS t SELECT id IN t FROM other.u`,
 		},
 		{
-			name: "real IN table remains a namespace reference",
+			// Spec 2026-09-26 T4: a real (non-CTE-bound) qualified IN table is
+			// now a table target CollectSelectTables/RewriteSelectTables handle
+			// directly (see the dedicated assertion below), not a
+			// CollectNamespaceRefs namespace question — want stays nil here.
+			name: "real IN table is a table target, not a namespace reference",
 			sql:  `WITH c AS (SELECT * FROM other.body) SELECT id IN db1.t FROM other.u`,
-			want: []NamespaceRef{{Source: NamespaceRefInTable, Name: "IN", Target: TableTarget{DB: "db1", Table: "t"}, Resolved: true}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -618,6 +633,31 @@ func TestCollectNamespaceRefs_RespectsCTEAndCSEScopes(t *testing.T) {
 				t.Fatalf("refs = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCollectSelectTables_RealInTableSurvivesCTEScope is the positive half of
+// the last case above: `id IN db1.t` is not bound to the co-present CTE alias
+// `c`, so it must reach CollectSelectTables as an ordinary TableTarget (spec
+// 2026-09-26 T4).
+func TestCollectSelectTables_RealInTableSurvivesCTEScope(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne(`WITH c AS (SELECT * FROM other.body) SELECT id IN db1.t FROM other.u`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := CollectSelectTables(ast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CTE bodies are walked regardless of whether the alias is referenced
+	// (CollectSelectTables's doc comment; contrast the referenced-only,
+	// non-transitive CTE *injection* strategy in handlers/select.go), so
+	// `c`'s body contributes other.body first, ahead of the outer SELECT's
+	// own IN operand and FROM table in document order.
+	want := []TableTarget{{DB: "other", Table: "body"}, {DB: "db1", Table: "t"}, {DB: "other", Table: "u"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 
@@ -678,7 +718,7 @@ func TestCollectNamespaceRefs_PreservesIdentifierOrigins(t *testing.T) {
 	}
 }
 
-func TestCollectEmbeddedSelectSources(t *testing.T) {
+func TestCollectEmbeddedReadSources_TablesAndFunctions(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
 		sql       string
@@ -696,9 +736,21 @@ func TestCollectEmbeddedSelectSources(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %q: %v", tc.sql, err)
 		}
-		gotTables, gotFns, err := CollectEmbeddedSelectSources(ast)
+		refs, err := CollectEmbeddedReadSources(ast)
 		if err != nil {
 			t.Fatalf("collect %q: %v", tc.sql, err)
+		}
+		var gotTables []TableTarget
+		var gotFns []TableFunctionRef
+		for _, ref := range refs {
+			switch ref.Kind {
+			case ReadSourceTable:
+				gotTables = append(gotTables, ref.Target)
+			case ReadSourceTableFunction:
+				gotFns = append(gotFns, TableFunctionRef{
+					Target: ref.Target, Resolved: ref.Resolved, UsesCurrentDatabase: ref.UsesCurrentDatabase,
+				})
+			}
 		}
 		if !reflect.DeepEqual(gotTables, tc.wantTable) || !reflect.DeepEqual(gotFns, tc.wantFn) {
 			t.Errorf("%q: tables=%+v functions=%+v, want tables=%+v functions=%+v ast=%s", tc.sql, gotTables, gotFns, tc.wantTable, tc.wantFn, ast)
@@ -1027,10 +1079,6 @@ func TestObjectWalker_UnknownReadBearingCarrierFailsClosedForEveryProjection(t *
 	}{
 		{"tables", func() error { _, err := CollectSelectTables(ast); return err }},
 		{"read sources", func() error { _, err := CollectEmbeddedReadSources(ast); return err }},
-		{"split read sources", func() error {
-			_, _, err := CollectEmbeddedSelectSources(ast)
-			return err
-		}},
 		{"namespaces", func() error { _, err := CollectNamespaceRefs(ast); return err }},
 		{"table functions", func() error { _, err := CollectTableFunctionRefs(ast); return err }},
 		{"rewrite", func() error {
@@ -1151,20 +1199,32 @@ func TestCollectEmbeddedReadSources_InSubqueryAndScalarArgumentsStayRoleAware(t 
 	}
 }
 
-func TestCollectEmbeddedReadSources_InTableOperandsRespectCTEScopeAndOpacity(t *testing.T) {
+func TestCollectEmbeddedReadSources_InTableOperandsRespectCTEScopeAndParameterOperandsAreReported(t *testing.T) {
 	e := newTestEngine(t)
-	got := collectReadSourceViews(t, e, `WITH t AS (SELECT * FROM other.cte_body)
+	sql := `WITH t AS (SELECT * FROM other.cte_body)
 		SELECT
 			id IN t,
 			id IN hg_safe.{target:Identifier},
 			in(id, {other_target:Identifier})
-		FROM other.base`)
+		FROM other.base`
+	got := collectReadSourceViews(t, e, sql)
 	want := []readSourceView{
 		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "cte_body"}, resolved: true},
 		{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "base"}, resolved: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, err := TablePositionParameter(e, ast, sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatalf("TablePositionParameter = false, want true for %q", sql)
 	}
 }
 
@@ -1294,15 +1354,26 @@ func TestRewriteSelectTables_RecursiveCTESelfReferencesStayScoped(t *testing.T) 
 	}
 }
 
-func TestCollectEmbeddedReadSources_QualifiedOpaqueTableTargetIsNotFabricated(t *testing.T) {
+func TestCollectEmbeddedReadSources_QualifiedParameterTargetIsReported(t *testing.T) {
 	e := newTestEngine(t)
-	got := collectReadSourceViews(t, e,
-		`SELECT * FROM hg_safe.{target:Identifier} JOIN hg_unsafe.db1__x ON 1`)
+	sql := `SELECT * FROM hg_safe.{target:Identifier} JOIN hg_unsafe.db1__x ON 1`
+	got := collectReadSourceViews(t, e, sql)
 	want := []readSourceView{
 		{kind: ReadSourceTable, target: TableTarget{DB: "hg_unsafe", Table: "db1__x"}, resolved: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources = %#v, want %#v", got, want)
+	}
+	ast, err := e.ParseOne(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, err := TablePositionParameter(e, ast, sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatalf("TablePositionParameter = false, want true for %q", sql)
 	}
 }
 

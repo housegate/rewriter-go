@@ -1291,7 +1291,7 @@ func TestStorageIntegrityContract_EmptySILiveViewKeepsLegacyDispatch(t *testing.
 	}
 }
 
-func TestDoRewrite_UnmodelledStatementPassesThroughWithoutStorageIntegrity(t *testing.T) {
+func TestDoRewrite_UnmodelledStatementIsRefusedWithoutStorageIntegrity(t *testing.T) {
 	e := newEngine(t)
 	opts := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
 		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
@@ -1304,9 +1304,13 @@ func TestDoRewrite_UnmodelledStatementPassesThroughWithoutStorageIntegrity(t *te
 	if err != nil {
 		t.Fatalf("doRewrite: %v", err)
 	}
-	if resp.GetCode() != pb.RewriteCode_Success {
-		t.Fatalf("code = %v (%s), want Success — empty-SI requests keep the legacy pass-through",
-			resp.GetCode(), resp.GetMessage())
+	// Spec 2026-09-26 T7 (Task 7): every unmodelled class is now refused, even
+	// with the storage-integrity surface inactive — only a session SET keeps
+	// the legacy pass-through (see TestStorageIntegrityContractV1_
+	// EmptyMapRefusesUnmodelledButPassesSet in native_v2_test.go).
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage {
+		t.Fatalf("code = %v (%s), want UnsupportedStatement %q",
+			resp.GetCode(), resp.GetMessage(), engine.UnsupportedStatementMessage)
 	}
 	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
 		t.Fatalf("contract ack = %v, want UNSPECIFIED", resp.GetStorageIntegrityContractVersion())
@@ -1365,9 +1369,42 @@ func TestDoRewrite_StorageIntegritySealsCollectorErrors(t *testing.T) {
 		t.Fatalf("resp = %+v, want acknowledged UnsupportedStatement echoing the original SQL", resp)
 	}
 
+	// Spec 2026-09-26 R6: a dynamic request with no SI surface seals the same
+	// failure as the table-reference policy's UnsupportedStatement; only a
+	// static/no-rewrite request keeps the legacy Go error channel.
 	legacy := proto.Clone(dyn).(*pb.RewriteTableDynamicArgs)
 	legacy.StorageIntegrity = nil
-	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(legacy)}); err == nil {
-		t.Fatal("empty-SI collector failure must retain the legacy Go error channel")
+	resp, err = doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(legacy)})
+	if err != nil {
+		t.Fatalf("empty-SI dynamic collector failure escaped through the Go error channel: %v", err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+		resp.GetMessage() != "statement is not supported" ||
+		resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED ||
+		resp.GetSqlAfterRewrite() != sql {
+		t.Fatalf("resp = %+v, want unacknowledged UnsupportedStatement echoing the original SQL", resp)
+	}
+	if _, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteStatic()}); err == nil {
+		t.Fatal("static-mode collector failure must retain the legacy Go error channel")
+	}
+}
+
+// TestNativeRewrite_StaticInOperandsDecodeLikeFrom pins that the shared
+// IN-operand decoder also serves static mode: a nested-paren operand and a
+// bare quoted dotted operand are rewritten like a static FROM table.
+func TestNativeRewrite_StaticInOperandsDecodeLikeFrom(t *testing.T) {
+	e := newEngine(t)
+	r := New(e, WithOptions(statOptFn(map[string]string{"x": "p.x3", "db2.x": "p.x2"})))
+	for sql, want := range map[string]string{
+		"SELECT * FROM t WHERE a IN ((x))":   `SELECT * FROM t WHERE a IN ("p.x3")`,
+		"SELECT * FROM t WHERE a IN `db2.x`": `SELECT * FROM t WHERE a IN "p.x2"`,
+	} {
+		res, err := r.Rewrite(context.Background(), sql, "acct")
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		if res.Code != pb.RewriteCode_Success || res.SQL != want {
+			t.Errorf("%s: code=%v sql=%q, want Success %q", sql, res.Code, res.SQL, want)
+		}
 	}
 }

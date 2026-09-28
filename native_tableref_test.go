@@ -1,0 +1,1809 @@
+package rewriter
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/housegate/rewriter-proto/gen/pb"
+)
+
+// tablerefDynamic is the request housegate sends after Plan C: db1 maps to
+// phys, phys is known-physical AND protected, hg_* are protected; si adds the
+// V2 surface with db1.t Active.
+func tablerefDynamic(si bool) *pb.RewriteTableDynamicArgs {
+	dyn := &pb.RewriteTableDynamicArgs{
+		DatabaseMap:                      map[string]string{"db1": "phys"},
+		KnownPhysicalDatabases:           []string{"phys"},
+		UpstreamLogicalDatabaseInContext: "db1",
+		Delim:                            "_",
+		ProtectedDatabases:               []string{"phys", "hg_safe", "hg_unsafe", "hg_promote"},
+	}
+	if si {
+		dyn.StorageIntegrity = &pb.StorageIntegrityArgs{
+			Tables: map[string]*pb.StorageIntegrityArgs_Table{
+				"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"},
+			},
+			ReadMode:            pb.StorageIntegrityArgs_READ_MODE_SAFE,
+			ReservedRowIdColumn: "_hg_row_id",
+			ContractVersion:     pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2,
+			ReservedDatabases:   []string{"hg_safe", "hg_unsafe", "hg_promote"},
+		}
+	}
+	return dyn
+}
+
+func tablerefOpts(si bool) []*pb.RewriteOption {
+	return []*pb.RewriteOption{tableRewriteDynamic(tablerefDynamic(si))}
+}
+
+type tablerefCase struct {
+	name     string
+	sql      string
+	si       bool
+	wantCode pb.RewriteCode
+	wantMsg  string   // substring; "" = don't check
+	wantSQL  string   // exact; "" = don't check
+	wantAcc  []string // "db.table" in response order; nil = don't check
+}
+
+func runTablerefCases(t *testing.T, cases []tablerefCase) {
+	t.Helper()
+	e := newEngine(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp, err := doRewrite(e, c.sql, tablerefOpts(c.si))
+			if err != nil {
+				t.Fatalf("doRewrite: %v", err)
+			}
+			if resp.GetCode() != c.wantCode {
+				t.Fatalf("code = %s (%s), want %s", resp.GetCode(), resp.GetMessage(), c.wantCode)
+			}
+			if c.wantMsg != "" && !strings.Contains(resp.GetMessage(), c.wantMsg) {
+				t.Fatalf("message = %q, want substring %q", resp.GetMessage(), c.wantMsg)
+			}
+			if c.wantSQL != "" && resp.GetSqlAfterRewrite() != c.wantSQL {
+				t.Fatalf("sql = %q, want %q", resp.GetSqlAfterRewrite(), c.wantSQL)
+			}
+			if c.wantAcc != nil {
+				var got []string
+				for _, a := range resp.GetOriginalAccessedTables() {
+					got = append(got, a.GetOriginalDatabase()+"."+a.GetOriginalTable())
+				}
+				if strings.Join(got, ",") != strings.Join(c.wantAcc, ",") {
+					t.Fatalf("accessed = %v, want %v", got, c.wantAcc)
+				}
+			}
+		})
+	}
+}
+
+func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
+	const msg = "query parameters are not supported in a database or table position"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"SELECT * FROM {p:Identifier}",
+			"SELECT * FROM db1.{p:Identifier}",
+			"SELECT * FROM {d:Identifier}.t",
+			"SELECT * FROM db1.o AS a JOIN {p:Identifier} AS b USING (a)",
+			"SELECT * FROM (SELECT * FROM {p:Identifier})",
+			"SELECT * FROM db1.o WHERE a IN {p:Identifier}",
+			"SELECT * FROM db1.o WHERE a IN db1.{p:Identifier}",
+			"SELECT * FROM db1.o WHERE in(a, {p:Identifier})",
+			"INSERT INTO db1.o SELECT * FROM {p:Identifier}",
+			"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM {p:Identifier}",
+			"CREATE MATERIALIZED VIEW db1.mv TO db1.{p:Identifier} AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW {p:Identifier} ENGINE = Memory AS SELECT * FROM db1.o",
+			"DROP TABLE {p:Identifier}",
+			"DROP TABLE db1.{p:Identifier}",
+			"INSERT INTO db1.{p:Identifier} VALUES (1)",
+			"CREATE TABLE {p:Identifier} (a UInt64) ENGINE = Memory",
+			"EXISTS TABLE db1.{p:Identifier}",
+			"SHOW CREATE TABLE db1.{p:Identifier}",
+			"DESCRIBE TABLE db1.{p:Identifier}",
+			"RENAME TABLE db1.{p:Identifier} TO db1.z",
+			"SHOW TABLES FROM {d:Identifier}",
+			"USE {d:Identifier}",
+			"ALTER TABLE db1.{p:Identifier} UPDATE a = 1 WHERE 1",
+			"CREATE DATABASE {d:Identifier}",
+			"DROP DATABASE {d:Identifier}",
+			"SHOW COLUMNS FROM {p:Identifier}",
+			"SHOW INDEX FROM db1.{p:Identifier}",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg, wantSQL: sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_CommentBypassAttemptsAreRefused pins the exact concrete bypass
+// SQLs from the controller review of this task: a prior hand-rolled command-
+// text scanner recognized "--" and "/* */" but not "#", "#!" or "//" as
+// comment openers, so it treated the "'" inside "it's" as an opening quote and
+// swallowed the genuine parameter that followed as if it were unterminated
+// string content. The tokenizer-based scan in IdentifierParameterInText
+// recognizes all five ClickHouse comment openers regardless of what they
+// contain, so each of these must still be refused.
+func TestTableRef_CommentBypassAttemptsAreRefused(t *testing.T) {
+	const msg = "query parameters are not supported in a database or table position"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "exists_line_comment_slash_slash", sql: "EXISTS TABLE // it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+			tablerefCase{name: "exists_line_comment_hash", sql: "EXISTS TABLE # it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+			tablerefCase{name: "describe_line_comment_slash_slash", sql: "DESCRIBE TABLE // it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+			tablerefCase{name: "show_create_line_comment_hash_bang", sql: "SHOW CREATE TABLE #! it's\n db1.{p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg},
+		)
+	}
+	runTablerefCases(t, cases)
+}
+
+func TestTableRef_ValueAndColumnParametersStayAllowed(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "value", sql: "SELECT * FROM db1.o WHERE a = {v:UInt64}", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a = {v: UInt64}`},
+		{name: "column", sql: "SELECT {c:Identifier} FROM db1.o", wantCode: pb.RewriteCode_Success},
+		// Spec 2026-09-26 R2/R8: an opaque ALTER … UPDATE tail cannot be
+		// proven column-only, so an Identifier parameter anywhere in a command
+		// node's text is refused with the T2 message (this row used to pin the
+		// assignment position as allowed).
+		{name: "alter_update_assignment", sql: "ALTER TABLE db1.o UPDATE a = {c:Identifier} WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest,
+			wantMsg:  "query parameters are not supported in a database or table position"},
+	})
+}
+
+func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
+	var cases []tablerefCase
+	for _, db := range []string{"phys", "hg_safe", "hg_unsafe", "hg_promote"} {
+		msg := "protected database " + db + " is not addressable"
+		for _, shape := range []string{
+			"SELECT * FROM %s.`db2.x`",
+			"SELECT * FROM db1.o AS a JOIN %s.`db2.x` AS b USING (a)",
+			"SELECT * FROM (SELECT * FROM %s.`db2.x`)",
+			"WITH c AS (SELECT * FROM %s.`db2.x`) SELECT * FROM c",
+			"SELECT * FROM db1.o WHERE a IN %s.`db2.x`",
+			"SELECT * FROM db1.o WHERE a IN (%s.`db2.x`)",
+			"SELECT * FROM db1.o WHERE (a, b) IN %s.`db2.x`",
+			"SELECT * FROM db1.o WHERE in(a, %s.`db2.x`)",
+			"SELECT * FROM db1.o WHERE a GLOBAL IN %s.`db2.x`",
+			"INSERT INTO db1.o SELECT * FROM %s.`db2.x`",
+			"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM %s.`db2.x`",
+			"CREATE VIEW db1.v AS SELECT * FROM %s.`db2.x`",
+			"CREATE MATERIALIZED VIEW db1.mv TO %s.`db2.x` AS SELECT * FROM db1.o",
+			"INSERT INTO %s.`db2.x` VALUES (1)",
+			"DROP TABLE %s.`db2.x`",
+			"CREATE TABLE %s.`db2.x` (a UInt64) ENGINE = Memory",
+			"CREATE TABLE db1.n AS %s.`db2.x`",
+			"RENAME TABLE %s.`db2.x` TO db1.z",
+			"EXISTS TABLE %s.`db2.x`",
+			"SHOW CREATE TABLE %s.`db2.x`",
+			"DESCRIBE TABLE %s.`db2.x`",
+			"SHOW TABLES FROM %s",
+			"USE %s",
+			"CREATE DATABASE %s",
+			"DROP DATABASE %s",
+			"SELECT * FROM merge('%s', 'db2')",
+			"SELECT * FROM remote('127.0.0.1:9000', '%s', 'db2.x')",
+			"CREATE TABLE db1.n (a UInt64) ENGINE = Merge('%s', '^db2')",
+			"SELECT joinGet('%s.`db2.x`', 'v', 1)",
+			// Review round 1 findings 1 & 2: the identifier form of a
+			// lookup's table argument (no surrounding string literal), and
+			// hasColumnInTable's optional leading hostname[, username] form,
+			// which shifts the database to the third argument from the end.
+			"SELECT joinGet(%s.`db2.x`, 'v', 1)",
+			"SELECT dictGet(%s.d, 'v', 1)",
+			"SELECT hasColumnInTable('%s', 't', 'c')",
+			"SELECT hasColumnInTable('localhost', '%s', 't', 'c')",
+			"SELECT hasColumnInTable('localhost', 'user', '%s', 't', 'c')",
+		} {
+			sql := strings.ReplaceAll(shape, "%s", db)
+			// Under the active SI surface the hg_* names keep their existing
+			// SI messages; the code is still a rejection.
+			//
+			// Two deviations from the brief's starting assumption, found by
+			// running this test (see task-4 report "corpus cases that
+			// changed" / self-review for the full writeup):
+			//
+			//  1. siHandlerBlindShapes: the joinGet shape's database
+			//     qualifier is a string-lookup argument, and the parenthesized
+			//     IN shape is not is_field-tagged -- no existing SI handler in
+			//     this repo classifies either position as a table reference,
+			//     so nothing downstream would otherwise reject them.
+			//     PreflightTableReferences now rejects a protected hit there
+			//     unconditionally too (engine.CollectDatabaseReferenceSets' blind set),
+			//     with the preflight's own generic message/code rather than an
+			//     SI handler's. Ruling 3 anticipated adjusting the *code* per
+			//     observed handler behaviour for an SI-owned row; this is the
+			//     same kind of adjustment for a position no handler covers at
+			//     all.
+			//  2. writeSideShapes: every non-plain-SELECT-read shape (INSERT/
+			//     CREATE/DROP/RENAME/EXISTS/SHOW/USE/CREATE-DROP-DATABASE/the
+			//     ENGINE=Merge(...) table-engine form) answers
+			//     UnsupportedStatement under active SI, not RewriteError --
+			//     pre-existing, corpus-pinned SI dispatch this task does not
+			//     touch. A plain SELECT read (including CREATE VIEW's body)
+			//     keeps rejectCodeFor's RewriteError default.
+			isSIHandlerBlind := strings.Contains(shape, "joinGet") || strings.Contains(shape, "dictGet") ||
+				strings.Contains(shape, "hasColumnInTable") || strings.Contains(shape, "IN (%s.")
+			isWriteSide := siWriteSideShapes[shape]
+			for _, si := range []bool{false, true} {
+				want := msg
+				wantCode := rejectCodeFor(db, si)
+				if si && db != "phys" && !isSIHandlerBlind {
+					want = "storage-integrity"
+					if isWriteSide {
+						wantCode = pb.RewriteCode_UnsupportedStatement
+					}
+				}
+				if isSIHandlerBlind {
+					wantCode = pb.RewriteCode_InvalidRewriteRequest
+				}
+				cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantMsg: want,
+					wantCode: wantCode})
+			}
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// rejectCodeFor: the protected rule answers InvalidRewriteRequest; an SI-owned
+// hg_* rejection keeps whatever code the SI handler uses today, so only the
+// non-Success property is asserted for those by comparing against the
+// engine's own answer at the first green run. Start strict and relax per case.
+func rejectCodeFor(db string, si bool) pb.RewriteCode {
+	if si && db != "phys" {
+		return pb.RewriteCode_RewriteError // most SI SELECT-side messages; write-side ones use UnsupportedStatement
+	}
+	return pb.RewriteCode_InvalidRewriteRequest
+}
+
+// siWriteSideShapes: observed at the first green run (see rejectCodeFor's
+// comment) -- every one of these non-plain-SELECT-read shapes answers
+// UnsupportedStatement under active SI for a protected hg_* database, not
+// RewriteError. Pre-existing, corpus-pinned SI dispatch; this task does not
+// touch it, only records which shapes hit it.
+//
+// The INSERT ... SELECT and CREATE TABLE ... AS SELECT embedded-source shapes
+// ARE listed here (controller ruling, cross-engine parity, spec 2026-09-26
+// T4 second half): although the embedded body is classified by the SELECT
+// pipeline (rewriteEmbeddedBody -> rewriteSelectCore), the outer statement is
+// still a write (INSERT/CREATE TABLE), and the corpus convention pins
+// UnsupportedStatement for the write-statement family (RewriteError is
+// SELECT-family only, matching the C++ engine's embedded-body path, which
+// passes UnsupportedStatement explicitly). Only the CODE is forced; the
+// SELECT pipeline's message text is kept verbatim (see rewriteEmbeddedBody).
+// CREATE VIEW's body is genuinely different: dispatchView does NOT force the
+// code (it keeps bodyResp.Code as-is), so CREATE VIEW's own shape stays out
+// of this map.
+var siWriteSideShapes = map[string]bool{
+	"INSERT INTO db1.o SELECT * FROM %s.`db2.x`":                           true,
+	"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM %s.`db2.x`":       true,
+	"CREATE MATERIALIZED VIEW db1.mv TO %s.`db2.x` AS SELECT * FROM db1.o": true,
+	"INSERT INTO %s.`db2.x` VALUES (1)":                                    true,
+	"DROP TABLE %s.`db2.x`":                                                true,
+	"CREATE TABLE %s.`db2.x` (a UInt64) ENGINE = Memory":                   true,
+	"CREATE TABLE db1.n AS %s.`db2.x`":                                     true,
+	"RENAME TABLE %s.`db2.x` TO db1.z":                                     true,
+	"EXISTS TABLE %s.`db2.x`":                                              true,
+	"SHOW CREATE TABLE %s.`db2.x`":                                         true,
+	"DESCRIBE TABLE %s.`db2.x`":                                            true,
+	"SHOW TABLES FROM %s":                                                  true,
+	"USE %s":                                                               true,
+	"CREATE DATABASE %s":                                                   true,
+	"DROP DATABASE %s":                                                     true,
+	"CREATE TABLE db1.n (a UInt64) ENGINE = Merge('%s', '^db2')":           true,
+}
+
+func TestTableRef_ProtectedNameAsColumnOrAliasIsAllowed(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "column named phys", sql: "SELECT phys FROM db1.o", wantCode: pb.RewriteCode_Success},
+		{name: "alias named hg_safe", sql: "SELECT a AS hg_safe FROM db1.o", wantCode: pb.RewriteCode_Success},
+	})
+}
+
+func TestTableRef_InOperandsAreRewrittenAndReported(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "infix", sql: "SELECT * FROM db1.o WHERE a IN db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.p"`, wantAcc: []string{"db1.o", "db1.p"}},
+		{name: "paren", sql: "SELECT * FROM db1.o WHERE a IN (db1.p)", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (phys."db1.p")`, wantAcc: []string{"db1.o", "db1.p"}},
+		{name: "tuple", sql: "SELECT * FROM db1.o WHERE (a, b) IN db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE (a, b) IN phys."db1.p"`, wantAcc: []string{"db1.o", "db1.p"}},
+		{name: "callable", sql: "SELECT * FROM db1.o WHERE in(a, db1.p)", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE in(a, phys."db1.p")`, wantAcc: []string{"db1.o", "db1.p"}},
+		{name: "global", sql: "SELECT * FROM db1.o WHERE a GLOBAL IN db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a GLOBAL IN phys."db1.p"`, wantAcc: []string{"db1.o", "db1.p"}},
+		// wantAcc's second entry is ".p", not "db1.p": an unqualified IN operand
+		// decodes to TableTarget{DB: "", Table: "p"} just like an unqualified
+		// FROM table does (confirmed by direct comparison against `SELECT *
+		// FROM p` under the same dynamic args — its OriginalDatabase is also
+		// ""), and OriginalAccessedTables reports the field verbatim
+		// (buildAccessed's `OriginalDatabase: tt.DB`); only LogicalDatabase
+		// resolves the implicit "db1" context, which this helper does not
+		// surface. wantSQL still confirms the rewrite itself correctly
+		// resolves the unqualified operand to phys."db1.p".
+		{name: "unqualified", sql: "SELECT * FROM db1.o WHERE a IN p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.p"`, wantAcc: []string{"db1.o", ".p"}},
+		{name: "own table, SI active", sql: "SELECT * FROM db1.o WHERE a IN db1.o", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.o"`, wantAcc: []string{"db1.o"}},
+		{name: "active table derived read", sql: "SELECT * FROM db1.o WHERE a IN db1.t", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", "db1.t"}},
+		{name: "callable active table derived read", sql: "SELECT * FROM db1.o WHERE in(a, db1.t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))`,
+			wantAcc: []string{"db1.o", "db1.t"}},
+		// Unqualified spellings of the same Active table (controller review
+		// round 2): the operand resolves via UpstreamLogicalDatabaseInContext
+		// ("db1") to the same db1.t, so it must read through the derived safe
+		// surface exactly like the qualified form above — not get blanket-
+		// rejected the way an unqualified table-function/table-engine operand
+		// still does. wantAcc's second entry is ".t", not "db1.t": like the
+		// "unqualified" (non-SI) case above, TableTarget{DB:"",Table:"t"}
+		// reports its raw, unresolved OriginalDatabase; the accessed entry is
+		// still correctly flagged IsStorageIntegrity (measured, not asserted by
+		// this helper, which only compares db+table).
+		{name: "unqualified active table derived read (infix)", sql: "SELECT * FROM db1.o WHERE a IN t", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", ".t"}},
+		{name: "unqualified active table derived read (paren)", sql: "SELECT * FROM db1.o WHERE a IN (t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`, wantAcc: []string{"db1.o", ".t"}},
+		{name: "unqualified active table derived read (callable)", sql: "SELECT * FROM db1.o WHERE in(a, t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))`, wantAcc: []string{"db1.o", ".t"}},
+		{name: "cte alias untouched", sql: "WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c", wantCode: pb.RewriteCode_Success,
+			wantSQL: `WITH c AS (SELECT 1 AS a) SELECT * FROM phys."db1.o" "db1.o" WHERE a IN c`, wantAcc: []string{"db1.o"}},
+		{name: "system stays", sql: "SELECT * FROM db1.o WHERE a IN system.tables", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN system.tables`, wantAcc: []string{"db1.o", "system.tables"}},
+		// A single-element *literal* value list is never a table operand
+		// (controller review round 1, finding 2): decodeInNamespaceRefDetail
+		// requires is_field or a structurally-provable column/dot shape, and a
+		// string literal is neither, even when its text happens to spell a
+		// protected or SI-active name. It stays an ordinary value comparison —
+		// untouched, unreported, and never checked against SI/protected-database
+		// policy — exactly as a bare `a = 'hg_safe.db1__t'` would.
+		{name: "literal value list stays a value, not a table (SI)", sql: "SELECT * FROM db1.o WHERE a IN ('hg_safe.db1__t')", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN ('hg_safe.db1__t')`, wantAcc: []string{"db1.o"}},
+		{name: "literal value list stays a value, not a table (non-SI)", sql: "SELECT * FROM db1.o WHERE a IN ('phys.x')", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN ('phys.x')`, wantAcc: []string{"db1.o"}},
+	})
+}
+
+// TestTableRef_InOperandRemoteMappedLogicalRendersRemoteCall pins controller
+// review round 1, finding 3: a logical database mapped through
+// LogicalDatabaseToRemoteUpstreamIndex/RemoteUpstreams (decideTable's
+// StatusRemote) renders as a bare remote(addr, db, table, user, password) call
+// when it appears as an IN operand, exactly mirroring applyDecision's
+// ActionRemote branch for a FROM table (see remoteFunc). Before this fix the
+// operand was left untouched (still reading the logical name in the generated
+// SQL) even though decideTable had already recorded a table_rewrites entry
+// and an accessed table for it — a real rewrite that never actually happened
+// in the SQL.
+func TestTableRef_InOperandRemoteMappedLogicalRendersRemoteCall(t *testing.T) {
+	e := newEngine(t)
+	dyn := tablerefDynamic(false)
+	dyn.DatabaseMap["tenant1"] = "testnet"
+	dyn.KnownPhysicalDatabases = append(dyn.KnownPhysicalDatabases, "testnet")
+	dyn.LogicalDatabaseToRemoteUpstreamIndex = map[string]string{"tenant1": "peer"}
+	dyn.RemoteUpstreams = map[string]*pb.RewriteTableDynamicArgs_RemoteUpstream{
+		"peer": {Addr: "h:9000", User: "u", Password: "p"},
+	}
+	sql := "SELECT * FROM db1.o WHERE a IN tenant1.x"
+	resp, err := doRewrite(e, sql, []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+	}
+	wantSQL := `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN remote('h:9000', 'testnet', 'tenant1.x', 'u', 'p')`
+	if resp.GetSqlAfterRewrite() != wantSQL {
+		t.Fatalf("sql = %q, want %q", resp.GetSqlAfterRewrite(), wantSQL)
+	}
+	wantRewrites := map[string]string{"db1.o": "phys.db1.o", "tenant1.x": "testnet.tenant1.x"}
+	if !reflect.DeepEqual(resp.GetTableRewrites(), wantRewrites) {
+		t.Fatalf("table_rewrites = %v, want %v", resp.GetTableRewrites(), wantRewrites)
+	}
+}
+
+func TestTableRef_ProtectedLogicalContextIsRefused(t *testing.T) {
+	e := newEngine(t)
+	dyn := tablerefDynamic(false)
+	dyn.UpstreamLogicalDatabaseInContext = "phys"
+	resp, err := doRewrite(e, "SELECT * FROM o", []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest || resp.GetMessage() != "protected database phys is not addressable" {
+		t.Fatalf("resp = %s %q", resp.GetCode(), resp.GetMessage())
+	}
+}
+
+// TestTableRef_EmbeddedSourcesAreRewrittenAndReported pins spec T4 (second
+// half): an INSERT ... SELECT or CREATE TABLE ... AS SELECT body is routed
+// through the same SELECT pipeline as a view body, so its FROM/IN sources are
+// rewritten to physical names and reported in original_accessed_tables, and an
+// SI source becomes the derived safe/unsafe read the FROM path already emits.
+func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "insert select own", sql: "INSERT INTO db1.o SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM phys."db1.p" "db1.p"`, wantAcc: []string{"db1.o", "db1.p"}},
+		// DEVIATION FROM BRIEF (reported DONE_WITH_CONCERNS): the brief's wantSQL
+		// spells the back-alias quoted (`"p"`), but applyDecision's back-alias is
+		// ident(originName(tt)) — for an unqualified operand tt.DB=="" so
+		// originName is the bare "p", which the generator prints unquoted like
+		// any other plain identifier with no dot (see TestTableRef_InOperandsAreRewrittenAndReported's
+		// "unqualified" case, which documents the same TableTarget{DB:"",Table:"p"}
+		// decode). Pinning the engine's actual, measured output.
+		// wantAcc's second entry is ".p", not "db1.p", for the same documented
+		// reason as TestTableRef_InOperandsAreRewrittenAndReported's "unqualified"
+		// case: OriginalAccessedTables reports TableTarget{DB:"",Table:"p"} verbatim.
+		{name: "insert select unqualified", sql: "INSERT INTO db1.o SELECT * FROM p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM phys."db1.p" p`, wantAcc: []string{"db1.o", ".p"}},
+		{name: "insert select nested in", sql: "INSERT INTO db1.o SELECT * FROM (SELECT * FROM db1.p WHERE a IN db1.q)", wantCode: pb.RewriteCode_Success,
+			wantAcc: []string{"db1.o", "db1.p", "db1.q"}},
+		{name: "insert select active source", sql: "INSERT INTO db1.o SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t"`, wantAcc: []string{"db1.o", "db1.t"}},
+		{name: "insert into active target keeps signed-lane marking", sql: "INSERT INTO db1.t SELECT * FROM db1.o", si: true, wantCode: pb.RewriteCode_Success,
+			wantAcc: []string{"db1.t", "db1.o"}},
+		{name: "ctas own", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas empty drops the body", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory`, wantAcc: []string{"db1.n"}},
+		{name: "ctas active source", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
+			wantAcc: []string{"db1.n", "db1.t"}},
+		{name: "ctas into active target still refused", sql: "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "accepts writes only through the signed statement lane"},
+		// Fix round 1: a PARENTHESIZED embedded body (`AS (SELECT …)` /
+		// `INSERT INTO t (SELECT …)`) is polyglot's {"subquery":{"this":…, …}}
+		// wrapper around the same read body, not a bare {"select":…} —
+		// isReadBody saw only "subquery" and rejected it, so
+		// ExtractInsertBody/ExtractCreateSelectBody returned has=false and
+		// rewriteEmbeddedBody passed the statement through UNCHANGED: an SI
+		// source that must be refused was silently forwarded as Success
+		// instead. These rows cover both statements, SI and non-SI, in the
+		// paren form (subqueryShells in internal/engine/writes.go peels the
+		// wrapper; see the engine-level ..._paren tests in writes_test.go).
+		{name: "insert select own paren", sql: "INSERT INTO db1.o (SELECT * FROM db1.p)", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.o", "db1.p"}},
+		{name: "insert select active source paren", sql: "INSERT INTO db1.o (SELECT * FROM db1.t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" (SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t")`, wantAcc: []string{"db1.o", "db1.t"}},
+		// CTAS's generator unconditionally wraps as_select in an extra paren
+		// layer on every Generate call (see internal/engine/writes_test.go's
+		// TestCreateSelectBody_extractRewriteSet note), so a singly-
+		// parenthesized original renders with TWO layers here — matching a
+		// plain parse+Generate round trip of the same SQL with no rewriting
+		// at all (verified via probe).
+		{name: "ctas own paren with comment", sql: "CREATE TABLE db1.n ENGINE = Memory AS (SELECT * FROM db1.p) COMMENT 'x'", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS ((SELECT * FROM phys."db1.p" "db1.p")) COMMENT 'x'`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas active source paren", sql: "CREATE TABLE db1.n ENGINE = Memory AS (SELECT * FROM db1.t)", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS ((SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t"))`, wantAcc: []string{"db1.n", "db1.t"}},
+	})
+
+	// The signed lane's contract (spec §2): "INSERT remains an ordinary
+	// successful physical rewrite marked is_storage_integrity". Confirm the
+	// INSERT target itself (not just its embedded source) still carries the
+	// SI marker after this task routes the body through the SELECT pipeline.
+	e := newEngine(t)
+	resp, err := doRewrite(e, "INSERT INTO db1.t SELECT * FROM db1.o", tablerefOpts(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+	}
+	acc := resp.GetOriginalAccessedTables()
+	if len(acc) == 0 || !acc[0].GetIsStorageIntegrity() {
+		t.Fatalf("accessed[0] = %+v, want IsStorageIntegrity=true", acc)
+	}
+}
+
+// TestTableRef_TableFunctionsAndEnginesAreAllowlisted pins spec 2026-09-26 T5
+// (Task 7): every source-role table function and CREATE TABLE engine/setting
+// must be on a closed allowlist, and an unrecognized table function name is
+// refused as "not recognised" rather than silently forwarded.
+//
+// Controller ruling 1 restructured the brief's original single si-independent
+// table: the refused-function and refused-engine rows below all run with
+// si:false (the default, unchanged from the brief) because with the
+// storage-integrity surface active, PreflightTableReferences defers this
+// check entirely to rewriteSelectCore / preflightStorageIntegrityWrite,
+// AFTER their own SI namespace policy — so an SI-owned message (e.g.
+// merge('hg_safe', …) or merge('db1', …) under contract V2) is never
+// pre-empted. The three si:true rows appended at the end exercise exactly
+// that ordering: the existing SI message for a table function whose target IS
+// SI-owned, the NEW T5 refusal for one whose target is NOT, and a plain
+// success for an allowed function.
+func TestTableRef_TableFunctionsAndEnginesAreAllowlisted(t *testing.T) {
+	var cases []tablerefCase
+	for _, fn := range []string{
+		"merge('db1', 'o')", "remote('h', 'db1', 'o')", "remoteSecure('h', 'db1', 'o')", "cluster('c', db1.o)",
+		"clusterAllReplicas('c', db1.o)", "loop('db1', 'o')", "dictionary(db1.d)", "mergeTreeIndex('db1', 'o')",
+		"mergeTreeProjection('db1', 'o', 'p')", "timeSeriesData('db1', 'o')", "prometheusQuery('db1', 'o', 'up')",
+		"clickhouse('db1.o')", "mysql('h', 'db1', 'o', 'u', 'p')", "postgresql('h', 'db1', 'o', 'u', 'p')",
+		"mongodb('h', 'db1', 'o', 'u', 'p', 'a UInt8')", "jdbc('ds', 'db1', 'o')", "odbc('ds', 'db1', 'o')",
+		"executable('x.sh', 'TSV', 'a UInt8')", "fuzzQuery('SELECT 1')",
+	} {
+		name := fn[:strings.IndexByte(fn, '(')]
+		cases = append(cases, tablerefCase{name: fn, sql: "SELECT * FROM " + fn,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function " + name + " is not accepted"})
+	}
+	cases = append(cases,
+		tablerefCase{name: "unknown", sql: "SELECT * FROM frobnicate('x')", wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg: "table function frobnicate is not recognised"},
+		tablerefCase{name: "numbers", sql: "SELECT * FROM numbers(10)", wantCode: pb.RewriteCode_Success, wantAcc: []string{}},
+		tablerefCase{name: "view body", sql: "SELECT * FROM view(SELECT * FROM db1.o)", wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}},
+		tablerefCase{name: "input", sql: "INSERT INTO db1.o SELECT * FROM input('a UInt8')", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "url unchanged (non-goal)", sql: "SELECT * FROM url('http://127.0.0.1/x', CSV)", wantCode: pb.RewriteCode_Success, wantAcc: []string{}},
+		tablerefCase{name: "insert function", sql: "INSERT INTO FUNCTION remote('h', 'db1', 'o') VALUES (1)", wantCode: pb.RewriteCode_UnsupportedStatement},
+	)
+	for _, eng := range []string{
+		"Merge('db1', '^o')", "Buffer(db1.o, 16, 10, 100, 10000, 1000000, 10000000, 100000000)",
+		"Distributed(default, db1.o)", "URL('http://127.0.0.1/x', CSV)", "Dictionary(db1.d)", "KeeperMap('/x')",
+		"EmbeddedRocksDB", "Kafka", "S3('http://127.0.0.1/x', CSV)", "File(CSV)",
+		"ReplicatedMergeTree('/clickhouse/tables/x', 'r1')",
+	} {
+		name := eng
+		if i := strings.IndexByte(eng, '('); i >= 0 {
+			name = eng[:i]
+		}
+		cases = append(cases, tablerefCase{name: eng, sql: "CREATE TABLE db1.n (a UInt64) ENGINE = " + eng + " ORDER BY a",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table engine " + name + " is not accepted"})
+	}
+	cases = append(cases,
+		tablerefCase{name: "MergeTree", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "ReplicatedMergeTree bare", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = ReplicatedMergeTree ORDER BY a", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "Memory", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = Memory", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "storage_policy", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a SETTINGS storage_policy = 's3'",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting storage_policy is not accepted"},
+		tablerefCase{name: "disk", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a SETTINGS disk = 'd'",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting disk is not accepted"},
+		tablerefCase{name: "alter modify setting disk", sql: "ALTER TABLE db1.o MODIFY SETTING disk = 'd'",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting disk is not accepted"},
+		tablerefCase{name: "unknown engine", sql: "CREATE TABLE db1.n (a UInt64) ENGINE = Frob", wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg: "table engine Frob is not accepted"},
+		// Controller ruling 1's first and third si:true rows: the precedence
+		// guarantee that an SI-owned message never moves, and that a plainly
+		// allowed function stays allowed. The second si:true row (an
+		// ordinary local-catalog function reaching the NEW T5 check itself)
+		// needs a database with no Active table of its own -- "db1" cannot be
+		// reused here, since db1.t Active reserves the WHOLE "db1" database
+		// for every indirect namespace surface (see the row directly below);
+		// it is TestTableRef_TableFunctionAllowlistAppliesUnderActiveSI.
+		tablerefCase{name: "si merge active logical db unmoved", sql: "SELECT * FROM merge('db1', 'o')", si: true,
+			wantCode: pb.RewriteCode_RewriteError, wantMsg: "not directly addressable through merge table function"},
+		tablerefCase{name: "si numbers stays allowed", sql: "SELECT * FROM numbers(10)", si: true, wantCode: pb.RewriteCode_Success},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_TableFunctionAllowlistAppliesUnderActiveSI pins controller
+// ruling 1's second si:true row directly: a table function whose database
+// hosts no Active storage-integrity table of its own (unlike "db1", which
+// owns db1.t and so is entirely reserved by rejectStorageIntegrityNamespaces's
+// IsStorageIntegrityLogicalDatabase branch — see
+// TestTableRef_ProtectedDatabasesAreRefusedEverywhere and the "si merge
+// active logical db unmoved" row above) still reaches the NEW T5 allowlist
+// from rewriteSelectCore, once the SI namespace policy finds nothing to
+// reject for it.
+func TestTableRef_TableFunctionAllowlistAppliesUnderActiveSI(t *testing.T) {
+	e := newEngine(t)
+	dyn := tablerefDynamic(true)
+	dyn.DatabaseMap["other"] = "phys"
+	resp, err := doRewrite(e, "SELECT * FROM mergeTreeIndex('other', 'u')", []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || !strings.Contains(resp.GetMessage(), "table function mergeTreeIndex is not accepted") {
+		t.Fatalf("resp = %s %q, want UnsupportedStatement \"table function mergeTreeIndex is not accepted\"",
+			resp.GetCode(), resp.GetMessage())
+	}
+}
+
+// TestTableRef_StringLookupsAreResolvedOrRefused pins spec 2026-09-26 T6
+// (Task 7): joinGet/dictGet-family calls are always refused (measured against
+// ClickHouse 25.8 directly by the controller — none of the string/identifier
+// forms those functions accept actually resolves a dotted logical table name,
+// so there is no working rewrite for them), while hasColumnInTable's
+// database/table pair is resolved and rewritten exactly like a FROM
+// reference.
+func TestTableRef_StringLookupsAreResolvedOrRefused(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "joinGet mapped literal", sql: "SELECT joinGet('db1.j', 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+		{name: "joinGet identifier form", sql: "SELECT joinGet(db1.j, 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+		{name: "dictGet mapped", sql: "SELECT dictGet('db1.d', 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.d" does not resolve`},
+		// Task 4's preflight protected-database step fires first: "phys" is
+		// protected, so this never reaches the T6 refusal above.
+		{name: "joinGet protected preflight fires first", sql: "SELECT joinGet('phys.`db2.x`', 'v', 1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+		{name: "hasColumnInTable mapped", sql: "SELECT hasColumnInTable('db1', 'j', 'v')", wantCode: pb.RewriteCode_Success,
+			wantSQL: "SELECT hasColumnInTable('phys', 'db1.j', 'v')", wantAcc: []string{"db1.j"}},
+		{name: "hasColumnInTable with host prefix", sql: "SELECT hasColumnInTable('localhost', 'db1', 'j', 'v')", wantCode: pb.RewriteCode_Success,
+			wantSQL: "SELECT hasColumnInTable('localhost', 'phys', 'db1.j', 'v')", wantAcc: []string{"db1.j"}},
+		{name: "hasColumnInTable active table refused", sql: "SELECT hasColumnInTable('db1', 't', 'v')", si: true,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "db1.t" does not resolve`},
+		{name: "hasColumnInTable non-literal db refused", sql: "SELECT hasColumnInTable(concat('db', '1'), 'j', 'v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest},
+		// Task 7 fix round 1 finding 2: the joinGet/dictGet-family refusal and
+		// hasColumnInTable's "outside a SELECT body" refusal both run
+		// statement-wide in PreflightTableReferences, not just inside
+		// rewriteSelectCore's SELECT-body handling. Measured directly: real
+		// ClickHouse executes `ALTER TABLE t UPDATE a = joinGet(...)` reading
+		// a Join table from another database, so these four opaque/column
+		// positions must not pass through unrefused.
+		{name: "joinGet in ALTER UPDATE assignment (opaque mutation)",
+			sql:      "ALTER TABLE db1.o UPDATE a = joinGet('default.j','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "dictHas in ALTER DELETE predicate (opaque mutation)",
+			sql:      "ALTER TABLE db1.o DELETE WHERE dictHas('db1.d',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.d" does not resolve`},
+		{name: "hasColumnInTable in ALTER UPDATE assignment refused, not rewritten",
+			sql:      "ALTER TABLE db1.o UPDATE a = hasColumnInTable('default','x','v') WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "joinGet in CREATE TABLE column DEFAULT",
+			sql:      "CREATE TABLE db1.n (a String DEFAULT joinGet('default.j','v',1)) ENGINE = Memory",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		// Task 7 fix round 2 finding 2: mechanism (b) (the raw tokenizer scan
+		// over every command/Raw-action text span) closes what round 1's
+		// probe-reparse collector missed — a MULTI-command ALTER tail (which
+		// fails a single-action reparse) and a Raw action that is not a
+		// mutation at all (MODIFY COLUMN … DEFAULT …).
+		{name: "dictHas in multi-command ALTER tail (UPDATE, DELETE)",
+			sql:      "ALTER TABLE db1.o UPDATE a = 1 WHERE 1, DELETE WHERE dictHas('db1.d',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.d" does not resolve`},
+		{name: "joinGet in multi-command ALTER tail (DELETE, UPDATE)",
+			sql:      "ALTER TABLE db1.o DELETE WHERE b = 1, UPDATE a = joinGet('default.j','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "joinGet in ALTER MODIFY COLUMN DEFAULT (Raw action, not a mutation)",
+			sql:      "ALTER TABLE db1.o MODIFY COLUMN a String DEFAULT joinGet('default.j','v',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		// hasColumnInTable outside every SELECT-body position: mechanism (a)'s
+		// generic structured walk finds each of these via an ordinary
+		// "function" node (no per-position collector needed, unlike round
+		// 1's now-deleted CREATE-column/single-ALTER-mutation collectors),
+		// and none of them is InSelectBody, so all are refused rather than
+		// rewritten.
+		{name: "hasColumnInTable in DELETE predicate",
+			sql:      "DELETE FROM db1.o WHERE hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in UPDATE assignment",
+			sql:      "UPDATE db1.o SET a = hasColumnInTable('default','x','v') WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in INSERT VALUES",
+			sql:      "INSERT INTO db1.o VALUES (hasColumnInTable('default','x','v'))",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in ALTER ADD COLUMN DEFAULT",
+			sql:      "ALTER TABLE db1.o ADD COLUMN b UInt8 DEFAULT hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE PARTITION BY",
+			sql:      "CREATE TABLE db1.n (a UInt8) ENGINE = MergeTree ORDER BY a PARTITION BY hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE TTL",
+			sql:      "CREATE TABLE db1.n (a DateTime) ENGINE = MergeTree ORDER BY a TTL a + hasColumnInTable('default','x','v')",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE CONSTRAINT CHECK",
+			sql:      "CREATE TABLE db1.n (a UInt8, CONSTRAINT c CHECK hasColumnInTable('default','x','v')) ENGINE = MergeTree ORDER BY a",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		// Keep: an ordinary multi-value IN predicate, and an ordinary
+		// non-lookup DEFAULT expression, must stay untouched.
+		{name: "ALTER UPDATE with ordinary IN predicate stays Success",
+			sql:      "ALTER TABLE db1.o UPDATE a = 1 WHERE b IN (1, 2)",
+			wantCode: pb.RewriteCode_Success},
+		{name: "CREATE TABLE with ordinary DEFAULT now() stays Success",
+			sql:      "CREATE TABLE db1.n (a DateTime DEFAULT now()) ENGINE = Memory",
+			wantCode: pb.RewriteCode_Success},
+		// Task 7 fix round 3 new breakage 1: a backquoted or double-quoted
+		// lookup-family function name defeats mechanism (b)'s raw-text scan
+		// (lookupCallsInRawTokens unconditionally skipped every
+		// QUOTED_IDENTIFIER token), so these opaque-command/Raw-action
+		// positions ran the quoted call as a real lookup instead of refusing
+		// it. Measured: ClickHouse accepts a quoted identifier as a function
+		// name regardless of spelling.
+		{name: "quoted dictGet (backtick) in ALTER UPDATE assignment",
+			sql:      "ALTER TABLE db1.o UPDATE a = `dictGet`('db1.a','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.a" does not resolve`},
+		{name: "quoted joinGet (backtick) in ALTER UPDATE assignment",
+			sql:      "ALTER TABLE db1.o UPDATE a = `joinGet`('default.j','v',1) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: `quoted joinGet (double-quote) in ALTER UPDATE assignment`,
+			sql:      `ALTER TABLE db1.o UPDATE a = "joinGet"('default.j','v',1) WHERE 1`,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "quoted joinGet (backtick) in ALTER MODIFY COLUMN DEFAULT (Raw action)",
+			sql:      "ALTER TABLE db1.o MODIFY COLUMN a String DEFAULT `joinGet`('default.j','v',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "default.j" does not resolve`},
+		{name: "quoted hasColumnInTable (backtick) in ALTER UPDATE assignment",
+			sql:      "ALTER TABLE db1.o UPDATE a = `hasColumnInTable`('default','x','v') WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		// Task 7 fix round 3 new breakage 2: InSelectBody was true inside a
+		// SELECT subtree reached via a structured UPDATE SET / DELETE WHERE
+		// IN / INSERT VALUES / CREATE TABLE column DEFAULT scalar or IN
+		// subquery — a position no rewrite pipeline ever reaches — so the
+		// call was neither refused nor rewritten (an unmapped logical name
+		// silently reached ClickHouse). Only the genuine SELECT-body-rewrite
+		// roots (top-level SELECT-family, CTAS as_select, view body, INSERT
+		// query) may elevate InSelectBody now; every other embedded SELECT
+		// stays refused.
+		{name: "hasColumnInTable in UPDATE SET scalar subquery, mapped-looking name still refused",
+			sql:      "UPDATE db1.o SET a = (SELECT hasColumnInTable('db1','j','v')) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "db1.j" does not resolve`},
+		{name: "hasColumnInTable in UPDATE SET scalar subquery",
+			sql:      "UPDATE db1.o SET a = (SELECT hasColumnInTable('default','x','v')) WHERE 1",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in DELETE WHERE IN subquery",
+			sql:      "DELETE FROM db1.o WHERE b IN (SELECT hasColumnInTable('default','x','v'))",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in INSERT VALUES scalar subquery",
+			sql:      "INSERT INTO db1.o VALUES ((SELECT hasColumnInTable('default','x','v')))",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		{name: "hasColumnInTable in CREATE TABLE column DEFAULT scalar subquery",
+			sql:      "CREATE TABLE db1.n (a UInt8 DEFAULT (SELECT hasColumnInTable('default','x','v'))) ENGINE = Memory",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `hasColumnInTable target "default.x" does not resolve`},
+		// Keep green: a genuine SELECT-body-rewrite root — INSERT … SELECT,
+		// CREATE TABLE … AS SELECT, CREATE VIEW … AS SELECT, and an
+		// IN-subquery nested inside a top-level SELECT — still resolves and
+		// rewrites hasColumnInTable exactly like a bare SELECT does (Task 7
+		// fix round 3 ruling: these roots must stay green after the breakage
+		// 2 fix narrows InSelectBody elevation).
+		{name: "hasColumnInTable in INSERT ... SELECT body stays rewritten",
+			sql:      "INSERT INTO db1.o SELECT hasColumnInTable('db1','j','v') FROM db1.p",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `INSERT INTO phys."db1.o" SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p"`,
+			wantAcc:  []string{"db1.o", "db1.p", "db1.j"}},
+		{name: "hasColumnInTable in CREATE TABLE ... AS SELECT body stays rewritten",
+			sql:      "CREATE TABLE db1.n ENGINE = Memory AS SELECT hasColumnInTable('db1','j','v') FROM db1.p",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `CREATE TABLE phys."db1.n" ENGINE=Memory AS (SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p")`,
+			wantAcc:  []string{"db1.n", "db1.p", "db1.j"}},
+		{name: "hasColumnInTable in CREATE VIEW ... AS SELECT body stays rewritten",
+			sql:      "CREATE VIEW db1.v AS SELECT hasColumnInTable('db1','j','v') FROM db1.p",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `CREATE VIEW phys."db1.v" AS SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p"`,
+			wantAcc:  []string{"db1.v", "db1.p", "db1.j"}},
+		{name: "hasColumnInTable in IN-subquery nested in a top-level SELECT stays rewritten",
+			sql:      "SELECT * FROM db1.o WHERE x IN (SELECT hasColumnInTable('db1','j','v') FROM db1.p)",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `SELECT * FROM phys."db1.o" "db1.o" WHERE x IN (SELECT hasColumnInTable('phys', 'db1.j', 'v') FROM phys."db1.p" "db1.p")`,
+			wantAcc:  []string{"db1.o", "db1.p", "db1.j"}},
+	})
+}
+
+// TestTableRef_StringLookupOrderIsDeterministic pins Task 7 fix round 1
+// finding 1 (measured over 200 runs of the original map-range-order
+// implementation: up to 24 distinct accessed orders for one statement, and
+// up to 3 distinct first-refusal messages for another), its fix round 2
+// refinement (document order, not just a stable order — the reviewer's own
+// probes below), and fix round 3 minor 3 (dropping the span-based secondary
+// sort entirely, since it wasn't a strict weak ordering: the comparator
+// returned false whenever either call lacked a span, so incomparability
+// wasn't transitive). collectStringLookupOccurrences (references.go) now
+// orders calls purely by the structural walk order — clause rank
+// (stringLookupClauseOrder), then sorted key, then array index — which
+// already reproduces every probe below, including the reviewer's own
+// WHERE/GROUP BY/HAVING/ORDER BY/LIMIT and JOIN ON cases. Run with
+// `-count=20` to prove stability, not just `-count=1`.
+func TestTableRef_StringLookupOrderIsDeterministic(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "four hasColumnInTable calls, stable accessed order",
+			sql:      "SELECT hasColumnInTable('db1','a','v'), hasColumnInTable('db1','b','v'), hasColumnInTable('db1','c','v'), hasColumnInTable('db1','d','v')",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL: "SELECT hasColumnInTable('phys', 'db1.a', 'v'), hasColumnInTable('phys', 'db1.b', 'v'), " +
+				"hasColumnInTable('phys', 'db1.c', 'v'), hasColumnInTable('phys', 'db1.d', 'v')",
+			wantAcc: []string{"db1.a", "db1.b", "db1.c", "db1.d"}},
+		{name: "mixed joinGet/dictHas/dictGet, stable first refusal",
+			sql:      "SELECT joinGet('db1.j','v',1), dictHas('db1.d',1), dictGet('db1.g','v',1)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+		// Fix round 2 finding 1's own probe: WHERE's hasColumnInTable ('a')
+		// must be reported before ORDER BY's ('z') — the FROM target ('o')
+		// always leads, recorded earlier in rewriteSelectCore before any
+		// string-lookup handling runs at all.
+		{name: "WHERE hasColumnInTable precedes ORDER BY hasColumnInTable",
+			sql:      "SELECT x FROM db1.o WHERE hasColumnInTable('db1','a','v') ORDER BY hasColumnInTable('db1','z','v')",
+			wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o", "db1.a", "db1.z"}},
+		// Fix round 2 finding 1's second probe: the CTE body's dictHas is the
+		// first call in document order (the "with" clause precedes the main
+		// SELECT's own "expressions"), so it must be the one named in the
+		// refusal message, not the main body's dictGet.
+		{name: "CTE body's dictHas precedes main body's dictGet",
+			sql:      "WITH (SELECT dictHas('db1.a',1)) AS c SELECT dictGet('db1.j','v',1), c",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictHas target "db1.a" does not resolve`},
+		// Task 7 fix round 3 minor 3's own probes: with the span-based
+		// secondary sort dropped entirely, the walk order (clause rank, then
+		// sorted key, then array index) alone must still reproduce the
+		// clause-grammar-ordered accessed list.
+		{name: "WHERE/GROUP BY/HAVING/ORDER BY/LIMIT accessed order",
+			sql: "SELECT hasColumnInTable('db1','a','v') FROM db1.o WHERE hasColumnInTable('db1','b','v') " +
+				"GROUP BY 1 HAVING hasColumnInTable('db1','c','v') ORDER BY hasColumnInTable('db1','z','v') LIMIT 10",
+			wantCode: pb.RewriteCode_Success,
+			wantAcc:  []string{"db1.o", "db1.a", "db1.b", "db1.c", "db1.z"}},
+		{name: "JOIN ON accessed order",
+			sql:      "SELECT * FROM db1.o JOIN db1.p ON hasColumnInTable('db1','a','v') AND hasColumnInTable('db1','b','v')",
+			wantCode: pb.RewriteCode_Success,
+			wantAcc:  []string{"db1.o", "db1.p", "db1.a", "db1.b"}},
+	})
+}
+
+// TestTableRef_DescribeFunctionTargetIsClassified pins Task 7 fix round 1
+// finding 3: ParseObjectTarget's tokenizer-based name-run extraction stopped
+// at the name token and silently dropped a following "(...)", so
+// `DESCRIBE TABLE mysql('h', 'default', 'u', 'x', 'y')` reported
+// Table="mysql" and RewriteDescribe passed the whole statement through
+// unchanged as Success — neither the T5 table-function allowlist nor the
+// protected-database check ever saw it. ParseObjectTargetFunctionCall now
+// detects this shape and PreflightTableReferences classifies it
+// unconditionally (both SI states — "merge" stays refused even under
+// contract V2, since no other handler defers this check for an active SI
+// surface the way SELECT/write dispatch does).
+func TestTableRef_DescribeFunctionTargetIsClassified(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "DESCRIBE mysql refused", sql: "DESCRIBE TABLE mysql('h','default','u','x','y')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function mysql is not accepted"},
+		{name: "DESCRIBE remote refused", sql: "DESCRIBE TABLE remote('localhost','default','secret')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function remote is not accepted"},
+		{name: "DESCRIBE unknown function refused", sql: "DESCRIBE TABLE frobnicate('x')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function frobnicate is not recognised"},
+		{name: "DESCRIBE merge refused even under V2", sql: "DESCRIBE TABLE merge('hg_safe','db1__t')", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function merge is not accepted"},
+		{name: "DESCRIBE numbers stays allowed", sql: "DESCRIBE TABLE numbers(10)", wantCode: pb.RewriteCode_Success},
+		// Task 7 fix round 2 finding 3: a leading comment defeated the verb
+		// gate, which matched EXISTS/SHOW/DESCRIBE against the raw SQL TEXT
+		// (comment included) before ever tokenizing. The gate now reads the
+		// tokenizer's first token directly — comments are stripped from the
+		// token stream entirely (attached to the FOLLOWING token as
+		// metadata, never emitted as their own token), so it is comment-
+		// agnostic by construction.
+		{name: "leading block comment does not defeat DESCRIBE merge, even under V2",
+			sql: "/* c */ DESCRIBE TABLE merge('hg_safe','db1__t')", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function merge is not accepted"},
+		{name: "leading block comment does not defeat DESCRIBE mysql",
+			sql:      "/* c */ DESCRIBE TABLE mysql('h','default','u','x','y')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function mysql is not accepted"},
+		{name: "leading line comment does not defeat DESCRIBE remote",
+			sql:      "-- c\nDESCRIBE TABLE remote('localhost','default','secret')",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table function remote is not accepted"},
+	})
+}
+
+// TestTableRef_UnmodelledClassesAreRefusedWithoutSI pins spec 2026-09-26 T7
+// (Task 7): with the storage-integrity surface inactive, a statement class no
+// handler models is now refused (it used to pass through as Success) — except
+// a session SET, which names no table and which clients send routinely.
+func TestTableRef_UnmodelledClassesAreRefusedWithoutSI(t *testing.T) {
+	runTablerefCases(t, []tablerefCase{
+		{name: "system", sql: "SYSTEM RELOAD CONFIG", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "explain", sql: "EXPLAIN SELECT * FROM db1.o", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "check", sql: "CHECK TABLE db1.o", wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "create user", sql: "CREATE USER u1", wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "create function", sql: "CREATE FUNCTION f AS x -> x + 1", wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET max_threads = 1"},
+		{name: "set refused under V2", sql: "SET max_threads = 1", si: true, wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "select 1", sql: "SELECT 1", wantCode: pb.RewriteCode_Success},
+		// Task 7 fix round 1 finding 4: the SET carve-out must admit only a
+		// settings assignment, not every statement starting with the SET
+		// keyword. SET ROLE / SET DEFAULT ROLE are access-management
+		// statements this repo does not model.
+		{name: "set role refused", sql: "SET ROLE r1", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "set default role refused", sql: "SET DEFAULT ROLE r1 TO u1", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		{name: "set tab-separated setting still passes", sql: "SET\tmax_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET\tmax_threads = 1"},
+	})
+}
+
+// TestTableRef_InOperandsDecodeOnce pins spec 2026-09-26 R1 (final review
+// Critical 1 and 6): every IN consumer decodes its operand through one shared
+// decoder, which unwraps parentheses to any depth, treats a parameter operand
+// as a T2 hit, and decodes an identifier operand structurally, so a bare
+// quoted `db2.x` is an unqualified table named "db2.x" in the session's
+// logical database, exactly like FROM.
+func TestTableRef_InOperandsDecodeOnce(t *testing.T) {
+	const paramMsg = "query parameters are not supported in a database or table position"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, db string }{
+			{"SELECT * FROM db1.o WHERE a IN ((phys.`db2.x`))", "phys"},
+			{"SELECT * FROM db1.o WHERE a IN (((phys.`db2.x`)))", "phys"},
+			{"SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))", "hg_safe"},
+			{"SELECT * FROM db1.o WHERE in(a, ((phys.`db2.x`)))", "phys"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest,
+				wantMsg:  "protected database " + c.db + " is not addressable", wantSQL: c.sql})
+		}
+		for _, sql := range []string{
+			"SELECT * FROM db1.o WHERE a IN ({p:Identifier})",
+			"SELECT * FROM db1.o WHERE a IN (({p:Identifier}))",
+			"SELECT * FROM db1.o WHERE in(a, (({p:Identifier})))",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: paramMsg, wantSQL: sql})
+		}
+		const scan = `SELECT * FROM phys."db1.o" "db1.o" WHERE `
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT * FROM db1.o WHERE a IN `db2.x`", scan + `a IN phys."db1.db2.x"`},
+			{"SELECT * FROM db1.o WHERE a IN (`db2.x`)", scan + `a IN (phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE a IN ((`db2.x`))", scan + `a IN (phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE in(a, `db2.x`)", scan + `in(a, phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE a NOT IN `db2.x`", scan + `a NOT IN phys."db1.db2.x"`},
+			{"SELECT * FROM db1.o WHERE a GLOBAL IN `db2.x`", scan + `a GLOBAL IN phys."db1.db2.x"`},
+			{"SELECT * FROM db1.o WHERE nullIn(a, `db2.x`)", scan + `nullIn(a, phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE nullIn(a, ((`db2.x`)))", scan + `nullIn(a, phys."db1.db2.x")`},
+			{"SELECT * FROM db1.o WHERE (a, b) IN `db2.x`", scan + `(a, b) IN phys."db1.db2.x"`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{"db1.o", ".db2.x"}})
+		}
+		// A literal operand stays a value at any paren depth.
+		cases = append(cases, tablerefCase{name: "literal_nested_paren", si: si,
+			sql:      "SELECT * FROM db1.o WHERE a IN ((1))",
+			wantCode: pb.RewriteCode_Success, wantSQL: scan + "a IN ((1))", wantAcc: []string{"db1.o"}})
+	}
+	// Under the SI surface a nested-paren Active table is still the derived read.
+	cases = append(cases, tablerefCase{name: "active_nested_paren", si: true,
+		sql:      "SELECT * FROM db1.o WHERE a IN ((db1.t))",
+		wantCode: pb.RewriteCode_Success,
+		wantSQL:  `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`})
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_GoErrorsFailClosed pins spec 2026-09-26 R6 (final review
+// Critical 7): in dynamic mode a handler, walk or generate error — including a
+// polyglot recursion-limit error — is a coded UnsupportedStatement rejection
+// in both SI states, never a Go error a caller could treat as fail-open.
+func TestTableRef_GoErrorsFailClosed(t *testing.T) {
+	nestedIN := "SELECT a FROM db1.o"
+	for i := 0; i < 60; i++ {
+		nestedIN = "SELECT a FROM db1.o WHERE a IN (" + nestedIN + ")"
+	}
+	union := strings.TrimSuffix(strings.Repeat("SELECT a FROM db1.o UNION ALL ", 500), " UNION ALL ")
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		msg := "statement is not supported"
+		if si {
+			msg = StorageIntegrityUnmodelledMessage
+		}
+		for _, c := range []struct{ name, sql string }{
+			{"lambda_body_subquery", "SELECT arrayMap(x -> x IN (SELECT a FROM phys.`db2.x`), [1]) FROM db1.o"},
+			{"any_subquery", "SELECT * FROM db1.o WHERE a = ANY (SELECT a FROM phys.`db2.x`)"},
+			{"values_scalar_subquery", "SELECT * FROM values('a UInt64', (SELECT max(a) FROM phys.`db2.x`))"},
+			{"nested_in_60", nestedIN},
+			{"union_500", union},
+		} {
+			cases = append(cases, tablerefCase{name: c.name, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_MutationAndColumnExpressionReads pins spec 2026-09-26 R2
+// (final review Critical 2, Important 3 and 6): structured UPDATE / DELETE
+// predicates and assignments, INSERT VALUES, column / constraint / storage-
+// property expressions and structured ALTER actions are visited by the walker
+// (so T2 / T3 apply), and opaque ALTER text is scanned by the tokenizer. A
+// read the rewriter cannot rewrite and report there is refused with
+// "statement is not supported" — protected and parameter messages win.
+func TestTableRef_MutationAndColumnExpressionReads(t *testing.T) {
+	const (
+		unsupported = "statement is not supported"
+		paramMsg    = "query parameters are not supported in a database or table position"
+	)
+	protected := func(db string) string { return "protected database " + db + " is not addressable" }
+	type row struct {
+		sql     string
+		code    pb.RewriteCode
+		msgOff  string // SI surface inactive
+		msgOn   string // SI surface active; "" = same as msgOff
+		codeOn  pb.RewriteCode
+		setCode bool
+	}
+	rows := []row{
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM remote('127.0.0.1','phys','db2.x')) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM {p:Identifier}) WHERE 1", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM merge(currentDatabase(),'^db2')) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT max(a) FROM `db2.x`) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN phys.`db2.x`", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM phys.`db2.x`)", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN {p:Identifier}", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN (SELECT a FROM merge(currentDatabase(),'^db2'))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o DELETE WHERE a IN hg_safe.db1__t", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_safe"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
+		{sql: "ALTER TABLE db1.o UPDATE b = (SELECT count() FROM hg_promote.x) WHERE 1", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_promote"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_promote.x is not directly addressable"},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN phys.`db2.x`", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE in(a, db1.p)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE a IN ((db1.p))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "DELETE FROM db1.o WHERE a IN (SELECT a FROM `db2.x`)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "DELETE FROM db1.o WHERE a IN {p:Identifier}", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "UPDATE db1.o SET b = 1 WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "UPDATE db1.o SET b = (SELECT max(a) FROM db1.p) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "INSERT INTO db1.o VALUES ((SELECT max(a) FROM db1.p))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_promote"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_safe"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM phys.`db2.x`)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier})) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
+		{sql: "CREATE TABLE db1.n (a UInt64 MATERIALIZED a IN `db2.x`) ENGINE = Memory", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64, CONSTRAINT c CHECK a IN (SELECT 1 FROM db1.z)) ENGINE = MergeTree ORDER BY a", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree PARTITION BY a IN phys.x ORDER BY a", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "CREATE TABLE db1.n (a UInt64) ENGINE = MergeTree ORDER BY a TTL d + 1 WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		// Residual round 3: a reserved qualifier in opaque ALTER text gets the
+		// SI physical-name message while the SI surface is active.
+		{sql: "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM hg_unsafe.db1__t)", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_unsafe"),
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_unsafe.db1__t is not directly addressable"},
+		{sql: "ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT (SELECT max(a) FROM `db2.x`)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN `db2.x`", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ADD INDEX i a IN db1.q TYPE minmax", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ADD PROJECTION p (SELECT a FROM db1.x)", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o REPLACE PARTITION tuple() FROM phys.`db2.x`", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
+		{sql: "ALTER TABLE db1.o REPLACE PARTITION tuple() FROM db1.p", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o ATTACH PARTITION tuple() FROM db1.p", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o MOVE PARTITION tuple() TO TABLE db1.p", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o FETCH PARTITION tuple() FROM '/clickhouse/tables/x'", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+		{sql: "ALTER TABLE db1.o FETCH PART 'p' FROM '/clickhouse/tables/x'", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
+	}
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, r := range rows {
+			code, msg := r.code, r.msgOff
+			if si && r.setCode {
+				code, msg = r.codeOn, r.msgOn
+			}
+			cases = append(cases, tablerefCase{name: r.sql, sql: r.sql, si: si, wantCode: code, wantMsg: msg, wantSQL: r.sql})
+		}
+		// Reads-free mutations and column expressions keep working.
+		for _, c := range []struct{ sql, want string }{
+			{"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN (1, 2)", "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE a IN (1, 2)"},
+			{"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN tuple(1, 2)", "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE a IN tuple(1, 2)"},
+			{"ALTER TABLE db1.o DELETE WHERE a = 1", `ALTER TABLE phys."db1.o" DELETE WHERE a=1`},
+			{"DELETE FROM db1.o WHERE a IN (1, 2)", `DELETE FROM phys."db1.o" WHERE a IN (1, 2)`},
+			{"UPDATE db1.o SET b = 1 WHERE a = 1", `UPDATE phys."db1.o" SET b = 1 WHERE a = 1`},
+			{"ALTER TABLE db1.o ADD PROJECTION p (SELECT a ORDER BY b)", `ALTER TABLE phys."db1.o" ADD PROJECTION p(SELECT a ORDER BY b)`},
+			{"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a + 1", `ALTER TABLE phys."db1.o" ADD COLUMN c UInt8 DEFAULT a + 1`},
+			{"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY", `ALTER TABLE phys."db1.o" MODIFY TTL d + INTERVAL 1 DAY`},
+			{"ALTER TABLE db1.o FREEZE WITH NAME 'x'", `ALTER TABLE phys."db1.o" FREEZE WITH NAME 'x'`},
+			{"ALTER TABLE db1.o MOVE PARTITION tuple() TO DISK 'd'", `ALTER TABLE phys."db1.o" MOVE PARTITION tuple() TO DISK 'd'`},
+			{"ALTER TABLE db1.o ATTACH PART 'x'", `ALTER TABLE phys."db1.o" ATTACH PART 'x'`},
+			{"CREATE TABLE db1.n (a UInt64 DEFAULT 1, b UInt64 MATERIALIZED a * 2) ENGINE = MergeTree PARTITION BY a % 2 ORDER BY a",
+				`CREATE TABLE phys."db1.n" (a UInt64 DEFAULT 1, b UInt64 MATERIALIZED a * 2) ENGINE=MergeTree PARTITION BY a % 2 ORDER BY a`},
+		} {
+			cases = append(cases, tablerefCase{name: "allowed/" + c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ModifyQueryIsRefused pins spec 2026-09-26 R3 (final review
+// Critical 3). Option taken: refuse. ALTER TABLE … MODIFY QUERY is a Raw ALTER
+// action whose body polyglot does not structure; rather than splice a
+// rewritten materialized-view body back into that text, dynamic mode refuses
+// every MODIFY QUERY with "statement is not supported" after T2 (parameter)
+// and T3 (protected database) have run on its text.
+func TestTableRef_ModifyQueryIsRefused(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		hgSafe := tablerefCase{name: "hg_safe", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t", si: si,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database hg_safe is not addressable"}
+		if si {
+			// Residual round 3: the reserved qualifier in the opaque MODIFY
+			// QUERY text gets the SI physical-name message.
+			hgSafe.wantCode, hgSafe.wantMsg = pb.RewriteCode_UnsupportedStatement, "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+		}
+		cases = append(cases, hgSafe,
+			tablerefCase{name: "phys", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM phys.`db2.x`", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "parameter", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM {p:Identifier}", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "query parameters are not supported in a database or table position"},
+			tablerefCase{name: "dotted_unqualified", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT * FROM `db2.x`", si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+			tablerefCase{name: "own_table", sql: "ALTER TABLE db1.mv MODIFY QUERY SELECT a FROM db1.o", si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_MaterializedViewStorageAllowlists pins spec 2026-09-26 R4
+// (final review Critical 4): a materialized view's own ENGINE / SETTINGS go
+// through the same T5 allowlist and engine-argument protected-database walk as
+// a CREATE TABLE's, in both SI states.
+func TestTableRef_MaterializedViewStorageAllowlists(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(currentDatabase(),'^db2') AS SELECT * FROM db1.o", "table engine Merge is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Buffer(currentDatabase(), `db2.x`, 1, 10, 100, 10000, 1000000, 10000000, 100000000) AS SELECT * FROM db1.o", "table engine Buffer is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Distributed('c', currentDatabase(), `db2.x`) AS SELECT * FROM db1.o", "table engine Distributed is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Kafka('h:9092', 't', 'g', 'JSONEachRow') AS SELECT * FROM db1.o", "table engine Kafka is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS disk = disk(type=local, path='/') AS SELECT * FROM db1.o", "table setting disk is not accepted"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a SETTINGS storage_policy = 'p' AS SELECT * FROM db1.o", "table setting storage_policy is not accepted"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+		}
+		cases = append(cases,
+			tablerefCase{name: "merge_protected_literal", si: si,
+				sql:      "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge('phys', '^db2') AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "mergetree_allowed", si: si,
+				sql:      "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.mv" ENGINE=MergeTree ORDER BY a AS SELECT * FROM phys."db1.o" "db1.o"`},
+		)
+	}
+	regexp := tablerefCase{name: "merge_regexp_inactive", sql: "CREATE MATERIALIZED VIEW db1.mv ENGINE = Merge(REGEXP('hg_.*'),'.*') AS SELECT * FROM db1.o",
+		wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table engine Merge is not accepted"}
+	cases = append(cases, regexp)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_SQLBearingSettings pins spec 2026-09-26 R5 (final review
+// Critical 5, Minor SET subquery): a SQL-bearing setting is refused with the
+// table-setting message wherever it appears, and a setting value must be a
+// numeric literal, a string literal or a bare identifier / keyword.
+func TestTableRef_SQLBearingSettings(t *testing.T) {
+	const unsupported = "statement is not supported"
+	setting := func(name string) string { return "table setting " + name + " is not accepted" }
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"SELECT * FROM db1.o SETTINGS additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}", setting("additional_table_filters")},
+			{"SELECT * FROM db1.o SETTINGS additional_result_filter = 'a = (SELECT max(a) FROM `db2.x`)'", setting("additional_result_filter")},
+			{"SELECT * FROM db1.o SETTINGS parallel_replicas_custom_key = 'a'", setting("parallel_replicas_custom_key")},
+			{"SELECT * FROM db1.o SETTINGS max_threads = 1, additional_result_filter = 'a > 1'", setting("additional_result_filter")},
+			{"SELECT a FROM db1.o UNION ALL SELECT a FROM db1.p SETTINGS additional_result_filter = 'a > 1'", setting("additional_result_filter")},
+			{"INSERT INTO db1.o SELECT * FROM db1.p SETTINGS additional_table_filters = {'db1.p': 'a > 1'}", setting("additional_table_filters")},
+			{"INSERT INTO db1.o SETTINGS additional_result_filter = 'a > 1' VALUES (1)", setting("additional_result_filter")},
+			{"ALTER TABLE db1.o UPDATE b = 1 WHERE 1 SETTINGS additional_table_filters = '{}'", setting("additional_table_filters")},
+			{"SELECT * FROM db1.o SETTINGS max_threads = (SELECT 1)", unsupported},
+			{"SELECT * FROM db1.o SETTINGS max_threads = [1]", unsupported},
+		} {
+			msg := c.msg
+			if si && strings.HasPrefix(c.sql, "ALTER") {
+				// The SI mutation-surface probe cannot model a SETTINGS
+				// tail and refuses first (SI precedence).
+				msg = unsupported
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT * FROM db1.o SETTINGS max_threads = 1", `SELECT * FROM phys."db1.o" "db1.o" SETTINGS max_threads = 1`},
+			{"SELECT * FROM db1.o SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random",
+				`SELECT * FROM phys."db1.o" "db1.o" SETTINGS max_threads = 1, join_algorithm = 'hash', load_balancing = random`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	// The session SET carve-out exists only while the SI surface is inactive.
+	for _, c := range []struct{ sql, msg string }{
+		{"SET additional_table_filters = {'db1.o': 'a IN (SELECT a FROM phys.`db2.x`)'}", setting("additional_table_filters")},
+		{"SET max_threads = 1, additional_result_filter = 'a > 1'", setting("additional_result_filter")},
+		{"SET max_threads = (SELECT count() FROM phys.`db2.x`)", unsupported},
+		{"SET max_threads = [1]", unsupported},
+		{"SET max_threads = 1 + 1", unsupported},
+		{"SET max_threads = {p:UInt64}", unsupported},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+	}
+	for _, sql := range []string{
+		"SET max_threads = 1",
+		"SET max_threads = 1, max_block_size = 'a', load_balancing = random",
+		"SET max_threads = -1, enable_optimize_predicate_expression = true, x = NULL",
+	} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_Success, wantSQL: sql})
+		cases = append(cases, tablerefCase{name: "si/" + sql, sql: sql, si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_DescribeAndShowTargets pins spec 2026-09-26 R7 (final review
+// Critical 8, Minor empty EXISTS / SHOW CREATE): DESCRIBE (SELECT …) is
+// refused, an unqualified dotted quoted target of DESCRIBE / EXISTS / SHOW
+// CREATE / SHOW COLUMNS resolves exactly like FROM, and EXISTS / SHOW CREATE
+// with no target are refused.
+func TestTableRef_DescribeAndShowTargets(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"DESCRIBE (SELECT * FROM phys.`db2.x`)",
+			"DESCRIBE (SELECT * FROM hg_safe.db1__t)",
+			"DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
+			"DESC (SELECT a FROM db1.o)",
+			"EXISTS",
+			"SHOW CREATE",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"DESCRIBE TABLE `db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`"},
+			{"DESCRIBE `db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`"},
+			{"EXISTS TABLE `db2.x`", "EXISTS TABLE phys.`db1.db2.x`"},
+			{"SHOW CREATE TABLE `db2.x`", "SHOW CREATE TABLE phys.`db1.db2.x`"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{".db2.x"}})
+		}
+	}
+	// SHOW COLUMNS under an active SI surface is refused by the SI handler
+	// first (db1 owns an SI table), so its FROM-like resolution is pinned
+	// with the surface inactive.
+	cases = append(cases,
+		tablerefCase{name: "show_columns_dotted", sql: "SHOW COLUMNS FROM `db2.x`",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.db2.x`", wantAcc: []string{".db2.x"}},
+		tablerefCase{name: "show_columns_like", sql: "SHOW COLUMNS FROM o LIKE 'a%'",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` LIKE 'a%'", wantAcc: []string{".o"}},
+		tablerefCase{name: "show_columns_si", sql: "SHOW COLUMNS FROM `db2.x`", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "storage-integrity logical database db1 is not directly addressable"},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_CommandPrecedence pins spec 2026-09-26 R8 (final review
+// Important 1): for a command node the T2 scan of the whole text runs first,
+// then the unmodelled-class refusal, then the protected-database check. With
+// the SI surface active every unmodelled class answers with the SI catch-all.
+func TestTableRef_CommandPrecedence(t *testing.T) {
+	const paramMsg = "query parameters are not supported in a database or table position"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		unmodelled := "statement is not supported"
+		if si {
+			unmodelled = StorageIntegrityUnmodelledMessage
+		}
+		for _, sql := range []string{
+			"EXPLAIN SELECT * FROM {p:Identifier}",
+			"KILL QUERY WHERE query_id = {p:Identifier}",
+			"SYSTEM SYNC REPLICA {p:Identifier}",
+			"DETACH TABLE {p:Identifier}",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: paramMsg, wantSQL: sql})
+		}
+		for _, c := range []struct {
+			sql string
+			acc []string
+		}{
+			{"DETACH TABLE phys.x", []string{"phys.x"}},
+			{"OPTIMIZE TABLE phys.x", []string{"phys.x"}},
+			{"ATTACH TABLE db1.x", []string{"db1.x"}},
+			{"KILL QUERY WHERE query_id = 'x'", nil},
+			{"EXPLAIN SELECT * FROM db1.o", nil},
+			{"CHECK TABLE phys.x", nil},
+		} {
+			acc := c.acc
+			if acc == nil {
+				acc = []string{}
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unmodelled, wantSQL: c.sql, wantAcc: acc})
+		}
+		// A modelled command class still gets the protected-database check.
+		cases = append(cases, tablerefCase{name: "rename_protected", si: si,
+			sql:      "RENAME TABLE phys.x TO db1.z",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_BareIdentifierInOperand pins spec 2026-09-26 R9: a bare
+// identifier IN operand is rewritten as a table in the session's logical
+// database (fail-safe; see AGENTS.md for the deviation from ClickHouse's
+// column-first resolution).
+func TestTableRef_BareIdentifierInOperand(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "paren", sql: "SELECT * FROM db1.o WHERE a IN (b)", si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN (phys."db1.b")`, wantAcc: []string{".b", "db1.o"}},
+			tablerefCase{name: "bare", sql: "SELECT * FROM db1.o WHERE a IN b", si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.b"`, wantAcc: []string{".b", "db1.o"}},
+			tablerefCase{name: "tuple_is_a_value", sql: "SELECT * FROM db1.o WHERE a IN tuple(b)", si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN tuple(b)`, wantAcc: []string{"db1.o"}},
+		)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_LookupNonLiteralTarget pins spec 2026-09-26 R10 (final review
+// Important 5): a non-literal first argument reports target "" on every path,
+// the structured walk and the command-text / Raw-action scan alike.
+func TestTableRef_LookupNonLiteralTarget(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"SELECT dictGet(currentDatabase() || '.d', 'v', 1)", `dictGet target "" does not resolve`},
+			{"ALTER TABLE db1.o UPDATE b = dictGet(currentDatabase() || '.d', 'v', 1) WHERE 1", `dictGet target "" does not resolve`},
+			{"ALTER TABLE db1.o DELETE WHERE dictGet(concat('db1', '.d'), 'v', a) = 1", `dictGet target "" does not resolve`},
+			{"ALTER TABLE db1.o UPDATE b = joinGet(db1.j, 'v', 1) WHERE 1", `joinGet target "db1.j" does not resolve`},
+			{"ALTER TABLE db1.o UPDATE b = hasColumnInTable(currentDatabase(), 'j', 'v') WHERE 1", `hasColumnInTable target "" does not resolve`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: c.msg, wantSQL: c.sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_MinorRulings pins spec 2026-09-26 R12: engine names are
+// case-sensitive (a list name in the wrong case is not recognised), and the
+// statements the generator does not round-trip — a refreshable view and
+// INSERT … FROM INFILE — are refused in dynamic mode.
+func TestTableRef_MinorRulings(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = memory", "table engine memory is not recognised"},
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = mergetree ORDER BY a", "table engine mergetree is not recognised"},
+			{"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o", unsupported},
+			{"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR ENGINE = Memory AS SELECT * FROM db1.o", unsupported},
+			{"INSERT INTO db1.o FROM INFILE 'x.csv' FORMAT CSV", unsupported},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+		}
+		cases = append(cases, tablerefCase{name: "memory_allowed", si: si,
+			sql:      "CREATE TABLE db1.n (a UInt64) ENGINE = Memory",
+			wantCode: pb.RewriteCode_Success, wantSQL: `CREATE TABLE phys."db1.n" (a UInt64) ENGINE=Memory`})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_HousekeepingRows pins the parked-review rows the final review
+// asked for: nested-paren INSERT … SELECT / CTAS bodies, a statement with
+// several lookups, mixed ALTER MODIFY actions, the SI-active Merge engine, and
+// one accessed entry per table named by several hasColumnInTable calls.
+func TestTableRef_HousekeepingRows(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "insert_nested_paren_source", sql: "INSERT INTO db1.o SELECT * FROM ((SELECT * FROM db1.p))", si: si,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o", "db1.p"},
+				wantSQL: `INSERT INTO phys."db1.o" SELECT * FROM ((SELECT * FROM phys."db1.p" "db1.p"))`},
+			tablerefCase{name: "ctas_nested_paren_body", sql: "CREATE TABLE db1.n ENGINE = Memory AS ((SELECT * FROM db1.p))", si: si,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.n", "db1.p"},
+				wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS (((SELECT * FROM phys."db1.p" "db1.p")))`},
+			tablerefCase{name: "multi_lookup_first_wins", si: si,
+				sql:      "SELECT dictGet('db1.d', 'v', 1), joinGet('db1.j', 'v', 1)",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.d" does not resolve`},
+			tablerefCase{name: "multi_lookup_hascolumnintable_then_joinget", si: si,
+				sql:      "SELECT hasColumnInTable('db1', 'o', 'a'), joinGet('db1.j', 'v', 1)",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `joinGet target "db1.j" does not resolve`},
+			tablerefCase{name: "hascolumnintable_accessed_once", si: si,
+				sql:      "SELECT hasColumnInTable('db1', 'o', 'a'), hasColumnInTable('db1', 'o', 'b') FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT hasColumnInTable('phys', 'db1.o', 'a'), hasColumnInTable('phys', 'db1.o', 'b') FROM phys."db1.o" "db1.o"`,
+				wantAcc:  []string{"db1.o"}},
+			tablerefCase{name: "alter_modify_setting_disk_mixed", si: si,
+				sql:      "ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT 2, MODIFY SETTING disk = 'd'",
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting disk is not accepted"},
+			tablerefCase{name: "alter_modify_column_lookup", si: si,
+				sql:      "ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT dictGet('db1.d', 'v', a)",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `dictGet target "db1.d" does not resolve`},
+		)
+	}
+	cases = append(cases, tablerefCase{name: "merge_engine_si_active", si: true,
+		sql:      "CREATE TABLE db1.n (a UInt64) ENGINE = Merge('db1', '^o')",
+		wantCode: pb.RewriteCode_UnsupportedStatement})
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ResidualQuotedCallableIn pins residual 1 of the final
+// re-review: a quoted callable-IN name in opaque ALTER text is the same
+// function as its unquoted spelling, so the R2 scanner refuses it.
+func TestTableRef_ResidualQuotedCallableIn(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"ALTER TABLE db1.o DELETE WHERE `in`((a, 0), `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE \"notIn\"(a, `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE `globalNotIn`(a, `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE `nullIn`(a, (`db2.x`))",
+			"ALTER TABLE db1.o DELETE WHERE `IN`(a, db1.p)",
+			"ALTER TABLE db1.o UPDATE b = 1 WHERE `in`(a, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE `in`(a, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT `in`(a, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 MATERIALIZED \"notIn\"(a, `db2.x`)",
+			"ALTER TABLE db1.o ADD PROJECTION pr (SELECT a), MODIFY COLUMN b UInt64 DEFAULT `in`(a, `db2.x`)",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ResidualShowColumnsBody pins residual 2: the WHERE / LIKE
+// body of a SHOW COLUMNS / INDEX family statement is scanned; a subquery, a
+// call, a table-operand IN or a quoted dotted name refuses the statement,
+// after the parameter and protected-database checks.
+func TestTableRef_ResidualShowColumnsBody(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct {
+			sql  string
+			code pb.RewriteCode
+			msg  string
+		}{
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM phys.`db2.x`) = 2", pb.RewriteCode_InvalidRewriteRequest, "protected database phys is not addressable"},
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM `db2.x`) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM remote('127.0.0.1','phys','db2.x')) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE (SELECT count() FROM merge('phys','^db2')) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW INDEX FROM o WHERE (SELECT count() FROM `db2.x`) = 2", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW EXTENDED FULL COLUMNS FROM o WHERE name IN `db2.x`", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o LIKE (SELECT max(name) FROM `db2.x`)", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE name = `db2.x`", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW KEYS FROM o WHERE lower(name) = 'a'", pb.RewriteCode_UnsupportedStatement, unsupported},
+			{"SHOW COLUMNS FROM o WHERE name = {p:Identifier}", pb.RewriteCode_InvalidRewriteRequest, "query parameters are not supported"},
+		} {
+			code, msg := c.code, c.msg
+			if si && code == pb.RewriteCode_UnsupportedStatement {
+				// db1 owns an SI table: the SI handler refuses the target first.
+				msg = "storage-integrity logical database db1 is not directly addressable"
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: code, wantMsg: msg, wantSQL: c.sql})
+		}
+		hg := tablerefCase{name: "hg_safe_body", sql: "SHOW COLUMNS FROM o WHERE (SELECT count() FROM hg_safe.db1__t) = 2", si: si,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database hg_safe is not addressable"}
+		if si {
+			hg.wantCode, hg.wantMsg = pb.RewriteCode_UnsupportedStatement, ""
+		}
+		cases = append(cases, hg)
+	}
+	cases = append(cases, tablerefCase{name: "plain_like_body", sql: "SHOW COLUMNS FROM o WHERE name LIKE 'a%'",
+		wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` WHERE name LIKE 'a%'"})
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ResidualDialectSettings pins residual 3: a dialect switch
+// changes how ClickHouse parses later SQL, so every dialect setting is refused
+// in the SET carve-out and in query-level SETTINGS.
+func TestTableRef_ResidualDialectSettings(t *testing.T) {
+	names := []string{"dialect", "polyglot_dialect", "allow_experimental_polyglot_dialect",
+		"allow_experimental_prql_dialect", "allow_experimental_kusto_dialect", "Dialect"}
+	var cases []tablerefCase
+	for _, n := range names {
+		msg := "table setting " + n + " is not accepted"
+		set := "SET " + n + " = 1"
+		cases = append(cases, tablerefCase{name: set, sql: set, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: set},
+			tablerefCase{name: "si/" + set, sql: set, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+		for _, si := range []bool{false, true} {
+			q := "SELECT * FROM db1.o SETTINGS " + n + " = 1"
+			cases = append(cases, tablerefCase{name: q, sql: q, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: q})
+		}
+	}
+	quoted := "SET `polyglot_dialect` = 'sqlite'"
+	cases = append(cases, tablerefCase{name: quoted, sql: quoted, wantCode: pb.RewriteCode_UnsupportedStatement,
+		wantMsg: "table setting polyglot_dialect is not accepted"})
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ResidualMinors pins the residual-round minors: REFRESH is
+// matched only as the refresh clause, and under V2 an unmodelled command class
+// answers with the SI catch-all before its SETTINGS clause is examined.
+func TestTableRef_ResidualMinors(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "mv_named_refresh", si: si, sql: "CREATE MATERIALIZED VIEW db1.refresh TO db1.t2 AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.refresh" TO phys."db1.t2" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			tablerefCase{name: "mv_to_refresh", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv TO db1.refresh AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.refresh" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			tablerefCase{name: "mv_refresh_after", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv REFRESH AFTER 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		)
+	}
+	cases = append(cases, tablerefCase{name: "explain_settings_v2", si: true,
+		sql:      "EXPLAIN SELECT * FROM db1.o SETTINGS additional_result_filter = 'a > 1'",
+		wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual2ShowBodies pins residual round 2, open 1: every SHOW
+// family forwarded verbatim has its trailing clauses (WHERE / LIKE / ILIKE /
+// LIMIT / …) scanned, so a subquery or call there refuses the statement.
+func TestTableRef_Residual2ShowBodies(t *testing.T) {
+	const unsupported = "statement is not supported"
+	const siDB1 = "storage-integrity logical database db1 is not directly addressable"
+	sub := "(SELECT count() FROM `db2.x`)"
+	var cases []tablerefCase
+	for _, c := range []struct {
+		sql     string
+		siDBOne bool // with the SI surface active, db1 (an SI owner) is refused first
+	}{
+		{"SHOW COLUMNS FROM o LIMIT " + sub, true},
+		{"SHOW FIELDS FROM o LIMIT " + sub, true},
+		{"SHOW EXTENDED FULL COLUMNS IN o LIMIT " + sub, true},
+		{"SHOW COLUMNS FROM o LIMIT 1 + " + sub, true},
+		{"SHOW COLUMNS FROM o FROM db1 LIMIT " + sub, true},
+		{"SHOW COLUMNS FROM db3.o LIMIT " + sub, false},
+		{"SHOW COLUMNS FROM o LIMIT throwIf(1)", true},
+		{"SHOW DICTIONARIES WHERE " + sub + " = 2", true},
+		{"SHOW DICTIONARIES FROM default WHERE " + sub + " = 2", false},
+		{"SHOW DICTIONARIES LIMIT " + sub, true},
+		{"SHOW FULL DICTIONARIES LIMIT " + sub, true},
+		{"SHOW CLUSTERS LIMIT " + sub, false},
+		{"SHOW CLUSTERS LIKE 'x' LIMIT " + sub, false},
+		{"SHOW MERGES LIMIT " + sub, false},
+		{"SHOW MERGES LIKE 'x' LIMIT " + sub, false},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: c.sql})
+		msg := unsupported
+		if c.siDBOne {
+			msg = siDB1
+		}
+		cases = append(cases, tablerefCase{name: "si/" + c.sql, sql: c.sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
+	}
+	cases = append(cases,
+		tablerefCase{name: "columns_limit_5", sql: "SHOW COLUMNS FROM o LIMIT 5", wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` LIMIT 5"},
+		tablerefCase{name: "dictionaries_like", sql: "SHOW DICTIONARIES LIKE 'a%'", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "clusters_like_limit", sql: "SHOW CLUSTERS LIKE 'x' LIMIT 3", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "si/clusters_like_limit", sql: "SHOW CLUSTERS LIKE 'x' LIMIT 3", si: true, wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "keyword_if_call_allowed", sql: "SHOW COLUMNS FROM o WHERE if(1, 1, 0) = 1", wantCode: pb.RewriteCode_Success},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual2InsertHeaderSettings pins residual round 2, open 2:
+// the SETTINGS list polyglot leaves as opaque query text after an INSERT
+// column list is examined like any other, a token backstop refuses a
+// denylisted setting name after any SETTINGS keyword, and a read in that
+// opaque query text is refused.
+func TestTableRef_Residual2InsertHeaderSettings(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"INSERT INTO db1.o (a) SETTINGS additional_table_filters = {'system.one': '(SELECT throwIf(count() = 2) FROM `db2.x`) = 0'} SELECT dummy FROM system.one", "table setting additional_table_filters is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS additional_result_filter = 'a > 1' SELECT 1", "table setting additional_result_filter is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS additional_result_filter = 'a > 1' VALUES (1)", "table setting additional_result_filter is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS dialect = 'prql' SELECT 1", "table setting dialect is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS polyglot_dialect = 'sqlite' SELECT 1", "table setting polyglot_dialect is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS `POLYGLOT_DIALECT` = 'sqlite' SELECT 1", "table setting POLYGLOT_DIALECT is not accepted"},
+			{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT a FROM `db2.x`", "statement is not supported"},
+			{"INSERT INTO db1.o (a) SETTINGS max_threads = (SELECT 1) SELECT 1", "statement is not supported"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg, wantSQL: c.sql})
+		}
+		cases = append(cases,
+			tablerefCase{name: "protected_in_opaque_query", sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT a FROM phys.x", si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "plain_select", sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1", si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 SELECT 1`},
+			tablerefCase{name: "plain_values", sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1)", si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 VALUES (1)`},
+		)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual2RefreshPositions pins residual round 2, open 3:
+// REFRESH in a CREATE VIEW header is allowed only as the view's own name or
+// the TO target's name; anywhere else the statement is refused.
+func TestTableRef_Residual2RefreshPositions(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH TO db1.t2 AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH AFTER 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+			"CREATE MATERIALIZED VIEW db1.`refresh` REFRESH EVERY 1 HOUR TO db1.p AS SELECT * FROM db1.o",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"CREATE MATERIALIZED VIEW db1.refresh TO db1.t2 AS SELECT * FROM db1.o", `CREATE MATERIALIZED VIEW phys."db1.refresh" TO phys."db1.t2" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			{"CREATE MATERIALIZED VIEW db1.mv TO db1.refresh AS SELECT * FROM db1.o", `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.refresh" AS SELECT * FROM phys."db1.o" "db1.o"`},
+			{"CREATE VIEW db1.refresh AS SELECT 1", `CREATE VIEW phys."db1.refresh" AS SELECT 1`},
+			{"CREATE VIEW db1.v AS SELECT refresh FROM db1.o", `CREATE VIEW phys."db1.v" AS SELECT refresh FROM phys."db1.o" "db1.o"`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual3KeywordCallableIn pins residual round 3, open A: a
+// keyword-tokenized callable `in(` / `IN(` is the callable IN form; its SECOND
+// argument is the table operand.
+func TestTableRef_Residual3KeywordCallableIn(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(42, `db2.x`)",
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT IN(42, `db2.x`)",
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (in(42, `db2.x`))",
+			"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (in(42, `db2.x`))",
+			"ALTER TABLE db1.o UPDATE a = in(42, `db2.x`) WHERE 1",
+			"ALTER TABLE db1.o DELETE WHERE in(42, `db2.x`)",
+			"ALTER TABLE db1.o DELETE WHERE In /* c */ (42, ((`db2.x`)))",
+			"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE in(42, `db2.x`)",
+			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT in(42, `db2.x`)",
+			"SHOW DICTIONARIES FROM default WHERE in(7, `db2.x`)",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		cases = append(cases, tablerefCase{name: "literal_list_passes", si: si,
+			sql:      "ALTER TABLE db1.o DELETE WHERE in(42, (1, 2))",
+			wantCode: pb.RewriteCode_Success})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual3OpaqueReservedQualifiers pins residual round 3, open
+// B: a reserved hg_* qualifier found by an opaque-text scan is refused with the
+// SI physical-name message when the SI surface is active, and with the
+// protected-database message when it is not.
+func TestTableRef_Residual3OpaqueReservedQualifiers(t *testing.T) {
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, db, table string }{
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(7, hg_safe.db1__t) + 100", "hg_safe", "db1__t"},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(7, hg_unsafe.db1__t) + 100", "hg_unsafe", "db1__t"},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT in(7, hg_promote.x)", "hg_promote", "x"},
+		{"SHOW DICTIONARIES FROM default WHERE in(7, hg_safe.db1__t)", "hg_safe", "db1__t"},
+		{"SHOW FULL DICTIONARIES FROM default WHERE in(7, hg_unsafe.db1__t)", "hg_unsafe", "db1__t"},
+		{"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT in(7, hg_promote.x)", "hg_promote", "x"},
+	} {
+		cases = append(cases,
+			tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_InvalidRewriteRequest,
+				wantMsg: "protected database " + c.db + " is not addressable", wantSQL: c.sql},
+			tablerefCase{name: "si/" + c.sql, sql: c.sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement,
+				wantMsg: "storage-integrity physical table " + c.db + "." + c.table + " is not directly addressable", wantSQL: c.sql})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_Residual3SettingsBackstopNeedsAssignment pins the residual
+// round 3 minor: the backstop needs `name =` after SETTINGS, so column aliases
+// named settings / dialect pass.
+func TestTableRef_Residual3SettingsBackstopNeedsAssignment(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases, tablerefCase{name: "aliases", si: si, sql: "SELECT 1 AS settings, 2 AS dialect",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SELECT 1 AS settings, 2 AS dialect"})
+	}
+	runTablerefCases(t, cases)
+}
+
+// residual4DefectSQL is every ClickHouse-26.8-confirmed cross-tenant read that
+// residual round 4 closes: a keyword-lexed left operand (or the END of a CASE)
+// before IN, and the callable in( after a NOT / GLOBAL prefix.
+var residual4DefectSQL = []string{
+	"ALTER TABLE db1.o UPDATE a = 1 WHERE date IN (`db2.x`)",
+	"ALTER TABLE db1.o UPDATE a = 1, b = 2 WHERE key IN (`db2.x`)",
+	"ALTER TABLE db1.o UPDATE a = date IN (`db2.x`) WHERE 1",
+	"ALTER TABLE db1.o DELETE WHERE date IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE key IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE timestamp IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE CASE WHEN a THEN 1 END IN (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE 1, UPDATE a = 1 WHERE key IN (`db2.x`)",
+	"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE date IN (`db2.x`)",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT date IN (`db2.x`)",
+	"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE date IN (`db2.x`))",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT CASE WHEN 1 THEN 42 END IN (`db2.x`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (CASE WHEN 1 THEN 42 END IN (`db2.x`))",
+	"ALTER TABLE db1.o DELETE WHERE not in(42, `db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE NOT in(42, `db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE (NOT in(42, `db2.x`))",
+	"ALTER TABLE db1.o DELETE WHERE GLOBAL in(42, `db2.x`)",
+	"ALTER TABLE db1.o UPDATE a = 1 WHERE not in(1, `db2.x`)",
+	"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE not in(1, `db2.x`)",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 MATERIALIZED not in(1, `db2.x`)",
+	"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE not in(1, `db2.x`))",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT not in(1, `db2.x`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (not in(1, `db2.x`))",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (not in(1, `db2.x`))",
+}
+
+// TestTableRef_Residual4OperandRegion pins residual round 4: every IN-family
+// occurrence in opaque text is refused unless its operand region (the bracket
+// group after it, or the single next token) is literal-only, whatever token
+// precedes it. The accepted cost (a column inside the region) is refused; a
+// literal region passes.
+func TestTableRef_Residual4OperandRegion(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range residual4DefectSQL {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, sql := range []string{
+			"ALTER TABLE db1.o DELETE WHERE in(a, (1, 2))",
+			"ALTER TABLE db1.o DELETE WHERE a IN (1, b)",
+			"ALTER TABLE db1.o DELETE WHERE a IN (b, 1)",
+		} {
+			cases = append(cases, tablerefCase{name: "cost/" + sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, c := range []struct{ sql, want string }{
+			{"ALTER TABLE db1.o DELETE WHERE a IN (1, 2)", `ALTER TABLE phys."db1.o" DELETE WHERE a IN(1, 2)`},
+			{"ALTER TABLE db1.o DELETE WHERE in(42, [1, 2])", ""},
+			{"ALTER TABLE db1.o DELETE WHERE a NOT IN ('x', 'y')", ""},
+			{"ALTER TABLE db1.o DELETE WHERE date IN (1, 2)", ""},
+			{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT not in(1, (1, 2))", ""},
+		} {
+			cases = append(cases, tablerefCase{name: "literal/" + c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{"db1.o"}})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// residual5SignSQL is every ClickHouse-confirmed read through a unary sign
+// before an IN operand (ClickHouse drops a unary plus): residual round 5,
+// open 1.
+var residual5SignSQL = []string{
+	"ALTER TABLE db1.o DELETE WHERE a IN +`db2.x`",
+	"ALTER TABLE db1.o DELETE WHERE a IN + (`db2.x`)",
+	"ALTER TABLE db1.o DELETE WHERE a IN + + `db2.x`",
+	"ALTER TABLE db1.o DELETE WHERE a NOT IN +`db2.x`",
+	"ALTER TABLE db1.o DELETE WHERE a IN -`db2.x`",
+	"ALTER TABLE db1.o UPDATE b = 1 WHERE key IN +`db2.x`",
+	"ALTER TABLE db1.o UPDATE b = a IN +`db2.x` WHERE 1",
+	"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN + \"db2.y\"",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT a IN +`db2.x`",
+	"ALTER TABLE db1.o MODIFY COLUMN b UInt8 MATERIALIZED a IN +`db2.x`",
+	"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a IN +`db2.x`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 3 IN +`db2.y`",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (3 IN +`db2.y`)",
+	"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (3 IN +`db2.y`)",
+	"ALTER TABLE db1.o DELETE WHERE a IN [1, 2], UPDATE b = 1 WHERE key IN (`db2.x`)",
+}
+
+// TestTableRef_Residual5SignsAndSplitBrackets pins residual round 5: a sign
+// is never an IN operand region by itself (open 1), and a Raw ALTER action
+// polyglot split at a comma inside a bracket group is scanned whole again
+// (open 2) while every action keeps its own refusal.
+func TestTableRef_Residual5SignsAndSplitBrackets(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range residual5SignSQL {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		cases = append(cases,
+			tablerefCase{name: "phys/" + "+phys", si: si, sql: "ALTER TABLE db1.o DELETE WHERE a IN +phys.`db2.x`",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable"},
+			tablerefCase{name: "param/+{p:Identifier}", si: si, sql: "ALTER TABLE db1.o DELETE WHERE a IN +{p:Identifier}",
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "query parameters are not supported"})
+		literals := []string{"ALTER TABLE db1.o DELETE WHERE a IN -1", "ALTER TABLE db1.o DELETE WHERE a IN (-1, -2)"}
+		if !si {
+			// With the SI surface active a unary plus is refused anywhere in a
+			// Raw DELETE (`a = +1` too) — pre-existing, not this rule.
+			literals = append(literals, "ALTER TABLE db1.o DELETE WHERE a IN +1", "ALTER TABLE db1.o DELETE WHERE a IN (+1, -2)")
+		}
+		for _, sql := range literals {
+			cases = append(cases, tablerefCase{name: "literal/" + sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}})
+		}
+		for _, list := range []string{"[1, 2]", "[1, 2, 3]"} {
+			for _, sql := range []string{
+				"ALTER TABLE db1.o DELETE WHERE a IN " + list,
+				"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN " + list,
+				"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT a IN " + list,
+				"ALTER TABLE db1.o MODIFY COLUMN b UInt8 MATERIALIZED a IN " + list,
+				"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN " + list,
+				"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a IN " + list + ")",
+			} {
+				cases = append(cases, tablerefCase{name: "bracket/" + sql, sql: sql, si: si,
+					wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}})
+			}
+		}
+	}
+	runTablerefCases(t, cases)
+}
