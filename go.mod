@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/ebitengine/purego v0.10.0
-	github.com/housegate/rewriter-proto v0.2.1-0.20260924113646-192e43a96bf5
+	github.com/housegate/rewriter-proto v0.3.1-0.20260926155709-df3c3b3620ff
 	github.com/tobilg/polyglot/packages/go v0.12.1
 	golang.org/x/sys v0.42.0
 	google.golang.org/grpc v1.81.1
@@ -20,5 +20,3 @@ require (
 // polyglot is vendored as a git submodule so the Go bindings and the Rust FFI
 // lib are built from the same pinned commit (see .gitmodules).
 replace github.com/tobilg/polyglot/packages/go => ./third_party/polyglot-src/packages/go
-
-replace github.com/housegate/rewriter-proto => ../rewriter-proto.feat-protected-databases
