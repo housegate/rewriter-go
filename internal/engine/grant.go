@@ -26,10 +26,63 @@ type GrantParse struct {
 	Structured  bool // generic-dialect parse succeeded → the fields below are populated
 
 	Privileges  []GrantPrivilege
-	Securable   string   // "db.t" / "db.*" / "*.*" / "t" (flat, from the generic node)
-	Principals  []string // grantee names in source order ("u", "CURRENT_USER", "ALL")
-	GrantOption bool     // WITH GRANT OPTION (GRANT) / GRANT OPTION FOR (REVOKE)
-	Marker      string   // canonical CH SQL (ON CLUSTER stripped) for the marker SELECT
+	Securable   GrantSecurable // the ON target, decoded from tokens by identity
+	Principals  []string       // grantee names in source order ("u", "CURRENT_USER", "ALL")
+	GrantOption bool           // WITH GRANT OPTION (GRANT) / GRANT OPTION FOR (REVOKE)
+	Marker      string         // canonical CH SQL (ON CLUSTER stripped) for the marker SELECT
+}
+
+// GrantSecurable is a GRANT / REVOKE ON target decoded by identity, from the
+// raw tokens: DB and Table are the decoded identifier texts, never a flat
+// "db.table" string re-split later — `db1.t` is the table named "db1.t" in
+// the current database, not table t of db1. AllTables / AnyDatabase record an
+// unquoted '*' in the table / database position (ON db.*, ON *, ON *.*).
+// Unrepresentable is set when a quoted identifier contains '*': a privilege
+// delta has no way to tell that name from a wildcard, so the handler refuses
+// it rather than widen it into a database-scope grant.
+type GrantSecurable struct {
+	DB, Table       string
+	AllTables       bool
+	AnyDatabase     bool
+	Unrepresentable bool
+}
+
+// Flat renders the securable the way polyglot's generic node spells it
+// ("db.t" / "db.*" / "*.*" / "t" / "*"), unquoted. It is a consistency check
+// against that node only, never an identity.
+func (s GrantSecurable) Flat() string {
+	table := s.Table
+	if s.AllTables {
+		table = "*"
+	}
+	db := s.DB
+	if s.AnyDatabase {
+		db = "*"
+	}
+	if db == "" {
+		return table
+	}
+	return db + "." + table
+}
+
+// Quoted renders the securable as ClickHouse SQL, backtick-quoting any
+// identifier that is not a plain name so the marker names the same object
+// the statement did.
+func (s GrantSecurable) Quoted() string {
+	part := func(name string, star bool) string {
+		if star {
+			return "*"
+		}
+		if needsQuoting(name) {
+			return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+		}
+		return name
+	}
+	table := part(s.Table, s.AllTables)
+	if s.DB == "" && !s.AnyDatabase {
+		return table
+	}
+	return part(s.DB, s.AnyDatabase) + "." + table
 }
 
 // ParseGrant recovers GRANT/REVOKE structure. The clickhouse dialect renders
@@ -83,7 +136,18 @@ func ParseGrant(e Engine, sql string) (GrantParse, error) {
 	if perr != nil {
 		return gp, nil // exotic but valid GRANT; handler rejects as Unsupported (Structured=false)
 	}
-	if derr := decodeGrantNode(node, &gp); derr != nil {
+	flat, derr := decodeGrantNode(node, &gp)
+	if derr != nil {
+		return gp, nil
+	}
+	if flat != gp.Securable.Flat() {
+		// The generic node names another target than the tokens do (an exotic
+		// securable such as a wildcard prefix): leave it unstructured so the
+		// handler refuses it rather than grant on either reading.
+		return gp, nil
+	}
+	node, err = setGrantSecurableName(node, gp.Securable.Quoted())
+	if err != nil {
 		return gp, nil
 	}
 	marker, gerr := e.Generate(node)
@@ -98,30 +162,46 @@ func ParseGrant(e Engine, sql string) (GrantParse, error) {
 // tokenSecurable recovers the ON target before generic parsing. This keeps the
 // target available even for forms that the generic dialect cannot structure
 // (notably WITH REPLACE OPTION), allowing policy handlers to classify a
-// protocol-owned target before returning a generic rejection.
-func tokenSecurable(toks []rawToken) string {
+// protocol-owned target before returning a generic rejection. The target is
+// decoded by identity: each identifier token is one name, and only an
+// unquoted '*' is a wildcard.
+func tokenSecurable(toks []rawToken) GrantSecurable {
+	type part struct {
+		name string
+		star bool // unquoted '*'
+		ok   bool
+	}
+	read := func(tok rawToken) part {
+		if tok.TokenType != "QUOTED_IDENTIFIER" && tok.Text == "*" {
+			return part{star: true, ok: true}
+		}
+		if !isNameTok(tok.TokenType) {
+			return part{}
+		}
+		return part{name: tok.Text, ok: true}
+	}
 	for i := 0; i < len(toks); i++ {
 		if toks[i].TokenType != "ON" || i+1 >= len(toks) || toks[i+1].TokenType == "CLUSTER" {
 			continue
 		}
 		j := i + 1
-		if toks[j].Text == "*" {
-			if j+2 < len(toks) && toks[j+1].TokenType == "DOT" && toks[j+2].Text == "*" {
-				return "*.*"
+		first := read(toks[j])
+		if !first.ok {
+			return GrantSecurable{}
+		}
+		var sec GrantSecurable
+		if j+2 < len(toks) && toks[j+1].TokenType == "DOT" {
+			if second := read(toks[j+2]); second.ok {
+				sec = GrantSecurable{DB: first.name, AnyDatabase: first.star, Table: second.name, AllTables: second.star}
 			}
-			return "*"
 		}
-		if !isNameTok(toks[j].TokenType) {
-			return ""
+		if sec == (GrantSecurable{}) {
+			sec = GrantSecurable{Table: first.name, AllTables: first.star}
 		}
-		out := toks[j].Text
-		if j+2 < len(toks) && toks[j+1].TokenType == "DOT" &&
-			(isNameTok(toks[j+2].TokenType) || toks[j+2].Text == "*") {
-			out += "." + toks[j+2].Text
-		}
-		return out
+		sec.Unrepresentable = strings.Contains(sec.DB, "*") || strings.Contains(sec.Table, "*")
+		return sec
 	}
-	return ""
+	return GrantSecurable{}
 }
 
 // tokensHaveSecurableOn reports whether an ON token introduces a securable (i.e.
@@ -162,16 +242,18 @@ func stripOnCluster(sql string, toks []rawToken) string {
 	return sql
 }
 
-// decodeGrantNode reads the generic-dialect grant/revoke node into gp.
-func decodeGrantNode(node AST, gp *GrantParse) error {
+// decodeGrantNode reads the generic-dialect grant/revoke node into gp and
+// returns the node's flat securable name ("db.t"), which the caller only
+// compares with the token-decoded identity.
+func decodeGrantNode(node AST, gp *GrantParse) (string, error) {
 	var env map[string]json.RawMessage
 	if err := json.Unmarshal(node, &env); err != nil {
-		return err
+		return "", err
 	}
 	body, ok := env["grant"]
 	if !ok {
 		if body, ok = env["revoke"]; !ok {
-			return fmt.Errorf("engine: not a grant/revoke node")
+			return "", fmt.Errorf("engine: not a grant/revoke node")
 		}
 	}
 	var raw struct {
@@ -190,15 +272,42 @@ func decodeGrantNode(node AST, gp *GrantParse) error {
 		GrantOption bool `json:"grant_option"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return err
+		return "", err
 	}
 	for _, p := range raw.Privileges {
 		gp.Privileges = append(gp.Privileges, GrantPrivilege{Name: p.Name, Columns: p.Columns})
 	}
-	gp.Securable = raw.Securable.Name
 	for _, pr := range raw.Principals {
 		gp.Principals = append(gp.Principals, pr.Name.Name)
 	}
 	gp.GrantOption = raw.GrantOption
-	return nil
+	return raw.Securable.Name, nil
+}
+
+// setGrantSecurableName replaces the generic grant/revoke node's flat
+// securable name with name (the quoted rendering), so the regenerated marker
+// names the object the statement did: polyglot's flat name renders `db1.t`
+// as db1.t.
+func setGrantSecurableName(node AST, name string) (AST, error) {
+	var env map[string]any
+	if err := json.Unmarshal(node, &env); err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"grant", "revoke"} {
+		body, ok := env[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		sec, ok := body["securable"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("engine: grant node has no securable")
+		}
+		sec["name"] = name
+		out, err := json.Marshal(env)
+		if err != nil {
+			return nil, err
+		}
+		return AST(out), nil
+	}
+	return nil, fmt.Errorf("engine: not a grant/revoke node")
 }

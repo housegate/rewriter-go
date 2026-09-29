@@ -2439,3 +2439,165 @@ func TestTableRef_QuotedReservedTwinIsRefused(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_QuotedTwinKeepsStorageIntegrityChecks pins the security
+// consequence of the quoted-twin fix: with the storage-integrity surface
+// active, an Active table that carries FINAL / SAMPLE / PREWHERE or addresses
+// the reserved row-id column is refused even when its quoted twin `db1.t` (an
+// ordinary table in db1) sits in the same statement, whichever comes first.
+// Before the fix the twin hid the Active table and these answered Success.
+func TestTableRef_QuotedTwinKeepsStorageIntegrityChecks(t *testing.T) {
+	const modifiers = "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported"
+	const reserved = "reserved column _hg_row_id is not addressable"
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, msg string }{
+		{"SELECT a IN `db1.t` FROM db1.t FINAL", modifiers},
+		{"SELECT a FROM db1.t FINAL WHERE a IN `db1.t`", modifiers},
+		{"SELECT a FROM `db1.t` WHERE a IN (SELECT a FROM db1.t FINAL)", modifiers},
+		{"SELECT a FROM db1.t FINAL JOIN `db1.t` AS w USING (a)", modifiers},
+		{"SELECT a IN `db1.t` FROM db1.t SAMPLE 0.5", modifiers},
+		{"SELECT a FROM db1.t SAMPLE 0.5 WHERE a IN `db1.t`", modifiers},
+		{"SELECT a FROM `db1.t` WHERE a IN (SELECT a FROM db1.t SAMPLE 0.5)", modifiers},
+		{"SELECT a IN `db1.t` FROM db1.t PREWHERE a > 1", modifiers},
+		{"SELECT a FROM db1.t PREWHERE a > 1 WHERE a IN `db1.t`", modifiers},
+		{"SELECT a FROM `db1.t` WHERE a IN (SELECT a FROM db1.t PREWHERE a > 1)", modifiers},
+		{"SELECT _hg_row_id, a IN `db1.t` FROM db1.t", reserved},
+		{"SELECT _hg_row_id FROM db1.t WHERE a IN `db1.t`", reserved},
+		{"SELECT a FROM `db1.t` WHERE a IN (SELECT _hg_row_id FROM db1.t)", reserved},
+		{"SELECT a FROM db1.t WHERE a IN (SELECT _hg_row_id FROM db1.t) AND a IN `db1.t`", reserved},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: true,
+			wantCode: pb.RewriteCode_RewriteError, wantMsg: c.msg, wantSQL: c.sql,
+			wantAcc: []string{".db1.t", "db1.t"}})
+	}
+	runTablerefCases(t, cases)
+}
+
+// grantDelta is one expected PrivilegeDelta of the GRANT identity tests.
+type grantDelta struct {
+	action, scope, priv, origDB, origTable, logical, phys, physTable string
+}
+
+// TestTableRef_GrantTargetIsKeyedByIdentity pins that a GRANT / REVOKE ON
+// target is decoded structurally, never flattened to "db.table" and re-split:
+// `db1.t` is the table named "db1.t" in the session database (ClickHouse
+// 26.2's SHOW GRANTS reports db1.`db1.t` for it), and `db2.x` is a table in
+// db1, not table x of db2. A target a privilege delta cannot represent (a
+// quoted name containing '*', which a wildcard reading would widen) is
+// refused.
+func TestTableRef_GrantTargetIsKeyedByIdentity(t *testing.T) {
+	e := newEngine(t)
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct {
+			sql, marker string
+			want        []grantDelta
+		}{
+			{"GRANT SELECT ON `db1.t` TO u", "SELECT 'GRANT SELECT ON `db1.t` TO u' AS gstmt",
+				[]grantDelta{{"ACTION_GRANT", "SCOPE_TABLE", "SELECT", "", "db1.t", "db1", "phys", "db1.db1.t"}}},
+			{"REVOKE SELECT ON `db1.t` FROM u", "SELECT 'REVOKE SELECT ON `db1.t` FROM u' AS rstmt",
+				[]grantDelta{{"ACTION_REVOKE", "SCOPE_TABLE", "SELECT", "", "db1.t", "db1", "phys", "db1.db1.t"}}},
+			{"GRANT SELECT ON `db2.x` TO u", "SELECT 'GRANT SELECT ON `db2.x` TO u' AS gstmt",
+				[]grantDelta{{"ACTION_GRANT", "SCOPE_TABLE", "SELECT", "", "db2.x", "db1", "phys", "db1.db2.x"}}},
+			{"REVOKE INSERT ON `db2.x` FROM u", "SELECT 'REVOKE INSERT ON `db2.x` FROM u' AS rstmt",
+				[]grantDelta{{"ACTION_REVOKE", "SCOPE_TABLE", "INSERT", "", "db2.x", "db1", "phys", "db1.db2.x"}}},
+			{"GRANT SELECT, INSERT ON `db1.t` TO u", "SELECT 'GRANT SELECT, INSERT ON `db1.t` TO u' AS gstmt",
+				[]grantDelta{
+					{"ACTION_GRANT", "SCOPE_TABLE", "SELECT", "", "db1.t", "db1", "phys", "db1.db1.t"},
+					{"ACTION_GRANT", "SCOPE_TABLE", "INSERT", "", "db1.t", "db1", "phys", "db1.db1.t"},
+				}},
+			{"GRANT SELECT ON db1.`t.x` TO u", "SELECT 'GRANT SELECT ON db1.`t.x` TO u' AS gstmt",
+				[]grantDelta{{"ACTION_GRANT", "SCOPE_TABLE", "SELECT", "db1", "t.x", "db1", "phys", "db1.t.x"}}},
+			{"GRANT SELECT ON `db1`.`o` TO u", "SELECT 'GRANT SELECT ON db1.o TO u' AS gstmt",
+				[]grantDelta{{"ACTION_GRANT", "SCOPE_TABLE", "SELECT", "db1", "o", "db1", "phys", "db1.o"}}},
+			{"GRANT SELECT ON `hg_safe.db1__t` TO u", "SELECT 'GRANT SELECT ON `hg_safe.db1__t` TO u' AS gstmt",
+				[]grantDelta{{"ACTION_GRANT", "SCOPE_TABLE", "SELECT", "", "hg_safe.db1__t", "db1", "phys", "db1.hg_safe.db1__t"}}},
+		} {
+			t.Run(fmt.Sprintf("si=%v/%s", si, c.sql), func(t *testing.T) {
+				resp, err := doRewrite(e, c.sql, tablerefOpts(si))
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if resp.GetCode() != pb.RewriteCode_Success {
+					t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+				}
+				if resp.GetSqlAfterRewrite() != c.marker {
+					t.Fatalf("sql = %q, want %q", resp.GetSqlAfterRewrite(), c.marker)
+				}
+				var got []grantDelta
+				for _, d := range resp.GetPrivilegesDeltas() {
+					got = append(got, grantDelta{d.GetAction().String(), d.GetScope().String(), strings.Join(d.GetPrivileges(), ","),
+						d.GetOriginalDatabase(), d.GetOriginalTable(), d.GetLogicalDatabase(), d.GetPhysicalDatabase(), d.GetPhysicalTable()})
+				}
+				if !reflect.DeepEqual(got, c.want) {
+					t.Fatalf("deltas = %+v, want %+v", got, c.want)
+				}
+			})
+		}
+	}
+
+	const unrepresentable = "target names a database or table whose name contains '*', which a privilege delta cannot represent"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct {
+			sql  string
+			code pb.RewriteCode
+			msg  string
+		}{
+			{"GRANT SELECT ON db1.`*` TO u", pb.RewriteCode_UnsupportedStatement, "GRANT " + unrepresentable},
+			{"GRANT SELECT ON `db1.*` TO u", pb.RewriteCode_UnsupportedStatement, "GRANT " + unrepresentable},
+			{"REVOKE SELECT ON `db1.*` FROM u", pb.RewriteCode_UnsupportedStatement, "REVOKE " + unrepresentable},
+			{"GRANT SELECT ON `*`.`*` TO u", pb.RewriteCode_UnsupportedStatement, "GRANT " + unrepresentable},
+			{"GRANT SELECT ON `*`.t TO u", pb.RewriteCode_UnsupportedStatement, "GRANT " + unrepresentable},
+			{"GRANT SELECT ON `db1.x`.t TO u", pb.RewriteCode_InvalidRewriteRequest,
+				"GRANT target references logical database 'db1.x' which is not in database_map"},
+			{"GRANT SELECT ON `db1.o`, INSERT ON db1.p TO u", pb.RewriteCode_UnsupportedStatement, "GRANT form is not supported"},
+			{"GRANT SELECT ON db1.p, INSERT ON `db2.x` TO u", pb.RewriteCode_UnsupportedStatement, "GRANT form is not supported"},
+			{"REVOKE SELECT ON db1.o, INSERT ON `db1.p` FROM u", pb.RewriteCode_UnsupportedStatement, "REVOKE form is not supported"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: c.code, wantMsg: c.msg, wantSQL: c.sql})
+		}
+	}
+	// The qualified Active table and reserved names keep their refusals.
+	cases = append(cases,
+		tablerefCase{name: "active_qualified", sql: "GRANT SELECT ON db1.t TO u", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg:  "storage-integrity table db1.t accepts writes only through the signed statement lane"},
+		tablerefCase{name: "reserved_qualified", sql: "GRANT SELECT ON hg_safe.db1__t TO u", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg:  "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
+		tablerefCase{name: "reserved_qualified", sql: "GRANT SELECT ON hg_safe.db1__t TO u",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest,
+			wantMsg:  "GRANT target references logical database 'hg_safe' which is not in database_map"},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_HasColumnInTableArgumentsAreNotResplit pins that
+// hasColumnInTable's database and table literals are resolved as the two
+// separate names ClickHouse reads, never joined with "." and re-split: a
+// database or table literal that contains a '.' or is empty cannot be
+// resolved faithfully and is refused. hasColumnInTable('db1.t', 'x', 'a')
+// used to answer Success as hasColumnInTable('phys', 'db1.t.x', 'a'),
+// reported as db1 / t.x, while ClickHouse reads database "db1.t", table "x".
+func TestTableRef_HasColumnInTableArgumentsAreNotResplit(t *testing.T) {
+	const unresolved = `" does not resolve through the caller's databases`
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, target string }{
+			{"SELECT hasColumnInTable('db1.t', 'x', 'a')", "db1.t.x"},
+			{"SELECT hasColumnInTable('db1', 't.x', 'a')", "db1.t.x"},
+			{"SELECT hasColumnInTable('db1', 'db1.o', 'a')", "db1.db1.o"},
+			{"SELECT hasColumnInTable('', 'db1.o', 'a')", ".db1.o"},
+			{"SELECT hasColumnInTable('', 'o', 'a')", ".o"},
+			{"SELECT hasColumnInTable('localhost:9000', 'db1.t', 'x', 'a')", "db1.t.x"},
+			{"SELECT a FROM db1.o WHERE hasColumnInTable('db1.o', 'y', 'a')", "db1.o.y"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest,
+				wantMsg:  `hasColumnInTable target "` + c.target + unresolved, wantSQL: c.sql})
+		}
+		cases = append(cases, tablerefCase{name: "plain_pair", sql: "SELECT hasColumnInTable('db1', 'o', 'a')", si: si,
+			wantCode: pb.RewriteCode_Success, wantSQL: "SELECT hasColumnInTable('phys', 'db1.o', 'a')", wantAcc: []string{"db1.o"}})
+	}
+	runTablerefCases(t, cases)
+}

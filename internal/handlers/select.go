@@ -335,26 +335,17 @@ func recordRewrite(rewrites map[string]string, tt engine.TableTarget, newDB, new
 	}
 }
 
-// tableIdentity is a table reference's resolved (database, table) identity.
-// Deduplication must key on it, never on the written "db.table" string: the
-// quoted single identifier `db1.t` (a table named "db1.t" in the session's
-// database) and the qualified db1.t both write "db1.t", yet they are two
-// tables, and keying on the string dropped one of them from the report.
-type tableIdentity struct{ db, table string }
-
-func identityOf(tt engine.TableTarget) tableIdentity {
-	return tableIdentity{db: tt.DB, table: tt.Table}
-}
-
-// buildAccessed produces AccessedTable entries deduped by (database, table)
-// identity and sorted by the written name (the C++ std::map order); two
-// distinct tables that share a written name are ordered by database, then
-// table, so the unqualified twin precedes the qualified name.
+// buildAccessed produces AccessedTable entries deduped by
+// engine.TableTarget.Identity() — never by the written "db.table" string,
+// which the quoted twin `db1.t` shares with the qualified db1.t — and sorted
+// by the written name, which keeps the order the corpus pins. Two distinct
+// tables that share a written name are ordered by database, then table, so
+// the unqualified twin precedes the qualified name.
 func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*pb.AccessedTable {
-	seen := map[tableIdentity]bool{}
+	seen := map[engine.TableTarget]bool{}
 	unique := make([]engine.TableTarget, 0, len(targets))
 	for _, tt := range targets {
-		id := identityOf(tt)
+		id := tt.Identity()
 		if seen[id] {
 			continue
 		}

@@ -1511,6 +1511,34 @@ func TestSpliceRawTables_quotedSourceKeyMatches(t *testing.T) {
 	}
 }
 
+func TestSpliceRawTables_quotedTwinIsItsOwnKey(t *testing.T) {
+	// `db.a` is one table named "db.a" (DB "", Table "db.a"); db.a is table a
+	// of db. Both write "db.a", so the map must be keyed by identity for each
+	// side to keep its own physical name.
+	e := newTestEngine(t)
+	orig := "EXCHANGE TABLES `db.a` AND db.a"
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{
+		{Table: "db.a"}:        QuoteQualified("phys", "db.db.a"),
+		{DB: "db", Table: "a"}: QuoteQualified("phys", "db.a"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "EXCHANGE TABLES phys.`db.db.a` AND phys.`db.a`" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestTableTargetIdentityDropsAlias(t *testing.T) {
+	got := TableTarget{DB: "db", Table: "a", Alias: "x"}.Identity()
+	if got != (TableTarget{DB: "db", Table: "a"}) {
+		t.Errorf("Identity() = %+v", got)
+	}
+	if (TableTarget{Table: "db.a"}).Identity() == (TableTarget{DB: "db", Table: "a"}).Identity() {
+		t.Error("the quoted twin and the qualified name share an identity")
+	}
+}
+
 func TestQuoteQualified(t *testing.T) {
 	cases := []struct {
 		db, table, want string

@@ -15,6 +15,15 @@ type TableTarget struct {
 	Alias string // alias.name; "" if none
 }
 
+// Identity is the reference's (database, table) identity with the alias
+// dropped: the key every dedupe or rewrite map over table references must
+// use. Never key on the written "db.table" string — the quoted single
+// identifier `db1.t` (DB "", Table "db1.t") and the qualified db1.t both
+// write "db1.t", yet they are two tables.
+func (t TableTarget) Identity() TableTarget {
+	return TableTarget{DB: t.DB, Table: t.Table}
+}
+
 // TableAction is the rewrite a caller chose for a TableTarget.
 type TableAction int
 

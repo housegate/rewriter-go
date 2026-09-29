@@ -1212,7 +1212,7 @@ func RawTableRefs(e Engine, ast AST) ([]TableTarget, CommandSub, error) {
 }
 
 // SpliceRawTables rewrites table-name spans of a tier-C raw command. rewrites
-// maps the original (DB, Table) identity (Alias unset) → new qualified name
+// maps the original reference's Identity() → new qualified name
 // (the caller is expected to pre-quote dotted/dynamic names via
 // QuoteQualified). It is keyed by identity rather than the written "db.table"
 // so a quoted `db1.o` and a qualified db1.o are spliced independently. Spans are replaced
@@ -1234,7 +1234,7 @@ func SpliceRawTables(e Engine, originalSQL string, rewrites map[TableTarget]stri
 	out := originalSQL
 	for i := len(spans) - 1; i >= 0; i-- {
 		s := spans[i]
-		nv, ok := rewrites[TableTarget{DB: s.Target.DB, Table: s.Target.Table}]
+		nv, ok := rewrites[s.Target.Identity()]
 		if !ok {
 			continue
 		}

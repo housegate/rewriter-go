@@ -139,9 +139,9 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	if err != nil {
 		return nil, false, err
 	}
-	seen := map[tableIdentity]bool{}
+	seen := map[engine.TableTarget]bool{}
 	for _, tt := range targets {
-		id := identityOf(tt)
+		id := tt.Identity()
 		if seen[id] {
 			continue
 		}
@@ -735,7 +735,7 @@ func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.
 			return resp, true, nil // reject populated
 		}
 		if d.Action == engine.ActionRename {
-			rewrites[engine.TableTarget{DB: tt.DB, Table: tt.Table}] = engine.QuoteQualified(d.NewDB, d.NewTable)
+			rewrites[tt.Identity()] = engine.QuoteQualified(d.NewDB, d.NewTable)
 		}
 	}
 	out, err := engine.SpliceRawTables(e, sql, rewrites)

@@ -257,15 +257,18 @@ type StringLookup struct {
 	// Function is the call's name exactly as written in the source SQL —
 	// used verbatim in the caller's rejection message.
 	Function string
-	// Arg is the qualified "db.table" text the call names: for the
-	// joinGet-family it is that single argument's decoded value (from either
-	// a string literal or an unquoted qualified identifier); for
+	// Arg is the qualified "db.table" text the call names, for messages: for
+	// the joinGet-family it is that single argument's decoded value (from
+	// either a string literal or an unquoted qualified identifier); for
 	// hasColumnInTable it is the database and table literals joined with a
-	// "." (splitting on the FIRST '.' always recovers the original pair,
-	// because the physical database half is a plain identifier and never
-	// itself contains a literal '.'). "" when no usable target could be
-	// decoded at all.
+	// "." for display only — the join is ambiguous once either literal
+	// contains a '.', so resolution reads DB and Table instead. "" when no
+	// usable target could be decoded at all.
 	Arg string
+	// DB and Table are hasColumnInTable's database and table literals, kept
+	// apart (ClickHouse reads them as two names); empty for every other
+	// function and for a non-literal pair.
+	DB, Table string
 	// Literal reports whether every argument this decode depends on came
 	// from a string literal (hasColumnInTable's own db/table pair, or the
 	// joinGet-family's lone literal argument) — false for an unquoted
@@ -501,7 +504,7 @@ func decodeStringLookupCall(name string, args []any) StringLookup {
 		if !dbOK || !tableOK {
 			return StringLookup{Function: name}
 		}
-		return StringLookup{Function: name, Arg: dbLit + "." + tableLit, Literal: true}
+		return StringLookup{Function: name, Arg: dbLit + "." + tableLit, DB: dbLit, Table: tableLit, Literal: true}
 	}
 	value, origin, ok := tableFunctionArgValue(args[0])
 	if !ok {
@@ -693,7 +696,7 @@ func lookupCallsInRawTokens(toks []rawToken) []StringLookup {
 			continue
 		}
 		groups, ok := rawCallArgGroups(toks, i+1)
-		var arg string
+		var arg, argDB, argTable string
 		literal := false
 		if ok {
 			if strings.HasPrefix(strings.ToLower(toks[i].Text), "hascolumnintable") {
@@ -701,7 +704,7 @@ func lookupCallsInRawTokens(toks []rawToken) []StringLookup {
 					db, dbOK := rawStringArg(groups[len(groups)-3])
 					table, tableOK := rawStringArg(groups[len(groups)-2])
 					if dbOK && tableOK {
-						arg, literal = db+"."+table, true
+						arg, argDB, argTable, literal = db+"."+table, db, table, true
 					}
 				}
 			} else if len(groups) > 0 {
@@ -712,7 +715,7 @@ func lookupCallsInRawTokens(toks []rawToken) []StringLookup {
 				}
 			}
 		}
-		out = append(out, StringLookup{Function: toks[i].Text, Arg: arg, Literal: literal})
+		out = append(out, StringLookup{Function: toks[i].Text, Arg: arg, DB: argDB, Table: argTable, Literal: literal})
 	}
 	return out
 }
