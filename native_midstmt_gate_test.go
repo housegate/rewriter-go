@@ -369,3 +369,32 @@ func TestCommandPrefixKeepsPolicyRefusal(t *testing.T) {
 		}
 	}
 }
+
+// MaterializeSQL must not sign a statement the generator changed: before the
+// gate it returned the regenerated SQL, WITH TIES dropped, as Success.
+func TestMaterializeRefusesStatementNotRegeneratedFaithfully(t *testing.T) {
+	e := newEngine(t)
+	now := int64(1_700_000_000_000_000_000)
+	for _, sql := range []string{
+		"INSERT INTO db1.o SELECT now(), a FROM db1.p ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
+		"INSERT INTO db1.o SELECT now(), a::String FROM db1.p",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			resp, err := doMaterializeSQL(e, &pb.MaterializeSQLRequest{Sql: sql,
+				Inputs: &pb.MaterializationInputs{NowUnixNs: &now}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.MaterializeCode_MaterializeUnsupportedStatement ||
+				!strings.Contains(resp.GetMessage(), "the regenerated statement differs from the input") ||
+				resp.GetSqlAfterMaterialization() != sql || len(resp.GetReplacements()) != 0 {
+				t.Fatalf("resp = %+v", resp)
+			}
+		})
+	}
+	resp, err := doMaterializeSQL(e, &pb.MaterializeSQLRequest{Sql: "INSERT INTO db1.o SELECT now(), a FROM db1.p ORDER BY a DESC NULLS LAST",
+		Inputs: &pb.MaterializationInputs{NowUnixNs: &now}})
+	if err != nil || resp.GetCode() != pb.MaterializeCode_MaterializeSuccess || len(resp.GetReplacements()) != 1 {
+		t.Fatalf("a faithful statement still materializes: resp = %+v, err = %v", resp, err)
+	}
+}
