@@ -378,6 +378,9 @@ func TestMaterializeRefusesStatementNotRegeneratedFaithfully(t *testing.T) {
 	for _, sql := range []string{
 		"INSERT INTO db1.o SELECT now(), a FROM db1.p ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
 		"INSERT INTO db1.o SELECT now(), a::String FROM db1.p",
+		// startsWith is regenerated as STARTS_WITH, which is not a ClickHouse
+		// function: a known conservative refusal for now() beside it.
+		"INSERT INTO db1.o SELECT now(), startsWith(s, 'x') FROM db1.p",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			resp, err := doMaterializeSQL(e, &pb.MaterializeSQLRequest{Sql: sql,
