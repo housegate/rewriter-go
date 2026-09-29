@@ -139,6 +139,16 @@ func TestRewriteDBLevel_showTablePrefixesRetainPolicySemantics(t *testing.T) {
 				return resp
 			}
 			base, prefixed := rewrite(tc.baseSQL), rewrite(tc.prefixSQL)
+			// A prefix never changes a policy refusal. Where the base answers
+			// Success, the synthetic enumeration cannot express FULL (an extra
+			// engine column) or TEMPORARY (session tables), so the prefixed
+			// statement is refused rather than answered for SHOW TABLES.
+			if base.GetCode() == pb.RewriteCode_Success {
+				if prefixed.GetCode() != pb.RewriteCode_UnsupportedStatement || prefixed.GetMessage() != engine.UnsupportedStatementMessage {
+					t.Fatalf("prefixed=%+v, want the T7 refusal", prefixed)
+				}
+				return
+			}
 			if !proto.Equal(prefixed, base) {
 				t.Fatalf("prefixed=%+v\nbase=%+v", prefixed, base)
 			}

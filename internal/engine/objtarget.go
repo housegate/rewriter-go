@@ -26,6 +26,11 @@ type ObjectTarget struct {
 	// R7): a plain [db.]name, a table-function call, a parenthesized
 	// subquery, or nothing at all.
 	Shape ObjectTargetShape
+	// Trailing reports a token after the [db.]name target other than a
+	// closing semicolon: a call's argument list, a FORMAT / SETTINGS /
+	// INTO OUTFILE clause, or junk. A handler that re-renders the statement
+	// from DB/Table would drop it.
+	Trailing bool
 	// SubqueryStart is the byte offset of the opening parenthesis when
 	// Shape == ObjectTargetSubquery, so sql[SubqueryStart:] is the
 	// parenthesized body (spec 2026-09-26 R7).
@@ -100,6 +105,12 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 		out.Shape = ObjectTargetName
 		if next < len(toks) && toks[next].TokenType == "L_PAREN" {
 			out.Shape = ObjectTargetCall
+		}
+		for _, tk := range toks[next:] {
+			if tk.TokenType != "SEMICOLON" {
+				out.Trailing = true
+				break
+			}
 		}
 	} else if i < len(toks) && toks[i].TokenType == "L_PAREN" {
 		out.Shape = ObjectTargetSubquery

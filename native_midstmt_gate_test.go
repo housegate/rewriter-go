@@ -92,3 +92,72 @@ func TestMidStatementDropGateEveryMode(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandRerenderGate pins the handlers that re-render a command from
+// parsed fields: a clause they do not model is refused instead of dropped.
+func TestCommandRerenderGate(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"EXISTS TABLE db1.o FORMAT JSON",
+			"EXISTS TABLE db1.o XYZ",
+			"EXISTS TEMPORARY TABLE n",
+			"SHOW CREATE TABLE db1.o SETTINGS max_threads = 1",
+			"SHOW CREATE TABLE db1.o XYZ phys.x",
+			"DESCRIBE TABLE t FORMAT JSON",
+			"USE db1 XYZ",
+			"SHOW TABLES FROM db1 LIKE 'x%'",
+			"SHOW TABLES FROM db1 LIMIT 10",
+			"SHOW FULL TABLES FROM db1",
+			"SHOW TEMPORARY TABLES",
+			"SHOW DATABASES LIMIT 1",
+			"SHOW DATABASES FORMAT JSON",
+			"EXISTS TABLE db1.t FORMAT JSON",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		// DESCRIBE re-renders an SI table as the metadata SELECT; an ordinary
+		// qualified target is echoed verbatim and drops nothing.
+		describeSI := tablerefCase{name: "describe si", sql: "DESCRIBE TABLE db1.t FORMAT JSON", si: si, wantCode: pb.RewriteCode_Success}
+		if si {
+			describeSI.wantCode, describeSI.wantMsg, describeSI.wantSQL = pb.RewriteCode_UnsupportedStatement, unsupported, "DESCRIBE TABLE db1.t FORMAT JSON"
+		}
+		cases = append(cases, describeSI)
+		for _, sql := range []string{
+			"EXISTS TABLE db1.o",
+			"SHOW CREATE TABLE db1.o;",
+			"DESCRIBE TABLE t",
+			"USE db1",
+			"SHOW TABLES FROM db1",
+			"SHOW DATABASES LIKE 'd%'",
+			"SHOW DATABASES NOT ILIKE 'd%'",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_Success})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// EXISTS re-renders its target in every mode, not only under dynamic args.
+func TestCommandRerenderGateEveryMode(t *testing.T) {
+	e := newEngine(t)
+	const sql = "EXISTS TABLE db1.o FORMAT JSON"
+	for name, opts := range map[string][]*pb.RewriteOption{
+		"no rewrite": nil,
+		"static":     {tableRewriteStatic()},
+		"dynamic":    tablerefOpts(false),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := doRewrite(e, sql, opts)
+			if err != nil {
+				t.Fatalf("doRewrite: %v", err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "statement is not supported" ||
+				resp.GetSqlAfterRewrite() != sql {
+				t.Fatalf("resp = %+v", resp)
+			}
+		})
+	}
+}

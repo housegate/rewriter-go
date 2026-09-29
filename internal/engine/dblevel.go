@@ -31,6 +31,12 @@ type DBLevelInfo struct {
 	Like                string // LIKE pattern (logical/unescaped: 'O''Brien%' → O'Brien%)
 	LikeNot             bool   // NOT (I)LIKE
 	LikeCaseInsensitive bool   // ILIKE
+	// Trailing reports a token after the modelled head — `USE <db>`, or
+	// `SHOW [EXTENDED] [FULL] [TEMPORARY] <kind> [{FROM|IN} <db>]` followed at
+	// most by one `[NOT] (I)LIKE '<pattern>'` — other than a closing
+	// semicolon: WHERE, LIMIT, FORMAT, SETTINGS, INTO OUTFILE or junk. A
+	// handler that synthesizes SQL from these fields would drop it.
+	Trailing bool
 }
 
 // ParseDBLevel extracts USE/SHOW structure from the clickhouse Tokenize stream.
@@ -59,6 +65,7 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 		if len(toks) >= 2 && isNameToken(toks[1].TokenType) {
 			info.DB = toks[1].Text
 		}
+		info.Trailing = tokensRemain(toks, 2)
 		return info, nil
 	case "SHOW":
 		info := DBLevelInfo{Kind: DBShow}
@@ -118,6 +125,7 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 				}
 			}
 		}
+		info.Trailing = tokensRemain(toks, afterLikeClause(toks, i))
 		for i < len(toks) {
 			tt := toks[i].TokenType
 			switch {
@@ -380,4 +388,27 @@ func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
 		dbs = append(dbs, tt.DB)
 	}
 	return dbs
+}
+
+// tokensRemain reports a token other than a semicolon at or after toks[from].
+func tokensRemain(toks []rawToken, from int) bool {
+	for i := from; i < len(toks); i++ {
+		if toks[i].TokenType != "SEMICOLON" {
+			return true
+		}
+	}
+	return false
+}
+
+// afterLikeClause returns the index after one `[NOT] (I)LIKE '<pattern>'`
+// clause starting at toks[i], or i when none starts there.
+func afterLikeClause(toks []rawToken, i int) int {
+	j := i
+	if j < len(toks) && toks[j].TokenType == "NOT" {
+		j++
+	}
+	if j+1 < len(toks) && (toks[j].TokenType == "LIKE" || toks[j].TokenType == "I_LIKE") && toks[j+1].TokenType == "STRING" {
+		return j + 2
+	}
+	return i
 }

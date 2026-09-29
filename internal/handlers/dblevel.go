@@ -244,6 +244,11 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 		return resp, true, nil
 	}
 	if physical != origin {
+		if info.Trailing {
+			// `USE <physical>` would drop the rest (mid-statement drop gate).
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
+		}
 		resp.SqlAfterRewrite = "USE " + physical
 		recordDatabaseRewrite(resp, origin, physical)
 		return resp, true, nil
@@ -391,6 +396,13 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		rejectDBInvalid(resp, "SHOW TABLES target logical database '"+logical+"' is not in database_map and not a known physical database; user does not have this database")
 		return resp, true, nil
 	}
+	if info.Trailing || info.HasLike || info.ShowExtended || info.ShowFull || info.ShowTemporary {
+		// The synthetic enumeration models only SHOW TABLES [{FROM|IN} <db>]:
+		// it would drop a LIKE / LIMIT / FORMAT / SETTINGS clause and the
+		// EXTENDED / FULL / TEMPORARY variants (mid-statement drop gate).
+		rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	source := "system.tables"
 	if key, ok := dyn.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]; ok {
 		up, ok := dyn.GetRemoteUpstreams()[key]
@@ -509,6 +521,12 @@ func dispatchShowDatabases(e engine.Engine, ast engine.AST, sql string, info eng
 	resp := newDBResp(pb.StatementType_STATEMENT_TYPE_SHOW_DATABASES)
 	if dyn == nil {
 		return passthroughDB(e, ast, sql, resp)
+	}
+	if info.Trailing || info.ShowExtended || info.ShowFull || info.ShowTemporary {
+		// The synthetic list models only an optional LIKE clause (mid-statement
+		// drop gate): LIMIT / FORMAT / SETTINGS / WHERE would be dropped.
+		rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
 	}
 	// Sort database_map by logical (protobuf map order is unspecified).
 	type ent struct{ logical, physical string }

@@ -95,6 +95,11 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
 				return resp, true, nil
 			}
+			if t.Trailing || t.Temporary {
+				// The metadata SELECT would drop the clause (see rejectsRerender).
+				rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+				return resp, true, nil
+			}
 			resp.SqlAfterRewrite = describeMetadataSQL(tbl.GetSafeTable(), nameresolve.ReservedRowIDColumn(sel.Dynamic))
 			return resp, true, nil
 		}
@@ -109,6 +114,10 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 		resp.OriginalAccessedTables = nil
 		d, ok := decideWriteTarget(tt, "DESCRIBE TABLE", sel, resp)
 		if !ok {
+			return resp, true, nil
+		}
+		if rejectsRerender(t, d) {
+			rejectUnsupported(resp, engine.UnsupportedStatementMessage)
 			return resp, true, nil
 		}
 		db, table := t.DB, t.Table
