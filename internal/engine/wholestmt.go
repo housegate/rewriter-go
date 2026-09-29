@@ -30,6 +30,9 @@ var ErrNotParsedInFull = errors.New("engine: parse: statement was not parsed in 
 //     offset, so the spans inside the two ASTs compare byte for byte.
 //     Brackets are skipped because Polyglot closes an open bracket at end of
 //     input, so removing a trailing ')' alone never changes the AST.
+//     Zero-width tokens are skipped too: the tokenizer emits one at end of
+//     input for the text after INSERT … FORMAT <name>, and cutting before it
+//     would cut nothing.
 //
 // An INSERT … FORMAT <name> statement is checked only up to the format name:
 // the rest is the data payload, which Polyglot does not model and
@@ -55,7 +58,7 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 	}
 	last := -1
 	for i := len(toks) - 1; i >= 0; i-- {
-		if !isBracketToken(toks[i].TokenType) {
+		if !isBracketToken(toks[i].TokenType) && toks[i].Span.End > toks[i].Span.Start {
 			last = i
 			break
 		}

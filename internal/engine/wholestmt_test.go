@@ -28,6 +28,9 @@ func TestCheckParsedInFull(t *testing.T) {
 		{"table settings", "CREATE TABLE t (a Int32) ENGINE = Memory SETTINGS max_threads = 1", ""},
 		{"select settings then format", "SELECT * FROM t SETTINGS max_threads = 1 FORMAT JSON", ""},
 		{"command keeps its text", "RENAME TABLE a TO b XYZ", ""},
+		{"insert select format", "INSERT INTO t SELECT * FROM u FORMAT JSON", ""},
+		{"insert select format line comment", "INSERT INTO t SELECT * FROM u FORMAT JSON -- c", ""},
+		{"insert select format block comment", "INSERT INTO t SELECT * FROM u FORMAT JSON /* c */", ""},
 
 		// Not parsed in full: the parser stopped early.
 		{"engine then junk", "CREATE TABLE db1.n ENGINE = Memory XYZ AS SELECT * FROM phys.x",
