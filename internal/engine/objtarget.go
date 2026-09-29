@@ -31,6 +31,12 @@ type ObjectTarget struct {
 	// INTO OUTFILE clause, or junk. A handler that re-renders the statement
 	// from DB/Table would drop it.
 	Trailing bool
+	// AccessEntity reports a SHOW CREATE whose object word is an access-entity
+	// keyword (USER[S], ROLE[S], QUOTA[S], [SETTINGS] PROFILE[S], [ROW|MASKING]
+	// POLIC{Y|IES}) with no TABLE / DATABASE / VIEW / DICTIONARY keyword before
+	// it. ClickHouse parses those before it tries a table name, so the statement
+	// is not a SHOW CREATE TABLE and must never be re-rendered as one.
+	AccessEntity bool
 	// SubqueryStart is the byte offset of the opening parenthesis when
 	// Shape == ObjectTargetSubquery, so sql[SubqueryStart:] is the
 	// parenthesized body (spec 2026-09-26 R7).
@@ -86,12 +92,17 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 		i++
 	}
 	out.ObjType = "TABLE"
+	typed := false
 	if i < len(toks) {
 		switch strings.ToUpper(toks[i].Text) {
 		case "TABLE", "DATABASE", "VIEW", "DICTIONARY":
 			out.ObjType = strings.ToUpper(toks[i].Text)
 			i++
+			typed = true
 		}
+	}
+	if out.Verb == VerbShowCreate && !typed && i < len(toks) && isAccessEntityWord(toks[i]) {
+		out.AccessEntity = true
 	}
 	// Name-run: `db DOT name` or `name`.
 	if i < len(toks) && isNameTok(toks[i].TokenType) {
@@ -262,4 +273,18 @@ func firstDotSegment(s string) string {
 		return s[:idx]
 	}
 	return s
+}
+
+// isAccessEntityWord reports an unquoted SHOW CREATE object word that names an
+// access entity rather than a table. A quoted word is an identifier.
+func isAccessEntityWord(tok rawToken) bool {
+	if tok.TokenType == "QUOTED_IDENTIFIER" || tok.TokenType == "STRING" {
+		return false
+	}
+	switch strings.ToUpper(tok.Text) {
+	case "USER", "USERS", "ROLE", "ROLES", "QUOTA", "QUOTAS", "PROFILE", "PROFILES",
+		"POLICY", "POLICIES", "ROW", "SETTINGS", "MASKING":
+		return true
+	}
+	return false
 }

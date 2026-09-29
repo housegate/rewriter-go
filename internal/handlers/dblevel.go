@@ -522,9 +522,12 @@ func dispatchShowDatabases(e engine.Engine, ast engine.AST, sql string, info eng
 	if dyn == nil {
 		return passthroughDB(e, ast, sql, resp)
 	}
-	if info.Trailing || info.ShowExtended || info.ShowFull || info.ShowTemporary {
-		// The synthetic list models only an optional LIKE clause (mid-statement
-		// drop gate): LIMIT / FORMAT / SETTINGS / WHERE would be dropped.
+	if info.Trailing || info.HasDBClause || info.ShowExtended || info.ShowFull || info.ShowTemporary ||
+		(info.HasLike && !strings.HasPrefix(info.LikeRaw, "'")) {
+		// The synthetic list models only an optional LIKE clause over a
+		// single-quoted pattern (mid-statement drop gate): LIMIT / FORMAT /
+		// SETTINGS / WHERE would be dropped, and ClickHouse rejects FROM / IN
+		// for SHOW DATABASES, so the rewrite must not make it valid.
 		rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
 		return resp, true, nil
 	}
@@ -569,7 +572,11 @@ func buildLikeClause(info engine.DBLevelInfo) string {
 	if info.LikeNot {
 		op = "NOT " + op
 	}
-	return " WHERE name " + op + " '" + escapeSQLLiteral(info.Like) + "'"
+	// The raw lexeme, not the decoded value: ClickHouse reads `\_` and `\%` in a
+	// LIKE pattern as a literal underscore / percent, and re-escaping the
+	// decoded text would turn them into wildcards. The caller guarantees the
+	// lexeme is a single-quoted string literal.
+	return " WHERE name " + op + " " + info.LikeRaw
 }
 
 // escapeSQLLiteral makes s safe to embed inside a single-quoted ClickHouse

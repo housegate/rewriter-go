@@ -40,6 +40,13 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	}
 	resp := newWriteResp(stmt)
 	sel := nameresolve.FindActive(opts)
+	if t.AccessEntity {
+		// SHOW CREATE USER / QUOTA / ROLE / PROFILE / POLICY … is not a table
+		// statement; re-rendering it as SHOW CREATE TABLE <word> would answer a
+		// different statement (mid-statement drop gate). Refused in every mode.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	if sel.Mode == nameresolve.ModeDynamic && t.Table == "" {
 		// Spec 2026-09-26 R7: EXISTS / SHOW CREATE with no target names
 		// nothing to resolve; refuse rather than emit an empty identifier.
@@ -69,6 +76,14 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 		return resp, true, nil
 	}
 
+	if t.Table == "" {
+		// No target, or one the parser could not reduce to a [db.]name (a
+		// keyword-lexed first token such as `system` / `default`): there is
+		// nothing to re-render, and an empty identifier is invalid SQL. Refused
+		// in every mode, not only under dynamic args.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
 	if sel.Mode == nameresolve.ModeDynamic {
 		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {

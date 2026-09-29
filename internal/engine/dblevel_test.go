@@ -268,3 +268,95 @@ func TestParseDBLevel_nonColumnsFamilyGrammarIsUnchanged(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDBLevel_trailingAndLikeRaw(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql      string
+		trailing bool
+		likeRaw  string
+	}{
+		{"USE db1", false, ""},
+		{"USE db1;", false, ""},
+		{"USE db1 XYZ", true, ""},
+		{"SHOW TABLES", false, ""},
+		{"SHOW TABLES FROM db1;", false, ""},
+		{"SHOW TABLES FROM db1 LIMIT 1", true, ""},
+		{"SHOW TABLES FROM db1 WHERE 1", true, ""},
+		{"SHOW DATABASES LIKE 'd%'", false, `'d%'`},
+		{"SHOW DATABASES NOT ILIKE 'd%';", false, `'d%'`},
+		{`SHOW DATABASES LIKE 'd\_%'`, false, `'d\_%'`},
+		{`SHOW DATABASES LIKE 'a\%b'`, false, `'a\%b'`},
+		{"SHOW DATABASES LIKE 'O''Brien%'", false, `'O''Brien%'`},
+		{"SHOW DATABASES LIKE 'd%' LIMIT 1", true, `'d%'`},
+		{"SHOW DATABASES LIKE 'd%' FORMAT JSON", true, `'d%'`},
+		{"SHOW DATABASES LIKE 'a' LIKE 'b'", true, `'a'`},
+		{`SHOW DATABASES LIKE "d%"`, true, ""},
+		{"SHOW DATABASES FORMAT JSON", true, ""},
+	}
+	for _, c := range cases {
+		info, err := ParseDBLevel(e, c.sql)
+		if err != nil {
+			t.Fatalf("%q: %v", c.sql, err)
+		}
+		if info.Trailing != c.trailing || info.LikeRaw != c.likeRaw {
+			t.Errorf("%q: Trailing=%v LikeRaw=%q, want %v %q", c.sql, info.Trailing, info.LikeRaw, c.trailing, c.likeRaw)
+		}
+	}
+}
+
+func tokensOf(types ...string) []rawToken {
+	toks := make([]rawToken, len(types))
+	for i, tt := range types {
+		toks[i].TokenType = tt
+	}
+	return toks
+}
+
+func TestTokensRemain(t *testing.T) {
+	cases := []struct {
+		name string
+		toks []rawToken
+		from int
+		want bool
+	}{
+		{"empty", nil, 0, false},
+		{"from past end", tokensOf("VAR"), 5, false},
+		{"only semicolon", tokensOf("VAR", "SEMICOLON"), 1, false},
+		{"several semicolons", tokensOf("VAR", "SEMICOLON", "SEMICOLON"), 1, false},
+		{"token after semicolon", tokensOf("VAR", "SEMICOLON", "VAR"), 1, true},
+		{"token at from", tokensOf("VAR", "VAR"), 1, true},
+		{"token before from is ignored", tokensOf("VAR", "SEMICOLON"), 2, false},
+	}
+	for _, c := range cases {
+		if got := tokensRemain(c.toks, c.from); got != c.want {
+			t.Errorf("%s: tokensRemain = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestAfterLikeClause(t *testing.T) {
+	cases := []struct {
+		name string
+		toks []rawToken
+		i    int
+		want int
+	}{
+		{"empty", nil, 0, 0},
+		{"no clause", tokensOf("FORMAT", "VAR"), 0, 0},
+		{"like string", tokensOf("LIKE", "STRING"), 0, 2},
+		{"ilike string", tokensOf("I_LIKE", "STRING"), 0, 2},
+		{"not like string", tokensOf("NOT", "LIKE", "STRING"), 0, 3},
+		{"not ilike string", tokensOf("NOT", "I_LIKE", "STRING"), 0, 3},
+		{"like without a string", tokensOf("LIKE", "VAR"), 0, 0},
+		{"like at end", tokensOf("LIKE"), 0, 0},
+		{"not without like", tokensOf("NOT", "VAR", "STRING"), 0, 0},
+		{"clause after an offset", tokensOf("VAR", "LIKE", "STRING", "LIMIT"), 1, 3},
+		{"second clause is not consumed", tokensOf("LIKE", "STRING", "LIKE", "STRING"), 0, 2},
+	}
+	for _, c := range cases {
+		if got := afterLikeClause(c.toks, c.i); got != c.want {
+			t.Errorf("%s: afterLikeClause = %d, want %d", c.name, got, c.want)
+		}
+	}
+}

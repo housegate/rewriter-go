@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -159,5 +160,212 @@ func TestCommandRerenderGateEveryMode(t *testing.T) {
 				t.Fatalf("resp = %+v", resp)
 			}
 		})
+	}
+}
+
+// modes is the four request shapes a command statement can arrive in: no
+// rewrite option, static table rewrite, dynamic args, and dynamic args with an
+// active storage-integrity surface.
+func commandModes() map[string][]*pb.RewriteOption {
+	return map[string][]*pb.RewriteOption{
+		"none":    nil,
+		"static":  {tableRewriteStatic()},
+		"dynamic": tablerefOpts(false),
+		"si":      tablerefOpts(true),
+	}
+}
+
+// TestCommandTargetGate pins EXISTS / SHOW CREATE targets the parser cannot
+// reduce to a [db.]name (a keyword-lexed first token, no target) and the bare
+// access-entity SHOW CREATE forms, which ClickHouse dispatches before it tries
+// a table name: every mode refuses them instead of re-rendering an empty or
+// re-typed target (mid-statement drop gate, review I1 / I2).
+func TestCommandTargetGate(t *testing.T) {
+	e := newEngine(t)
+	refused := []string{
+		// I1: target not recognised or empty.
+		"EXISTS TABLE system.one",
+		"EXISTS TABLE system.one FORMAT JSON",
+		"EXISTS TABLE default.o",
+		"EXISTS",
+		"EXISTS TABLE",
+		"SHOW CREATE TABLE system.one",
+		"SHOW CREATE TABLE default.o",
+		"SHOW CREATE TABLE",
+		"SHOW CREATE ROW POLICIES",
+		"SHOW CREATE SETTINGS PROFILES",
+		"SHOW CREATE ROW POLICY p ON db1.o",
+		"SHOW CREATE SETTINGS PROFILE p",
+		// I2: bare access-entity forms are never a table.
+		"SHOW CREATE USER",
+		"SHOW CREATE USER u1",
+		"SHOW CREATE USERS",
+		"SHOW CREATE QUOTA",
+		"SHOW CREATE QUOTA q1",
+		"SHOW CREATE QUOTAS",
+		"SHOW CREATE ROLE",
+		"SHOW CREATE ROLE r1",
+		"SHOW CREATE ROLES",
+		"SHOW CREATE PROFILE",
+		"SHOW CREATE PROFILES",
+		"SHOW CREATE POLICY p ON db1.o",
+		"SHOW CREATE POLICIES",
+		"SHOW CREATE POLICIES ON db1.o",
+		"SHOW CREATE MASKING POLICY p ON db1.o",
+		"show create user",
+	}
+	for mode, opts := range commandModes() {
+		for _, sql := range refused {
+			t.Run(mode+"/"+sql, func(t *testing.T) {
+				resp, err := doRewrite(e, sql, opts)
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if resp.GetCode() == pb.RewriteCode_Success {
+					t.Fatalf("code = Success, sql = %q; want a refusal", resp.GetSqlAfterRewrite())
+				}
+				if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+					t.Fatalf("code = %s (%s), want UnsupportedStatement", resp.GetCode(), resp.GetMessage())
+				}
+			})
+		}
+	}
+	// A quoted word is an identifier, and an explicit TABLE keyword makes the
+	// word a table name: neither is an access entity.
+	for mode, opts := range commandModes() {
+		for _, sql := range []string{"SHOW CREATE TABLE db1.user", "SHOW CREATE `user`", "EXISTS TABLE db1.user", "SHOW CREATE TABLE db1.o"} {
+			t.Run(mode+"/ok/"+sql, func(t *testing.T) {
+				resp, err := doRewrite(e, sql, opts)
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if mode == "si" && resp.GetCode() != pb.RewriteCode_Success {
+					return // an SI surface may refuse SHOW CREATE by its own rule
+				}
+				if resp.GetCode() != pb.RewriteCode_Success {
+					t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+				}
+			})
+		}
+	}
+}
+
+// TestShowDatabasesGate pins SHOW DATABASES: a FROM / IN clause is invalid in
+// ClickHouse and would be dropped, and the LIKE pattern is carried as its raw
+// lexeme, so an escape such as \_ or \% keeps its meaning (review I3 / M1).
+func TestShowDatabasesGate(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"SHOW DATABASES FROM db1",
+			"SHOW DATABASES IN db1",
+			"SHOW DATABASES FROM db1 LIKE 'd%'",
+			"SHOW DATABASES WHERE name = 'x'",
+			"SHOW DATABASES INTO OUTFILE '/tmp/x'",
+			"SHOW DATABASES SETTINGS max_threads = 1",
+			"SHOW DATABASES PARALLEL WITH SHOW DATABASES",
+			"SHOW EXTENDED DATABASES",
+			"SHOW DATABASES LIKE \"d%\"",
+			"SHOW DATABASES LIKE $$d%$$",
+			"SHOW DATABASES LIKE 'd%' LIMIT 1",
+			"SHOW DATABASES LIKE 'd%' FORMAT JSON",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported})
+		}
+		for _, c := range []struct{ in, like string }{
+			{`SHOW DATABASES LIKE 'd\_%'`, `LIKE 'd\_%'`},
+			{`SHOW DATABASES LIKE 'd\%'`, `LIKE 'd\%'`},
+			{`SHOW DATABASES NOT ILIKE 'D\_X'`, `NOT ILIKE 'D\_X'`},
+			{`SHOW DATABASES LIKE 'd\x5f%'`, `LIKE 'd\x5f%'`},
+			{`SHOW DATABASES LIKE 'O''Brien%'`, `LIKE 'O''Brien%'`},
+			{`SHOW DATABASES LIKE 'a\\b'`, `LIKE 'a\\b'`},
+			{`SHOW DATABASES LIKE 'd%'`, `LIKE 'd%'`},
+		} {
+			cases = append(cases, tablerefCase{name: c.in, sql: c.in, si: si, wantCode: pb.RewriteCode_Success,
+				wantSQL: "SELECT name FROM (SELECT 'db1' AS name) WHERE name " + c.like + " ORDER BY name"})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestCommandRerenderGateClauses pins every clause the T7 gate refuses on the
+// handlers that re-render a command: none of them may be dropped.
+func TestCommandRerenderGateClauses(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"EXISTS TABLE db1.o INTO OUTFILE '/tmp/x'",
+			"EXISTS TABLE db1.o SETTINGS max_threads = 1",
+			"EXISTS TABLE db1.o PARALLEL WITH EXISTS TABLE db1.o",
+			"EXISTS TABLE db1.o WHERE 1",
+			"SHOW CREATE TABLE db1.o INTO OUTFILE '/tmp/x'",
+			"SHOW CREATE TABLE db1.o FORMAT JSON",
+			"SHOW CREATE TABLE db1.o PARALLEL WITH SHOW CREATE TABLE db1.o",
+			"DESCRIBE TABLE t SETTINGS max_threads = 1",
+			"DESCRIBE TABLE t INTO OUTFILE '/tmp/x'",
+			"USE db1 PARALLEL WITH USE db1",
+			"USE db1 FORMAT JSON",
+			"USE db1 SETTINGS max_threads = 1",
+			"SHOW TABLES FROM db1 WHERE name = 'o'",
+			"SHOW TABLES FROM db1 INTO OUTFILE '/tmp/x'",
+			"SHOW TABLES FROM db1 SETTINGS max_threads = 1",
+			"SHOW TABLES FROM db1 FORMAT JSON",
+			"SHOW TABLES FROM db1 ILIKE 'x%'",
+			"SHOW TABLES FROM db1 NOT LIKE 'x%'",
+			"SHOW TABLES FROM db1 NOT ILIKE 'x%'",
+			"SHOW EXTENDED TABLES FROM db1",
+			"SHOW TABLES FROM db1 PARALLEL WITH SHOW TABLES FROM db1",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported})
+		}
+	}
+	// DESCRIBE re-renders an SI table as the metadata SELECT; only there is
+	// a trailing clause dropped, so only there does DESCRIBE refuse it.
+	for _, sql := range []string{"DESCRIBE TABLE db1.t SETTINGS max_threads = 1", "DESCRIBE TABLE db1.t INTO OUTFILE '/tmp/x'"} {
+		cases = append(cases,
+			tablerefCase{name: "si/" + sql, sql: sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql},
+			tablerefCase{name: "ordinary/" + sql, sql: sql, si: false, wantCode: pb.RewriteCode_Success})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestCommandPrefixKeepsPolicyRefusal pins that FULL / TEMPORARY / EXTENDED
+// never turn a policy refusal into another answer: the handler's own refusal
+// (protected or reserved database, unknown logical database) wins over the
+// T7 gate that refuses the prefix.
+func TestCommandPrefixKeepsPolicyRefusal(t *testing.T) {
+	e := newEngine(t)
+	for _, si := range []bool{false, true} {
+		for _, base := range []string{
+			"SHOW TABLES FROM phys",
+			"SHOW TABLES FROM hg_safe",
+			"SHOW TABLES FROM hg_unsafe",
+			"SHOW TABLES FROM nope",
+		} {
+			for _, prefix := range []string{"SHOW FULL TABLES", "SHOW TEMPORARY TABLES", "SHOW EXTENDED TABLES", "SHOW FULL TEMPORARY TABLES"} {
+				prefixed := prefix + strings.TrimPrefix(base, "SHOW TABLES")
+				name := base + " / " + prefixed
+				t.Run(name, func(t *testing.T) {
+					want, err := doRewrite(e, base, tablerefOpts(si))
+					if err != nil {
+						t.Fatalf("doRewrite base: %v", err)
+					}
+					got, err := doRewrite(e, prefixed, tablerefOpts(si))
+					if err != nil {
+						t.Fatalf("doRewrite prefixed: %v", err)
+					}
+					if want.GetCode() == pb.RewriteCode_Success {
+						t.Fatalf("base %q answered Success; the row must start from a refusal", base)
+					}
+					if got.GetCode() != want.GetCode() || got.GetMessage() != want.GetMessage() {
+						t.Fatalf("prefixed = %s (%s), base = %s (%s)", got.GetCode(), got.GetMessage(), want.GetCode(), want.GetMessage())
+					}
+				})
+			}
+		}
 	}
 }

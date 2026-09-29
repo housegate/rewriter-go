@@ -123,9 +123,17 @@ func TestRewriteDBLevel_showTablePrefixesRetainPolicySemantics(t *testing.T) {
 		name      string
 		baseSQL   string
 		prefixSQL string
+		// refusedBase marks rows whose base statement must itself be refused, so
+		// the row proves a prefix leaves a policy refusal untouched.
+		refusedBase bool
 	}{
-		{name: "physical", baseSQL: "SHOW TABLES FROM hg_safe", prefixSQL: "SHOW FULL TABLES FROM hg_safe"},
-		{name: "logical protected", baseSQL: "SHOW TABLES FROM db1", prefixSQL: "SHOW FULL TEMPORARY TABLES FROM db1"},
+		{name: "physical", baseSQL: "SHOW TABLES FROM hg_safe", prefixSQL: "SHOW FULL TABLES FROM hg_safe", refusedBase: true},
+		// db1 is an authorized logical database, so its base answers Success and
+		// the prefixed statement is the T7 refusal (see the branch below).
+		{name: "logical ordinary", baseSQL: "SHOW TABLES FROM db1", prefixSQL: "SHOW FULL TEMPORARY TABLES FROM db1"},
+		// Genuine refusals: the prefix must not change the handler's own answer.
+		{name: "physical unsafe", baseSQL: "SHOW TABLES FROM hg_unsafe", prefixSQL: "SHOW EXTENDED TABLES FROM hg_unsafe", refusedBase: true},
+		{name: "unknown logical", baseSQL: "SHOW TABLES FROM nope", prefixSQL: "SHOW FULL TABLES FROM nope", refusedBase: true},
 		{name: "ordinary", baseSQL: "SHOW TABLES FROM other", prefixSQL: "SHOW TEMPORARY TABLES FROM other"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,6 +147,9 @@ func TestRewriteDBLevel_showTablePrefixesRetainPolicySemantics(t *testing.T) {
 				return resp
 			}
 			base, prefixed := rewrite(tc.baseSQL), rewrite(tc.prefixSQL)
+			if tc.refusedBase && base.GetCode() == pb.RewriteCode_Success {
+				t.Fatalf("base %q answered Success; the row must start from a refusal", tc.baseSQL)
+			}
 			// A prefix never changes a policy refusal. Where the base answers
 			// Success, the synthetic enumeration cannot express FULL (an extra
 			// engine column) or TEMPORARY (session tables), so the prefixed
