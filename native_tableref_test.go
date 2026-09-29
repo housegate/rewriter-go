@@ -2769,3 +2769,154 @@ func TestTableRef_ActiveToActiveInsertIsRefused(t *testing.T) {
 	)
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_UnresolvedUnqualifiedNameIsRefused pins the refusal of an
+// unqualified table name — including the one-part dotted quoted form
+// `db1.t` — that does not resolve through the session's logical database in
+// dynamic mode. ClickHouse resolves such a name in the session's current
+// database, which housegate makes the physical database, so forwarding it
+// verbatim would read phys.t or phys.`db1.t` (the ordinary physical table of
+// an Active storage-integrity table, outside hg_safe). The permission observer
+// in housegate refuses it for tenants, but driver and auth-disabled sessions
+// skip that observer. The logical context is empty or unmapped (db9); both
+// SI states.
+func TestTableRef_UnresolvedUnqualifiedNameIsRefused(t *testing.T) {
+	e := newEngine(t)
+	msg := func(table string) string {
+		return `unqualified table "` + table + `" does not resolve through the session's logical database`
+	}
+	type pos struct {
+		name, sql, table string
+		code             pb.RewriteCode
+	}
+	invalid, unsupported := pb.RewriteCode_InvalidRewriteRequest, pb.RewriteCode_UnsupportedStatement
+	positions := []pos{
+		{"from", "SELECT * FROM t", "t", invalid},
+		{"from_dotted_quoted", "SELECT * FROM `db1.t`", "db1.t", invalid},
+		{"from_dotted_double_quoted", `SELECT * FROM "other.x"`, "other.x", invalid},
+		{"join", "SELECT * FROM db1.o AS a JOIN t AS b USING (a)", "t", invalid},
+		{"subquery", "SELECT * FROM (SELECT * FROM t)", "t", invalid},
+		{"scalar_subquery", "SELECT (SELECT max(a) FROM t)", "t", invalid},
+		{"cte_body", "WITH c AS (SELECT * FROM t) SELECT * FROM c", "t", invalid},
+		{"union_arm", "SELECT a FROM db1.o UNION ALL SELECT a FROM t", "t", invalid},
+		{"in_subquery", "SELECT * FROM db1.o WHERE a IN (SELECT a FROM t)", "t", invalid},
+		{"view_function", "SELECT * FROM view(SELECT * FROM t)", "t", invalid},
+		{"view_body", "CREATE VIEW db1.v AS SELECT * FROM t", "t", invalid},
+		{"mv_body", "CREATE MATERIALIZED VIEW db1.mv TO db1.x AS SELECT * FROM t", "t", invalid},
+		// INSERT … SELECT / CTAS bodies: a body rejection is UnsupportedStatement
+		// on a write statement (rewriteEmbeddedBody), message kept verbatim.
+		{"insert_select_source", "INSERT INTO db1.o SELECT * FROM t", "t", unsupported},
+		{"insert_select_dotted_source", "INSERT INTO db1.o SELECT * FROM `db1.t`", "db1.t", unsupported},
+		{"ctas_source", "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM t", "t", unsupported},
+	}
+	// IN table operands: with the SI surface active the SI namespace policy
+	// refuses them first with its own message; without it the new refusal fires.
+	inOperands := []pos{
+		{"in_bare", "SELECT * FROM db1.o WHERE a IN t", "t", invalid},
+		{"in_paren", "SELECT * FROM db1.o WHERE a IN (t)", "t", invalid},
+		{"in_dotted_quoted", "SELECT * FROM db1.o WHERE a IN `db1.t`", "db1.t", invalid},
+		{"in_call", "SELECT * FROM db1.o WHERE in(a, t)", "t", invalid},
+	}
+	for _, si := range []bool{false, true} {
+		for _, ctx := range []string{"", "db9"} {
+			dyn := tablerefDynamic(si)
+			dyn.UpstreamLogicalDatabaseInContext = ctx
+			opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
+			all := positions
+			if !si {
+				all = append(append([]pos{}, positions...), inOperands...)
+			}
+			for _, p := range all {
+				t.Run(fmt.Sprintf("si=%v/ctx=%q/%s", si, ctx, p.name), func(t *testing.T) {
+					resp, err := doRewrite(e, p.sql, opts)
+					if err != nil {
+						t.Fatalf("doRewrite: %v", err)
+					}
+					if resp.GetCode() != p.code || resp.GetMessage() != msg(p.table) {
+						t.Fatalf("got %s %q, want %s %q", resp.GetCode(), resp.GetMessage(), p.code, msg(p.table))
+					}
+					if resp.GetSqlAfterRewrite() != p.sql {
+						t.Fatalf("sql = %q, want the input echoed", resp.GetSqlAfterRewrite())
+					}
+				})
+			}
+			if si {
+				for _, p := range inOperands {
+					t.Run(fmt.Sprintf("si=%v/ctx=%q/%s_si_message_first", si, ctx, p.name), func(t *testing.T) {
+						resp, err := doRewrite(e, p.sql, opts)
+						if err != nil {
+							t.Fatalf("doRewrite: %v", err)
+						}
+						if resp.GetCode() != pb.RewriteCode_RewriteError ||
+							resp.GetMessage() != "storage-integrity IN table target namespace is not statically resolvable" {
+							t.Fatalf("got %s %q, want the SI IN-namespace refusal", resp.GetCode(), resp.GetMessage())
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestTableRef_UnresolvedUnqualifiedRuleLeavesOthersAlone pins what the
+// refusal above must not touch: CTE names and table aliases (not tables),
+// qualified unmapped names (lenient; spec §5 and the permission observer own
+// them), a mapped logical context, and the none / static modes.
+func TestTableRef_UnresolvedUnqualifiedRuleLeavesOthersAlone(t *testing.T) {
+	e := newEngine(t)
+	type c struct {
+		name, sql, wantSQL string
+	}
+	for _, si := range []bool{false, true} {
+		for _, ctx := range []string{"", "db9"} {
+			dyn := tablerefDynamic(si)
+			dyn.UpstreamLogicalDatabaseInContext = ctx
+			opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
+			for _, k := range []c{
+				{"cte_name", "WITH c AS (SELECT 1 AS a) SELECT * FROM c", "WITH c AS (SELECT 1 AS a) SELECT * FROM c"},
+				{"cte_name_in_operand", "WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c",
+					`WITH c AS (SELECT 1 AS a) SELECT * FROM phys."db1.o" "db1.o" WHERE a IN c`},
+				{"table_alias_column", "SELECT b.a FROM db1.o AS b", `SELECT b.a FROM phys."db1.o" AS b`},
+				{"qualified_unmapped", "SELECT * FROM db2.x", "SELECT * FROM db2.x"},
+				{"qualified_unmapped_in", "SELECT * FROM db1.o WHERE a IN db2.x",
+					`SELECT * FROM phys."db1.o" "db1.o" WHERE a IN db2.x`},
+				{"no_table", "SELECT 1", "SELECT 1"},
+			} {
+				t.Run(fmt.Sprintf("si=%v/ctx=%q/%s", si, ctx, k.name), func(t *testing.T) {
+					resp, err := doRewrite(e, k.sql, opts)
+					if err != nil {
+						t.Fatalf("doRewrite: %v", err)
+					}
+					if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != k.wantSQL {
+						t.Fatalf("got %s %q %q, want Success %q", resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite(), k.wantSQL)
+					}
+				})
+			}
+		}
+	}
+	// A mapped context still rewrites the unqualified name.
+	for _, si := range []bool{false, true} {
+		resp, err := doRewrite(e, "SELECT * FROM `other.x`", tablerefOpts(si))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != `SELECT * FROM phys."db1.other.x" "other.x"` {
+			t.Fatalf("si=%v mapped context: got %s %q %q", si, resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
+		}
+	}
+	// None and static modes forward an unqualified name unchanged.
+	for name, opts := range map[string][]*pb.RewriteOption{
+		"none":   nil,
+		"static": {{Op: pb.RewriteOp_TableNameRewrite, Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{StaticArgs: &pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.x": "y"}}}}}},
+	} {
+		for _, sql := range []string{"SELECT * FROM t", "SELECT * FROM `db1.t`", "INSERT INTO db1.o SELECT * FROM t"} {
+			resp, err := doRewrite(e, sql, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success {
+				t.Fatalf("%s %q: got %s %q", name, sql, resp.GetCode(), resp.GetMessage())
+			}
+		}
+	}
+}

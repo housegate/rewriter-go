@@ -96,9 +96,27 @@ func TestRewriteSelect_cteInjectAndFailedAliases(t *testing.T) {
 	}
 }
 
-func TestRewriteSelect_invalidUnqualified_skipsLeniently(t *testing.T) {
+// TestRewriteSelect_invalidUnqualified_isRefused: an unqualified table with no
+// logical context does not resolve, and ClickHouse would read it from the
+// session's current (physical) database, so the dynamic-mode SELECT refuses it
+// (spec 2026-09-26 §5). A qualified unmapped name stays a lenient skip.
+func TestRewriteSelect_invalidUnqualified_isRefused(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("SELECT a FROM events")
+	opts := dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"tenant1": "testnet"}})
+	resp, err := RewriteSelect(e, ast, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest ||
+		resp.GetMessage() != `unqualified table "events" does not resolve through the session's logical database` {
+		t.Fatalf("got %v %q, want the unresolved-unqualified refusal", resp.GetCode(), resp.GetMessage())
+	}
+}
+
+func TestRewriteSelect_invalidQualified_skipsLeniently(t *testing.T) {
+	e := newEngine(t)
+	ast, _ := e.ParseOne("SELECT a FROM tenant2.events")
 	opts := dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"tenant1": "testnet"}})
 	resp, err := RewriteSelect(e, ast, opts)
 	if err != nil {

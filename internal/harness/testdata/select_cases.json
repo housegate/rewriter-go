@@ -9,13 +9,13 @@
     "want_sql": "SELECT a FROM testnet.\"tenant1.events\" \"tenant1.events\""
   },
   {
-    "name": "dynamic_unqualified_no_context_lenient",
+    "name": "dynamic_unqualified_no_context_rejected",
     "sql": "SELECT a FROM events",
     "dynamic": {"database_map": {"tenant1": "testnet"}},
-    "want_code": "Success",
+    "want_code": "InvalidRewriteRequest",
+    "want_message": "unqualified table \"events\" does not resolve through the session's logical database",
     "want_table_rewrites": {},
-    "want_accessed": [{"original_database": "", "original_table": "events", "logical_database": "", "physical_database": "", "is_remote": false}],
-    "want_sql": "SELECT a FROM events"
+    "want_accessed": [{"original_database": "", "original_table": "events", "logical_database": "", "physical_database": "", "is_remote": false}]
   },
   {
     "name": "static_table_map_keeps_db",

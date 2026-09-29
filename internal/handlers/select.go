@@ -266,6 +266,18 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	}
 
 	var siErr error
+	// unresolved is the first unqualified table (DB == "", which includes the
+	// one-part dotted quoted form `db1.t`) that does not resolve through the
+	// session's logical database in dynamic mode: the logical context is
+	// empty, unmapped, or maps to a missing remote upstream. ClickHouse would
+	// resolve the verbatim name in the session's current database — the
+	// physical database, where `db1.t` is an Active SI table's ordinary
+	// physical table — so it is refused, not skipped (spec 2026-09-26 §5).
+	// CTE names never reach this callback, and a qualified unmapped name
+	// (db2.x) stays a lenient skip: ClickHouse has no physical db2, and the
+	// host's permission check owns it.
+	var unresolved string
+	var haveUnresolved bool
 	rewritten, err := engine.RewriteSelectTables(ast, func(tt engine.TableTarget) engine.TableDecision {
 		if storageIntegrityActive {
 			semantic, ok := engine.SemanticTableTarget(e, tt)
@@ -284,6 +296,12 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 				}
 				return d
 			}
+			if tt.DB == "" && nameresolve.ApplyDynamic(tt.DB, tt.Table, sel.Dynamic).Status == nameresolve.StatusInvalid {
+				if !haveUnresolved {
+					unresolved, haveUnresolved = tt.Table, true
+				}
+				return engine.TableDecision{Action: engine.ActionSkip}
+			}
 		}
 		return decideTable(tt, sel, resp.TableRewrites)
 	})
@@ -292,6 +310,11 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	}
 	if siErr != nil {
 		return nil, nil, siErr
+	}
+	if haveUnresolved {
+		resp.Code = pb.RewriteCode_InvalidRewriteRequest
+		resp.Message = nameresolve.UnresolvedUnqualifiedTableMessage(unresolved)
+		return ast, resp, nil
 	}
 
 	rewritten, err = applyOptions(rewritten, opts)
@@ -308,7 +331,9 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 }
 
 // decideTable maps a nameresolve.Outcome to an engine.TableDecision and records the
-// table_rewrites entry. SELECT is lenient: StatusInvalid → skip (no error).
+// table_rewrites entry. SELECT is lenient: StatusInvalid → skip (no error). The
+// caller refuses an unqualified dynamic-mode StatusInvalid before reaching it,
+// so the lenient skip covers qualified unmapped names only.
 func decideTable(tt engine.TableTarget, sel nameresolve.Selection, rewrites map[string]string) engine.TableDecision {
 	o := nameresolve.Resolve(tt.DB, tt.Table, sel)
 	switch o.Status {

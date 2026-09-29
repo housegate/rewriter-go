@@ -34,6 +34,16 @@ func ProtectedDatabaseRejectMessage(db string) string {
 	return "protected database " + db + " is not addressable"
 }
 
+// UnresolvedUnqualifiedTableMessage is the cross-engine message for an
+// unqualified table name — including the one-part dotted quoted form
+// `db1.t`, whose table is "db1.t" — that does not resolve through the
+// session's logical database in dynamic mode (spec 2026-09-26 §5). ClickHouse
+// resolves such a name in the session's current database, which is the
+// physical database, so it is refused instead of forwarded.
+func UnresolvedUnqualifiedTableMessage(table string) string {
+	return `unqualified table "` + table + `" does not resolve through the session's logical database`
+}
+
 // ValidateProtectedDatabases mirrors the reserved_databases rule: every entry
 // is a simple identifier. Checked before any handler runs.
 func ValidateProtectedDatabases(a *pb.RewriteTableDynamicArgs) error {

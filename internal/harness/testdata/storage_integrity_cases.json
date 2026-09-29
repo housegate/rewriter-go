@@ -20982,5 +20982,123 @@
     "want_code": "Success", "want_stmt": "ALTER_TABLE",
     "want_sql": "ALTER TABLE phys.\"db1.o\" DELETE WHERE a IN(+ 1, - 2)",
     "want_table_rewrites": {"db1.o": "phys.db1.o"}, "want_accessed": [{"original_database": "db1", "original_table": "o", "logical_database": "db1", "physical_database": "phys"}], "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_unqualified_dotted_quoted_no_context_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM `db1.t`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "unqualified table \"db1.t\" does not resolve through the session's logical database", "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_unqualified_dotted_quoted_no_context_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM `db1.t`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "unqualified table \"db1.t\" does not resolve through the session's logical database"
+  },
+  {
+    "name": "si_tr_unqualified_dotted_quoted_unmapped_context_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM `db1.t`",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db9",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "unqualified table \"db1.t\" does not resolve through the session's logical database"
+  },
+  {
+    "name": "si_tr_unqualified_unmapped_context_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db9",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "unqualified table \"t\" does not resolve through the session's logical database", "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_unqualified_unmapped_context_v2_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db9",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "unqualified table \"t\" does not resolve through the session's logical database"
+  },
+  {
+    "name": "si_tr_unqualified_insert_select_source_rejected",
+    "contract_version": "V1",
+    "sql": "INSERT INTO db1.o SELECT * FROM t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db9",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "unqualified table \"t\" does not resolve through the session's logical database", "want_no_contract_ack": true
+  },
+  {
+    "name": "si_tr_unqualified_insert_select_source_v2_rejected",
+    "contract_version": "V2",
+    "sql": "INSERT INTO db1.o SELECT * FROM t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db9",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "unqualified table \"t\" does not resolve through the session's logical database"
+  },
+  {
+    "name": "si_tr_unqualified_in_operand_rejected",
+    "contract_version": "V1",
+    "sql": "SELECT * FROM db1.o WHERE a IN t",
+    "dynamic": {
+      "database_map": {"db1": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db9",
+      "delim": "_",
+      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
+      "storage_integrity": {"tables": {}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+    },
+    "reject": true, "want_code": "InvalidRewriteRequest", "want_stmt": "",
+    "want_message_contains": "unqualified table \"t\" does not resolve through the session's logical database", "want_no_contract_ack": true
   }
 ]
