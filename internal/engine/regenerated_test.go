@@ -167,6 +167,27 @@ func TestCheckRegenerated(t *testing.T) {
 		{"insert select input streamed", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV", ""},
 		{"insert select input streamed after a newline", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV\n", ""},
 		{"insert select input streamed after blanks and a newline", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV \t\n", ""},
+
+		// Fix round 4 (re-review 3 F1): the input() tail rule reads the token
+		// stream, not the AST, so a set operation, a CTE before one and
+		// SETTINGS before FORMAT are covered (measured on 26.2: the UNION ALL
+		// input inserts "" and P, its regeneration only P). A statement that
+		// reads input() and has a FORMAT token that is not the closing
+		// FORMAT <name> is refused: the check cannot place its data. One with
+		// no FORMAT token has no data and is compared in full.
+		{"insert union all input blank line is data", "INSERT INTO db1.o SELECT a FROM db1.p UNION ALL SELECT a FROM input('a String') FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert union all input first blank line is data", "INSERT INTO db1.o SELECT a FROM input('a String') UNION ALL SELECT a FROM db1.p FORMAT CSV\n\n", differs + `lost input() data "\n\n", added nothing`},
+		{"insert union distinct input blank line is data", "INSERT INTO db1.o SELECT a FROM db1.p UNION DISTINCT SELECT a FROM input('a String') FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert union input blank line is data", "INSERT INTO db1.o SELECT a FROM db1.p UNION SELECT a FROM input('a String') FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert intersect input blank line is data", "INSERT INTO db1.o SELECT a FROM db1.p INTERSECT SELECT a FROM input('a String') FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert except input first blank line is data", "INSERT INTO db1.o SELECT a FROM input('a String') EXCEPT SELECT a FROM db1.p FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert cte union all input blank line is data", "INSERT INTO db1.o WITH x AS (SELECT * FROM input('a String')) SELECT * FROM x UNION ALL SELECT a FROM db1.p FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert three-way union input blank line is data", "INSERT INTO db1.o SELECT a FROM db1.p UNION ALL SELECT a FROM input('a String') UNION ALL SELECT a FROM db1.q FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert union all input settings then format blank line is data", "INSERT INTO db1.o SELECT a FROM db1.p UNION ALL SELECT a FROM input('a String') SETTINGS max_threads = 1 FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert union all input streamed", "INSERT INTO db1.o SELECT a FROM db1.p UNION ALL SELECT a FROM input('a String') FORMAT CSV", ""},
+		{"insert union all input streamed after a newline", "INSERT INTO db1.o SELECT a FROM db1.p UNION ALL SELECT a FROM input('a String') FORMAT CSV\n", ""},
+		{"insert select input column named format", "INSERT INTO db1.o SELECT format FROM input('format String')", differs + "input() data position unknown: a FORMAT token does not end the statement"},
+		{"insert select input without format", "INSERT INTO db1.o WITH unused AS (SELECT value FROM input('value Int64')) SELECT 7", ""},
 		{"insert select format settings tail", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON SETTINGS max_threads = 1", differs + "lost [SETTINGS MAX_THREADS = 1], added nothing"},
 		{"insert select format semicolon tail", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON;", differs + "lost [;], added nothing"},
 

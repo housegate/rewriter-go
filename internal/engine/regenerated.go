@@ -41,11 +41,15 @@ var ErrNotRegeneratedFaithfully = errors.New("engine: generate: the regenerated 
 // data clause (insertHasFormatClause, the gate GenerateInsert splices on) is
 // compared only up to the name after its last FORMAT keyword: what follows is
 // data that GenerateInsert splices back verbatim (the parse gate's payload
-// rule). A column or alias named format is not such a clause. An INSERT …
-// SELECT … FORMAT <name> that reads input() anywhere is refused unless the
-// text after the name is the client-streaming form, [ \t]*\n? (any more is
-// rows, isStreamedDataTail); otherwise it is compared in full, apart from a
-// text of only comments after the name, which ClickHouse ignores
+// rule). A column or alias named format is not such a clause. Any other
+// INSERT that reads input() anywhere (readsInput) is checked on its token
+// stream, whatever the AST's shape (a plain SELECT, a set operation, a CTE
+// before either): when it ends in FORMAT <name> after a SELECT, the text after
+// the name must be the client-streaming form, [ \t]*\n? (any more is rows,
+// isStreamedDataTail); a FORMAT token anywhere else is refused; without one
+// the statement has no data and is compared in full (checkInputData). An
+// INSERT … SELECT … FORMAT <name> without input() is compared in full, apart
+// from a text of only comments after the name, which ClickHouse ignores
 // (withoutIgnoredData).
 func CheckRegenerated(e Engine, sql string, ast AST) error {
 	kind, err := NodeKind(ast)
@@ -71,12 +75,11 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 		switch {
 		case insertHasFormatClause(ast):
 			in, out = throughFormatName(in), throughFormatName(out)
-		case insertSelectHasFormat(ast):
-			if readsInput(in) {
-				if tail := afterFormatName(sql, in); !isStreamedDataTail(tail) {
-					return fmt.Errorf("%w: lost input() data %q, added nothing", ErrNotRegeneratedFaithfully, tail)
-				}
+		case readsInput(in):
+			if err := checkInputData(sql, in); err != nil {
+				return err
 			}
+		case insertSelectHasFormat(ast):
 			in = withoutIgnoredData(sql, in)
 		}
 	}
@@ -117,7 +120,7 @@ func insertSelectHasFormat(ast AST) bool {
 // (measured on 26.2: formatQuery drops it), and Generate drops it too. Any
 // other text is kept and compared, so its loss refuses: a text that is not a
 // comment is not known to be ignored. A statement that reads input() never
-// gets here with a text (CheckRegenerated refuses it first). No other token
+// gets here (CheckRegenerated checks its tail instead). No other token
 // is dropped: in INSERT … SELECT format x FROM p the select has no FORMAT
 // clause, so the FROM p the tokenizer took for data is compared, and its
 // loss refused.
@@ -132,24 +135,50 @@ func withoutIgnoredData(sql string, toks []rawToken) []rawToken {
 	return toks[:n-1]
 }
 
-// afterFormatName returns the source text after the name that follows the
-// last FORMAT keyword, or the whole statement when there is none.
-func afterFormatName(sql string, toks []rawToken) string {
-	for i := len(toks) - 2; i >= 0; i-- {
-		if toks[i].TokenType == "FORMAT" {
-			return sql[toks[i+1].Span.End:]
+// checkInputData refuses an INSERT that reads input() when the rows ClickHouse
+// reads after its FORMAT <name> are not the client-streaming form. It reads the
+// token stream only, so the query's shape (a plain SELECT, UNION / INTERSECT /
+// EXCEPT, a CTE before either, SETTINGS before FORMAT) does not matter. When
+// the last two tokens, before at most the tokenizer's zero-width inline-data
+// token, are FORMAT and a name after a SELECT, the source text after the name
+// is the rows, and it must satisfy isStreamedDataTail. A stream with no FORMAT
+// token has no data position at all (ClickHouse itself refuses such an input()
+// statement, code 477 on 26.2), so every token is compared and nothing is
+// checked here. Any other FORMAT token (a column named format, a FORMAT inside
+// a subquery) is refused: the check cannot say where the rows would be.
+func checkInputData(sql string, toks []rawToken) error {
+	n := len(toks)
+	if n > 0 && toks[n-1].Span.Start == toks[n-1].Span.End {
+		n--
+	}
+	if n >= 3 && toks[n-2].TokenType == "FORMAT" && toks[n-1].Text != "" && isWordStart(toks[n-1].Text) && hasTokenType(toks[:n-2], "SELECT") {
+		if tail := sql[toks[n-1].Span.End:]; !isStreamedDataTail(tail) {
+			return fmt.Errorf("%w: lost input() data %q, added nothing", ErrNotRegeneratedFaithfully, tail)
+		}
+		return nil
+	}
+	if hasTokenType(toks[:n], "FORMAT") {
+		return fmt.Errorf("%w: input() data position unknown: a FORMAT token does not end the statement", ErrNotRegeneratedFaithfully)
+	}
+	return nil
+}
+
+func hasTokenType(toks []rawToken, typ string) bool {
+	for _, tk := range toks {
+		if tk.TokenType == typ {
+			return true
 		}
 	}
-	return sql
+	return false
 }
 
 // isStreamedDataTail reports whether the text after the FORMAT name of an
-// INSERT … SELECT that reads input() carries no rows: ClickHouse skips
-// [ \t]*\n? there and reads the rest as data, even blank lines and comments
-// (measured on 26.2 over HTTP: FORMAT CSV, CSV\n and CSV \t\n insert nothing,
-// while CSV\n \n and CSV \t\n\t\n insert a row, and FORMAT TSV -- c inserts
-// the row "-- c"). An empty text is the real client-streaming form, where the
-// rows arrive separately.
+// INSERT that reads input() carries no rows: ClickHouse skips [ \t]*\n? there
+// and reads the rest as data, even blank lines and comments (measured on 26.2
+// over HTTP: FORMAT CSV, CSV\n and CSV \t\n insert nothing, while CSV\n \n
+// and CSV \t\n\t\n insert a row, and FORMAT TSV -- c inserts the row "-- c";
+// the same holds after a UNION ALL). An empty text is the real
+// client-streaming form, where the rows arrive separately.
 func isStreamedDataTail(tail string) bool {
 	tail = strings.TrimLeft(tail, " \t")
 	return tail == "" || tail == "\n"
