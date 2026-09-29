@@ -13,37 +13,52 @@ func TestParseGrant(t *testing.T) {
 		hasOn       bool
 		structured  bool
 		privNames   []string
-		securable   string
+		securable   GrantSecurable
 		principals  []string
 		grantOption bool
 		marker      string
 	}{
 		{"GRANT SELECT ON db.t TO u", true, false, false, false, true, true,
-			[]string{"SELECT"}, "db.t", []string{"u"}, false, "GRANT SELECT ON db.t TO u"},
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, false, "GRANT SELECT ON db.t TO u"},
 		{"REVOKE SELECT ON db.t FROM u", true, true, false, false, true, true,
-			[]string{"SELECT"}, "db.t", []string{"u"}, false, "REVOKE SELECT ON db.t FROM u"},
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, false, "REVOKE SELECT ON db.t FROM u"},
 		{"GRANT SELECT, INSERT ON db.t TO u1, u2 WITH GRANT OPTION", true, false, false, false, true, true,
-			[]string{"SELECT", "INSERT"}, "db.t", []string{"u1", "u2"}, true, "GRANT SELECT, INSERT ON db.t TO u1, u2 WITH GRANT OPTION"},
+			[]string{"SELECT", "INSERT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u1", "u2"}, true, "GRANT SELECT, INSERT ON db.t TO u1, u2 WITH GRANT OPTION"},
 		{"GRANT SELECT ON db.* TO u", true, false, false, false, true, true,
-			[]string{"SELECT"}, "db.*", []string{"u"}, false, "GRANT SELECT ON db.* TO u"},
+			[]string{"SELECT"}, GrantSecurable{DB: "db", AllTables: true}, []string{"u"}, false, "GRANT SELECT ON db.* TO u"},
 		{"GRANT ALTER UPDATE ON db.t TO u", true, false, false, false, true, true,
-			[]string{"ALTER UPDATE"}, "db.t", []string{"u"}, false, "GRANT ALTER UPDATE ON db.t TO u"},
+			[]string{"ALTER UPDATE"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, false, "GRANT ALTER UPDATE ON db.t TO u"},
 		{"GRANT SELECT ON db.t TO CURRENT_USER", true, false, false, false, true, true,
-			[]string{"SELECT"}, "db.t", []string{"CURRENT_USER"}, false, "GRANT SELECT ON db.t TO CURRENT_USER"},
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"CURRENT_USER"}, false, "GRANT SELECT ON db.t TO CURRENT_USER"},
 		{"REVOKE GRANT OPTION FOR SELECT ON db.t FROM u", true, true, false, false, true, true,
-			[]string{"SELECT"}, "db.t", []string{"u"}, true, "REVOKE GRANT OPTION FOR SELECT ON db.t FROM u"},
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, true, "REVOKE GRANT OPTION FOR SELECT ON db.t FROM u"},
 		// ON CLUSTER stripped from the marker; structure intact.
 		{"GRANT SELECT ON db.t ON CLUSTER c TO u", true, false, false, false, true, true,
-			[]string{"SELECT"}, "db.t", []string{"u"}, false, "GRANT SELECT ON db.t TO u"},
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, false, "GRANT SELECT ON db.t TO u"},
 		// CURRENT GRANTS parses as a privilege (handler rejects it).
 		{"GRANT CURRENT GRANTS ON db.t TO u", true, false, false, false, true, true,
-			[]string{"CURRENT GRANTS"}, "db.t", []string{"u"}, false, "GRANT CURRENT GRANTS ON db.t TO u"},
+			[]string{"CURRENT GRANTS"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, false, "GRANT CURRENT GRANTS ON db.t TO u"},
 		// Unstructured forms — flags set, generic parse skipped.
-		{"ATTACH GRANT SELECT ON db.t TO u", true, false, true, false, true, false, nil, "db.t", nil, false, ""},
-		{"GRANT SELECT ON db.t TO u WITH REPLACE OPTION", true, false, false, true, true, false, nil, "db.t", nil, false, ""},
-		{"GRANT role1 TO u", true, false, false, false, false, false, nil, "", nil, false, ""},
+		{"ATTACH GRANT SELECT ON db.t TO u", true, false, true, false, true, false, nil, GrantSecurable{DB: "db", Table: "t"}, nil, false, ""},
+		{"GRANT SELECT ON db.t TO u WITH REPLACE OPTION", true, false, false, true, true, false, nil, GrantSecurable{DB: "db", Table: "t"}, nil, false, ""},
+		{"GRANT role1 TO u", true, false, false, false, false, false, nil, GrantSecurable{}, nil, false, ""},
+		// The ON target is decoded by identity: a quoted `db.t` is one table
+		// name, and the marker keeps it quoted.
+		{"GRANT SELECT ON `db.t` TO u", true, false, false, false, true, true,
+			[]string{"SELECT"}, GrantSecurable{Table: "db.t"}, []string{"u"}, false, "GRANT SELECT ON `db.t` TO u"},
+		{"REVOKE SELECT ON db.`t.x` FROM u", true, true, false, false, true, true,
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t.x"}, []string{"u"}, false, "REVOKE SELECT ON db.`t.x` FROM u"},
+		{"GRANT SELECT ON `db`.`t` TO u", true, false, false, false, true, true,
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "t"}, []string{"u"}, false, "GRANT SELECT ON db.t TO u"},
+		{"GRANT SELECT ON * TO u", true, false, false, false, true, true,
+			[]string{"SELECT"}, GrantSecurable{AllTables: true}, []string{"u"}, false, "GRANT SELECT ON * TO u"},
+		{"GRANT SELECT ON *.* TO u", true, false, false, false, true, true,
+			[]string{"SELECT"}, GrantSecurable{AnyDatabase: true, AllTables: true}, []string{"u"}, false, "GRANT SELECT ON *.* TO u"},
+		// A quoted '*' is a name, not a wildcard; the handler refuses it.
+		{"GRANT SELECT ON db.`*` TO u", true, false, false, false, true, true,
+			[]string{"SELECT"}, GrantSecurable{DB: "db", Table: "*", Unrepresentable: true}, []string{"u"}, false, "GRANT SELECT ON db.`*` TO u"},
 		// Not a grant.
-		{"SELECT 1", false, false, false, false, false, false, nil, "", nil, false, ""},
+		{"SELECT 1", false, false, false, false, false, false, nil, GrantSecurable{}, nil, false, ""},
 	}
 	for _, c := range cases {
 		got, err := ParseGrant(e, c.sql)

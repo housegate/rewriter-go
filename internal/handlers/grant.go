@@ -40,7 +40,13 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 	}
 	resp := newGrantResp(stmt)
 	siSel := nameresolve.FindActive(opts)
-	origDB, origTable, scopeDatabase, anyDatabase := splitSecurable(gp.Securable)
+	// The ON target is decoded by identity (engine.GrantSecurable), never
+	// flattened to "db.table" and re-split: `db1.t` names the table "db1.t"
+	// in the current database.
+	sec := gp.Securable
+	origDB, origTable := sec.DB, sec.Table
+	scopeDatabase := sec.AllTables && !sec.AnyDatabase
+	anyDatabase := sec.AnyDatabase
 	effectiveScopeDB := origDB
 	if effectiveScopeDB == "" && scopeDatabase && siSel.Mode == nameresolve.ModeDynamic {
 		effectiveScopeDB = siSel.Dynamic.GetUpstreamLogicalDatabaseInContext()
@@ -107,6 +113,13 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 		return resp, true, nil
 	}
 
+	if sec.Unrepresentable {
+		// A quoted name containing '*' (db1.`*`, `db1.*`) is one table or
+		// database to ClickHouse, but a delta consumer could read it as a
+		// wildcard: refuse rather than widen it.
+		rejectUnsupported(resp, kw+" target names a database or table whose name contains '*', which a privilege delta cannot represent")
+		return resp, true, nil
+	}
 	if anyDatabase {
 		rejectUnsupported(resp, kw+" ON *.* (global scope) is not supported")
 		return resp, true, nil
@@ -206,23 +219,4 @@ func buildGrantees(resp *pb.RewriteSQLResponse, kw string, principals []string) 
 		return nil, false
 	}
 	return out, true
-}
-
-// splitSecurable parses polyglot's flat securable ("db.t" / "db.*" / "*.*" / "t")
-// into (database, table, scopeDatabase, anyDatabase). The table part "*" means
-// ON db.* (SCOPE_DATABASE); the database part "*" means ON *.* (global, rejected).
-// Splits on the LAST dot so a single-segment name is a bare table.
-func splitSecurable(s string) (db, table string, scopeDatabase, anyDatabase bool) {
-	if dot := strings.LastIndexByte(s, '.'); dot >= 0 {
-		db, table = s[:dot], s[dot+1:]
-	} else {
-		table = s
-	}
-	if db == "*" {
-		return db, table, false, true
-	}
-	if table == "*" {
-		return db, "", true, false
-	}
-	return db, table, false, false
 }

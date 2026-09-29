@@ -1434,7 +1434,7 @@ func TestRawTableRefs_nonWriteCommand(t *testing.T) {
 func TestSpliceRawTables_rename(t *testing.T) {
 	e := newTestEngine(t)
 	orig := "RENAME TABLE db.a TO db.b"
-	out, err := SpliceRawTables(e, orig, map[string]string{"db.a": "phys.a1", "db.b": "phys.b1"})
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{{DB: "db", Table: "a"}: "phys.a1", {DB: "db", Table: "b"}: "phys.b1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1446,7 +1446,7 @@ func TestSpliceRawTables_rename(t *testing.T) {
 func TestSpliceRawTables_alterUpdate(t *testing.T) {
 	e := newTestEngine(t)
 	orig := "ALTER TABLE db.t UPDATE x = 1 WHERE y = 2"
-	out, err := SpliceRawTables(e, orig, map[string]string{"db.t": "phys.t1"})
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{{DB: "db", Table: "t"}: "phys.t1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1458,7 +1458,7 @@ func TestSpliceRawTables_alterUpdate(t *testing.T) {
 func TestSpliceRawTables_exchange(t *testing.T) {
 	e := newTestEngine(t)
 	orig := "EXCHANGE TABLES db.a AND db.b"
-	out, err := SpliceRawTables(e, orig, map[string]string{"db.a": "p.a", "db.b": "p.b"})
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{{DB: "db", Table: "a"}: "p.a", {DB: "db", Table: "b"}: "p.b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1472,7 +1472,7 @@ func TestSpliceRawTables_partialRewriteOnly(t *testing.T) {
 	// validation pass may rewrite only some targets).
 	e := newTestEngine(t)
 	orig := "RENAME TABLE db.a TO db.b"
-	out, err := SpliceRawTables(e, orig, map[string]string{"db.a": "phys.a1"})
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{{DB: "db", Table: "a"}: "phys.a1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1485,7 +1485,7 @@ func TestSpliceRawTables_bareNameKey(t *testing.T) {
 	// Unqualified names key by bare table name.
 	e := newTestEngine(t)
 	orig := "RENAME TABLE a TO b"
-	out, err := SpliceRawTables(e, orig, map[string]string{"a": "phys.a1", "b": "phys.b1"})
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{{Table: "a"}: "phys.a1", {Table: "b"}: "phys.b1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1499,15 +1499,43 @@ func TestSpliceRawTables_quotedSourceKeyMatches(t *testing.T) {
 	// backtick-quoted source name keys by its UNQUOTED identifier text.
 	e := newTestEngine(t)
 	orig := "RENAME TABLE `db`.`weird.name` TO plain"
-	out, err := SpliceRawTables(e, orig, map[string]string{
-		"db.weird.name": QuoteQualified("phys", "x"),
-		"plain":         QuoteQualified("phys", "y"),
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{
+		{DB: "db", Table: "weird.name"}: QuoteQualified("phys", "x"),
+		{Table: "plain"}:                QuoteQualified("phys", "y"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !sqlEq(t, e, out, "RENAME TABLE phys.x TO phys.y") {
 		t.Errorf("got %q", out)
+	}
+}
+
+func TestSpliceRawTables_quotedTwinIsItsOwnKey(t *testing.T) {
+	// `db.a` is one table named "db.a" (DB "", Table "db.a"); db.a is table a
+	// of db. Both write "db.a", so the map must be keyed by identity for each
+	// side to keep its own physical name.
+	e := newTestEngine(t)
+	orig := "EXCHANGE TABLES `db.a` AND db.a"
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{
+		{Table: "db.a"}:        QuoteQualified("phys", "db.db.a"),
+		{DB: "db", Table: "a"}: QuoteQualified("phys", "db.a"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "EXCHANGE TABLES phys.`db.db.a` AND phys.`db.a`" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestTableTargetIdentityDropsAlias(t *testing.T) {
+	got := TableTarget{DB: "db", Table: "a", Alias: "x"}.Identity()
+	if got != (TableTarget{DB: "db", Table: "a"}) {
+		t.Errorf("Identity() = %+v", got)
+	}
+	if (TableTarget{Table: "db.a"}).Identity() == (TableTarget{DB: "db", Table: "a"}).Identity() {
+		t.Error("the quoted twin and the qualified name share an identity")
 	}
 }
 
@@ -1545,9 +1573,9 @@ func TestSpliceRawTables_dottedDynamicNameQuoted(t *testing.T) {
 	// name and refs[0].Table would collapse to "tenant1".
 	e := newTestEngine(t)
 	orig := "RENAME TABLE db.a TO db.b"
-	out, err := SpliceRawTables(e, orig, map[string]string{
-		"db.a": QuoteQualified("testnet", "tenant1.a"),
-		"db.b": QuoteQualified("testnet", "tenant1.b"),
+	out, err := SpliceRawTables(e, orig, map[TableTarget]string{
+		{DB: "db", Table: "a"}: QuoteQualified("testnet", "tenant1.a"),
+		{DB: "db", Table: "b"}: QuoteQualified("testnet", "tenant1.b"),
 	})
 	if err != nil {
 		t.Fatal(err)

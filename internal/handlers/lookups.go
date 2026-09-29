@@ -98,13 +98,17 @@ type stringLookupDecision struct {
 
 // decideStringLookup returns the resolved rewrite of a hasColumnInTable call,
 // or refuse=true when its pair is non-literal, storage-integrity Active, or
-// otherwise unresolvable.
+// otherwise unresolvable. The database and table literals are resolved as the
+// two separate names ClickHouse reads (call.DB, call.Table), never joined and
+// re-split: a literal that is empty or contains a '.' is refused, because
+// re-splitting 'db1.t', 'x' would resolve db1 / t.x, a table ClickHouse does
+// not read.
 func decideStringLookup(call engine.StringLookup, sel nameresolve.Selection) (stringLookupDecision, bool) {
-	if !call.Literal || call.Arg == "" {
+	if !isHasColumnInTable(call.Function) || !call.Literal {
 		return stringLookupDecision{}, true
 	}
-	db, table := splitQualifiedArg(call.Arg)
-	if table == "" {
+	db, table := call.DB, call.Table
+	if db == "" || table == "" || strings.Contains(db, ".") || strings.Contains(table, ".") {
 		return stringLookupDecision{}, true
 	}
 	if _, _, ok := nameresolve.LookupStorageIntegrity(db, table, sel.Dynamic); ok {
@@ -121,17 +125,6 @@ func decideStringLookup(call engine.StringLookup, sel nameresolve.Selection) (st
 
 func isHasColumnInTable(name string) bool {
 	return strings.HasPrefix(strings.ToLower(name), "hascolumnintable")
-}
-
-// splitQualifiedArg splits "db.table" on the FIRST '.' — the same convention
-// stringLookupDatabase and every other qualified-name split in this codebase
-// uses, so a table name that itself contains a dot is never mis-split.
-func splitQualifiedArg(arg string) (db, table string) {
-	idx := strings.IndexByte(arg, '.')
-	if idx < 0 {
-		return "", arg
-	}
-	return arg[:idx], arg[idx+1:]
 }
 
 func stringLookupUnresolvedMessage(call engine.StringLookup) string {
