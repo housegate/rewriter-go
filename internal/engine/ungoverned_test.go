@@ -86,6 +86,11 @@ func TestExpressionPositionHasReads(t *testing.T) {
 		"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN db1.p":                              true,
 		"ALTER TABLE db1.o REPLACE PARTITION tuple() FROM db1.p":                               true,
 		"SELECT * FROM db1.o WHERE a IN db1.p":                                                 false,
+		// A view's typed column list lives in create_view.schema.
+		"CREATE VIEW db1.v (a UInt8 DEFAULT a IN db1.p) AS SELECT 1 AS a":                                   true,
+		"CREATE MATERIALIZED VIEW db1.mv (a UInt8 ALIAS 1 IN db1.p) ENGINE = Memory AS SELECT 1":            true,
+		"CREATE MATERIALIZED VIEW db1.mv TO db1.o (a UInt8 MATERIALIZED (SELECT 1 FROM db1.p)) AS SELECT 1": true,
+		"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT 1 IN (1, 2)) ENGINE = Memory AS SELECT 1":         false,
 	} {
 		ast, err := e.ParseOne(sql)
 		if err != nil {
@@ -276,6 +281,65 @@ func TestCreateHeaderHasInnerStorage(t *testing.T) {
 	} {
 		if got := CreateHeaderHasInnerStorage(e, sql); got != want {
 			t.Errorf("CreateHeaderHasInnerStorage(%q) = %v, want %v", sql, got, want)
+		}
+	}
+}
+
+// TestViewColumnListRawTexts pins that the opaque column-list items of a
+// CREATE VIEW are returned as their source text, paired with the parsed items
+// one to one, and that a list the scan cannot pair fails closed.
+func TestViewColumnListRawTexts(t *testing.T) {
+	e := newTestEngine(t)
+	for _, c := range []struct {
+		sql     string
+		want    []string
+		wantErr bool
+	}{
+		{sql: "CREATE MATERIALIZED VIEW db1.mv (a UInt8, INDEX i a IN phys.x TYPE minmax) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a",
+			want: []string{"INDEX i a IN phys.x TYPE minmax"}},
+		{sql: "CREATE MATERIALIZED VIEW db1.mv (a UInt8, b UInt8 DEFAULT 1, PROJECTION p (SELECT a, b ORDER BY a), INDEX i (a, b) TYPE set(0), PRIMARY KEY a) ENGINE = MergeTree AS SELECT 1 AS a",
+			want: []string{"PROJECTION p (SELECT a, b ORDER BY a)", "INDEX i (a, b) TYPE set(0)", "PRIMARY KEY a"}},
+		{sql: "CREATE MATERIALIZED VIEW IF NOT EXISTS db1.mv ON CLUSTER c TO db1.o (a UInt8, /* c, d */ INDEX i toString(a) TYPE bloom_filter) AS SELECT 1 AS a",
+			want: []string{"INDEX i toString(a) TYPE bloom_filter"}},
+		{sql: "CREATE OR REPLACE VIEW db1.v (a UInt8, INDEX i a TYPE minmax) AS SELECT 1 AS a", want: []string{"INDEX i a TYPE minmax"}},
+		// No raw item: nothing to return, and no tokenizing.
+		{sql: "CREATE VIEW db1.v (a UInt8 DEFAULT a IN phys.x) AS SELECT 1 AS a"},
+		{sql: "CREATE VIEW db1.v AS SELECT 1 AS a"},
+		{sql: "CREATE TABLE db1.n (a UInt8, INDEX i a IN phys.x TYPE minmax) ENGINE = Memory"},
+		// A view or TO target named like a clause keyword is a name.
+		{sql: "CREATE VIEW engine (a UInt8, INDEX i a TYPE minmax) AS SELECT 1 AS a", want: []string{"INDEX i a TYPE minmax"}},
+		{sql: "CREATE MATERIALIZED VIEW IF NOT EXISTS as TO engine (a UInt8, INDEX i a TYPE minmax) AS SELECT 1 AS a", want: []string{"INDEX i a TYPE minmax"}},
+	} {
+		ast, err := e.ParseOne(c.sql)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", c.sql, err)
+		}
+		got, err := ViewColumnListRawTexts(e, ast, c.sql)
+		if (err != nil) != c.wantErr {
+			t.Fatalf("ViewColumnListRawTexts(%s) err = %v, wantErr %v", c.sql, err, c.wantErr)
+		}
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("ViewColumnListRawTexts(%s) = %q, want %q", c.sql, got, c.want)
+		}
+	}
+}
+
+// TestViewColumnListRawTextsFailsClosed pins that a column list the token
+// scan cannot pair with the parsed items is an error, never a guess.
+func TestViewColumnListRawTextsFailsClosed(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("CREATE VIEW db1.v (a UInt8, INDEX i a TYPE minmax) AS SELECT 1 AS a")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, sql := range []string{
+		"CREATE VIEW db1.v (a UInt8, b UInt8, INDEX i a TYPE minmax) AS SELECT 1 AS a", // one item more
+		"CREATE VIEW db1.v AS SELECT (a, b)",                                           // no list before AS
+		"CREATE VIEW db1.v (a UInt8, INDEX i a TYPE minmax",                            // unterminated
+		"CREATE VIEW db1.v (a UInt8, , INDEX i a TYPE minmax) AS SELECT 1 AS a",        // empty item
+	} {
+		if got, err := ViewColumnListRawTexts(e, ast, sql); err == nil {
+			t.Errorf("ViewColumnListRawTexts(%q) = %q, want an error", sql, got)
 		}
 	}
 }

@@ -74,7 +74,7 @@ func CollectDatabaseReferenceSets(e Engine, ast AST, sql string) (all, blind []s
 				add(tt.DB)
 			}
 		}
-		if err := addOpaqueAlterDatabases(e, ast, add); err != nil {
+		if err := addOpaqueAlterDatabases(e, ast, sql, add); err != nil {
 			return nil, nil, err
 		}
 		return all, blind, nil
@@ -97,7 +97,7 @@ func CollectDatabaseReferenceSets(e Engine, ast AST, sql string) (all, blind []s
 	}); err != nil {
 		return nil, nil, err
 	}
-	if err := addOpaqueAlterDatabases(e, ast, add); err != nil {
+	if err := addOpaqueAlterDatabases(e, ast, sql, add); err != nil {
 		return nil, nil, err
 	}
 	// String-lookup arguments are ordinary scalar function calls, not
@@ -108,12 +108,13 @@ func CollectDatabaseReferenceSets(e Engine, ast AST, sql string) (all, blind []s
 }
 
 // addOpaqueAlterDatabases adds the qualifier of every qualified name in the
-// statement's opaque ALTER text (spec 2026-09-26 R2), so a protected database
-// named in an ALTER … UPDATE tail or a Raw ALTER action is refused with the
-// protected-database message before the tail is refused as ungoverned. A
-// tokenizer failure is an error the caller seals as UnsupportedStatement.
-func addOpaqueAlterDatabases(e Engine, ast AST, add func(string)) error {
-	texts, err := OpaqueAlterTexts(ast)
+// statement's opaque text (spec 2026-09-26 R2), so a protected database
+// named in an ALTER … UPDATE tail, a Raw ALTER action or an opaque CREATE VIEW
+// column-list item is refused with the protected-database message before the
+// text is refused as ungoverned. A tokenizer failure is an error the caller
+// seals as UnsupportedStatement.
+func addOpaqueAlterDatabases(e Engine, ast AST, sql string, add func(string)) error {
+	texts, err := OpaqueStatementTexts(e, ast, sql)
 	if err != nil {
 		return err
 	}
@@ -616,14 +617,21 @@ func CollectCommandTextFindings(e Engine, text string) (CommandTextFindings, boo
 // (b)) for a lookup-family call. Unlike a `command` node's own text (see
 // CollectCommandTextFindings), a Raw action is never an EXISTS/SHOW
 // CREATE/DESCRIBE target, so there is nothing to share a tokenize call with
-// here. ok=false (fail closed) on any tokenizer failure.
-func CollectRawActionStringLookupCalls(e Engine, ast AST) (calls []StringLookup, ok bool) {
+// here. The opaque column-list items of a CREATE VIEW (ViewColumnListRawTexts,
+// located in sql) are scanned the same way. ok=false (fail closed) on any
+// tokenizer failure.
+func CollectRawActionStringLookupCalls(e Engine, ast AST, sql string) (calls []StringLookup, ok bool) {
 	var root any
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return nil, false
 	}
 	var texts []string
 	collectRawActionTexts(root, &texts)
+	view, err := ViewColumnListRawTexts(e, ast, sql)
+	if err != nil {
+		return nil, false
+	}
+	texts = append(texts, view...)
 	for _, text := range texts {
 		toks, terr := tokenizeRaw(e, text)
 		if terr != nil {

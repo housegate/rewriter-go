@@ -160,7 +160,7 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 	// DEFAULT … action) is likewise opaque text with no structured
 	// "function" node — scanned the same way, independent of the command
 	// node case above (a Raw action is never itself a command node).
-	rawActionLookups, raOK := engine.CollectRawActionStringLookupCalls(e, ast)
+	rawActionLookups, raOK := engine.CollectRawActionStringLookupCalls(e, ast, sql)
 	if !raOK {
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
@@ -240,7 +240,7 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 			return rejected, err
 		}
 	}
-	if rejected, err := rejectOpaqueReservedQualifiers(e, ast, sel, resp); err != nil || rejected {
+	if rejected, err := rejectOpaqueReservedQualifiers(e, ast, sql, sel, resp); err != nil || rejected {
 		return rejected, err
 	}
 	reads, err := engine.ExpressionPositionHasReads(ast)
@@ -251,7 +251,7 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
 		return true, nil
 	}
-	texts, err := engine.OpaqueAlterTexts(ast)
+	texts, err := engine.OpaqueStatementTexts(e, ast, sql)
 	if err != nil {
 		return false, err
 	}
@@ -356,7 +356,7 @@ func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, sql string, resp 
 			texts = append(texts, text)
 		}
 	} else {
-		opaque, oerr := engine.OpaqueAlterTexts(ast)
+		opaque, oerr := engine.OpaqueStatementTexts(e, ast, sql)
 		if oerr != nil {
 			return false, oerr
 		}
@@ -455,17 +455,18 @@ func commandClassModelled(e engine.Engine, ast engine.AST, sql string, sel namer
 
 // rejectOpaqueReservedQualifiers refuses a storage-integrity physical or
 // reserved database (hg_safe / hg_unsafe / hg_promote) named by a qualified
-// name in opaque text — an ALTER … UPDATE tail, a Raw ALTER action, or the
-// query text polyglot leaves after an INSERT column list — while the SI
+// name in opaque text — an ALTER … UPDATE tail, a Raw ALTER action, an opaque
+// CREATE VIEW column-list item, or the query text polyglot leaves after an
+// INSERT column list — while the SI
 // surface is active (spec 2026-09-26 residual round 3). T3 defers those names
 // to the SI handlers, which never see opaque text, so the refusal carries the
 // SI handlers' physical-name message here. With the surface inactive T3
 // already refused them as protected databases.
-func rejectOpaqueReservedQualifiers(e engine.Engine, ast engine.AST, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (bool, error) {
+func rejectOpaqueReservedQualifiers(e engine.Engine, ast engine.AST, sql string, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (bool, error) {
 	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		return false, nil
 	}
-	texts, err := engine.OpaqueAlterTexts(ast)
+	texts, err := engine.OpaqueStatementTexts(e, ast, sql)
 	if err != nil {
 		return false, err
 	}

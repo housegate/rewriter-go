@@ -56,8 +56,9 @@ func walkGenericExpression(node any, scope readSourceScope, visitor readSourceVi
 // IN-table operand, a table function or a namespace carrier — occurs in a
 // position no rewrite pipeline reaches (spec 2026-09-26 R2): a structured
 // UPDATE / DELETE statement's assignments, predicate and other clauses, an
-// INSERT's VALUES expressions, a CREATE TABLE / CREATE VIEW column,
-// constraint or non-engine storage property, and a structured ALTER action.
+// INSERT's VALUES expressions, a CREATE TABLE / CREATE VIEW column (a view's
+// typed column list is create_view.schema), constraint or non-engine storage
+// property, and a structured ALTER action.
 // Only an INSERT … SELECT / CTAS / CREATE VIEW body is rewritten, so a read
 // anywhere else would be forwarded unrewritten and unreported; the caller
 // refuses the statement instead.
@@ -90,7 +91,7 @@ func ExpressionPositionHasReads(ast AST) (bool, error) {
 			nonEngineProperties(body["properties"]), nonEngineProperties(body["post_table_properties"])}, scope, visitor)
 	case statementMap(root, NodeCreateView) != nil:
 		body := statementMap(root, NodeCreateView)
-		err = walkGenericExpression([]any{body["columns"], nonEngineProperties(body["table_properties"])}, scope, visitor)
+		err = walkGenericExpression([]any{body["columns"], body["schema"], nonEngineProperties(body["table_properties"])}, scope, visitor)
 	case statementMap(root, NodeAlterTable) != nil:
 		body := statementMap(root, NodeAlterTable)
 		err = walkGenericExpression([]any{body["actions"], body["partition"]}, scope, visitor)
@@ -152,6 +153,159 @@ func OpaqueAlterTexts(ast AST) ([]string, error) {
 	default:
 		return nil, nil
 	}
+}
+
+// OpaqueStatementTexts returns every opaque text of a statement that the
+// T2 / T3 / T6 / R2 / R5 text scans must see: OpaqueAlterTexts, then
+// ViewColumnListRawTexts. sql must be the source text that produced ast.
+func OpaqueStatementTexts(e Engine, ast AST, sql string) ([]string, error) {
+	texts, err := OpaqueAlterTexts(ast)
+	if err != nil {
+		return nil, err
+	}
+	view, err := ViewColumnListRawTexts(e, ast, sql)
+	if err != nil {
+		return nil, err
+	}
+	return append(texts, view...), nil
+}
+
+// ViewColumnListRawTexts returns, for a CREATE [OR REPLACE] [MATERIALIZED]
+// VIEW, the source text of every column-list item Polyglot keeps as an opaque
+// raw node: an INDEX, a PROJECTION, a PRIMARY KEY. ClickHouse accepts them in
+// a view's column list exactly as in a CREATE TABLE one (measured on 26.2: an
+// `INDEX i a IN phys.x TYPE minmax` resolves phys.x at CREATE time, and a
+// `PROJECTION p (SELECT a IN phys.x …)` is accepted), so they are scanned
+// like opaque ALTER text (spec 2026-09-26 R2). The source text is used, not
+// the raw node's: for an INDEX over anything but a bare column the pinned
+// Polyglot stores the Rust debug form of the parsed expression, which names
+// no table the text scans can see.
+//
+// The items are located in sql's token stream: the column list is the first
+// depth-0 parenthesis group of the header (before any depth-0 AS, ENGINE,
+// POPULATE, EMPTY, SELECT or WITH keyword outside a name position), split at
+// its depth-1 commas, and
+// paired one to one with create_view.schema.expressions. A statement without
+// a raw item returns nothing without tokenizing. A tokenizer failure, a
+// missing list or an item count that differs from the AST's is an error the
+// caller seals as UnsupportedStatement (fail closed).
+func ViewColumnListRawTexts(e Engine, ast AST, sql string) ([]string, error) {
+	kind, body, _, err := bodyOf(ast)
+	if err != nil {
+		return nil, err
+	}
+	if kind != NodeCreateView {
+		return nil, nil
+	}
+	schema, _ := body["schema"].(map[string]any)
+	items, _ := schema["expressions"].([]any)
+	var rawAt []int
+	for i, item := range items {
+		if m, ok := item.(map[string]any); ok {
+			if _, isRaw := m["raw"]; isRaw {
+				rawAt = append(rawAt, i)
+			}
+		}
+	}
+	if len(rawAt) == 0 {
+		return nil, nil
+	}
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, fmt.Errorf("engine: tokenize view column list: %w", err)
+	}
+	spans, ok := viewColumnListItemSpans(toks)
+	if !ok || len(spans) != len(items) {
+		return nil, fmt.Errorf("engine: view column list does not match its parsed items")
+	}
+	texts := make([]string, 0, len(rawAt))
+	for _, i := range rawAt {
+		start, end := spans[i][0], spans[i][1]
+		if start < 0 || end <= start || end > len(sql) {
+			return nil, fmt.Errorf("engine: view column list item out of range")
+		}
+		texts = append(texts, sql[start:end])
+	}
+	return texts, nil
+}
+
+// viewColumnListItemSpans returns the byte span of every depth-1
+// comma-separated item of a CREATE VIEW header's column list (see
+// ViewColumnListRawTexts). ok=false when the header has no such group, the
+// group is unterminated, or an item is empty.
+func viewColumnListItemSpans(toks []rawToken) (spans [][2]int, ok bool) {
+	open := -1
+	depth := 0
+	for i, tok := range toks {
+		switch tok.TokenType {
+		case "L_PAREN", "L_BRACKET":
+			if depth == 0 && tok.TokenType == "L_PAREN" {
+				open = i
+			}
+			depth++
+		case "R_PAREN", "R_BRACKET":
+			depth--
+		default:
+			if depth == 0 && opaqueKeyword(tok) && !viewHeaderNamePosition(toks, i) {
+				switch strings.ToUpper(tok.Text) {
+				case "AS", "ENGINE", "POPULATE", "EMPTY", "SELECT", "WITH":
+					return nil, false
+				}
+			}
+		}
+		if open >= 0 {
+			break
+		}
+	}
+	if open < 0 {
+		return nil, false
+	}
+	depth = 0
+	start := open + 1
+	for i := open; i < len(toks); i++ {
+		switch toks[i].TokenType {
+		case "L_PAREN", "L_BRACKET":
+			depth++
+		case "R_PAREN", "R_BRACKET":
+			depth--
+			if depth == 0 {
+				if start >= i {
+					return nil, false
+				}
+				return append(spans, [2]int{toks[start].Span.Start, toks[i-1].Span.End}), true
+			}
+		case "COMMA":
+			if depth == 1 {
+				if start >= i {
+					return nil, false
+				}
+				spans = append(spans, [2]int{toks[start].Span.Start, toks[i-1].Span.End})
+				start = i + 1
+			}
+		}
+	}
+	return nil, false
+}
+
+// viewHeaderNamePosition reports a header token that can only be a name: the
+// one after VIEW, EXISTS, TO or CLUSTER, or after a dot. A view or TO target
+// named `engine` or `as` is not a clause keyword there.
+func viewHeaderNamePosition(toks []rawToken, i int) bool {
+	if i == 0 {
+		return false
+	}
+	prev := toks[i-1]
+	if prev.TokenType == "DOT" {
+		return true
+	}
+	if !opaqueKeyword(prev) {
+		return false
+	}
+	switch strings.ToUpper(prev.Text) {
+	case "VIEW", "EXISTS", "TO", "CLUSTER":
+		return true
+	}
+	return false
 }
 
 // OpaqueTextQualifiedNames returns, in token order, every `db.table` run in
@@ -430,9 +584,14 @@ func opaqueCrossTableAction(segment []rawToken) bool {
 }
 
 // opaqueProjectionBody reports an `ADD PROJECTION [IF NOT EXISTS] name (SELECT
-// …)` action: ClickHouse's projection grammar has no FROM clause, so its
-// SELECT reads only the altered table itself and is not a subquery.
+// …)` action, or a `PROJECTION name (SELECT …)` column-list item of a CREATE
+// VIEW: ClickHouse's projection grammar has no FROM clause, so its
+// SELECT reads only the table (or the view's storage) it belongs to and is
+// not a subquery.
 func opaqueProjectionBody(toks []rawToken) bool {
+	if len(toks) >= 2 && strings.EqualFold(toks[0].Text, "PROJECTION") {
+		return true // a CREATE VIEW column-list item (ViewColumnListRawTexts)
+	}
 	return len(toks) >= 3 && strings.EqualFold(toks[0].Text, "ADD") && strings.EqualFold(toks[1].Text, "PROJECTION")
 }
 

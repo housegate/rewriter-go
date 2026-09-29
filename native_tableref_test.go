@@ -3057,3 +3057,196 @@ func TestTableRef_UnresolvedNameDoesNotStripSIWriteRefusalMap(t *testing.T) {
 		}
 	}
 }
+
+// TestTableRef_ViewColumnListIsWalkedLikeATable pins that a view's column
+// list is governed by the same rules as a CREATE TABLE column list (spec
+// 2026-09-26 R2 / T2 / T3 / T5). Polyglot keeps a view's column definitions
+// under create_view.schema (a CREATE TABLE keeps them under columns /
+// constraints), and an INDEX / PROJECTION / PRIMARY KEY item as an opaque raw
+// node, so the walker used to skip the whole list: `CREATE MATERIALIZED VIEW
+// db1.mv (a UInt8 DEFAULT a IN phys.x) ENGINE = Memory AS …` answered Success.
+// Measured on ClickHouse 26.2, a view or materialized view accepts an
+// IN-table operand in a column DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL /
+// TTL expression, an INDEX expression and a PROJECTION select list: the table
+// is resolved at CREATE time (an unknown table fails the CREATE), and an ALIAS
+// column reads it on every SELECT. Every row's answer is the one the same
+// column list gets in a CREATE TABLE, which the test pins alongside.
+func TestTableRef_ViewColumnListIsWalkedLikeATable(t *testing.T) {
+	const (
+		t7    = "statement is not supported"
+		t2    = "query parameters are not supported in a database or table position"
+		siPhy = "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+	)
+	t3 := func(db string) string { return "protected database " + db + " is not addressable" }
+	type answer struct {
+		code pb.RewriteCode
+		msg  string
+	}
+	inv := func(msg string) answer { return answer{pb.RewriteCode_InvalidRewriteRequest, msg} }
+	uns := func(msg string) answer { return answer{pb.RewriteCode_UnsupportedStatement, msg} }
+	rows := []struct {
+		col     string
+		off, on answer // SI surface inactive / active
+	}{
+		{"a UInt8 DEFAULT (SELECT count() FROM phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 DEFAULT (SELECT count() FROM hg_safe.db1__t)", inv(t3("hg_safe")), uns(siPhy)},
+		{"a UInt8 DEFAULT (SELECT count() FROM db1.p)", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT (SELECT count() FROM db1.t)", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT (SELECT count() FROM `db2.x`)", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT (SELECT count() FROM {p:Identifier})", inv(t2), inv(t2)},
+		{"a UInt8 DEFAULT (SELECT count() FROM remote('127.0.0.1','phys','x'))", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 DEFAULT (SELECT count() FROM merge('phys','^x'))", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 DEFAULT (SELECT count() FROM remote('127.0.0.1','db1','x'))", uns("table function remote is not accepted"),
+			uns("storage-integrity logical database db1 is not directly addressable through remote table function")},
+		{"a UInt8 DEFAULT (SELECT count() FROM numbers(10))", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT 1 IN phys.x", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 DEFAULT 1 IN `db2.x`", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT 1 IN (SELECT a FROM db1.p)", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT 1 IN {p:Identifier}", inv(t2), inv(t2)},
+		{"a UInt8 DEFAULT 1 IN hg_safe.db1__t", inv(t3("hg_safe")), uns(siPhy)},
+		{"a UInt8 DEFAULT 1 IN db1.t", uns(t7), uns("storage-integrity table db1.t is not directly addressable through IN table target")},
+		{"a UInt8 DEFAULT 1 IN `db1.t`", uns(t7), uns(t7)},
+		{"a UInt8 DEFAULT in(1, phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 MATERIALIZED (SELECT count() FROM phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 MATERIALIZED (SELECT count() FROM {p:Identifier})", inv(t2), inv(t2)},
+		{"a UInt8 MATERIALIZED (SELECT count() FROM db1.p)", uns(t7), uns(t7)},
+		{"a UInt8 MATERIALIZED 1 IN db1.p", uns(t7), uns("storage-integrity logical database db1 is not directly addressable through IN table target")},
+		{"a UInt8 ALIAS (SELECT count() FROM phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 ALIAS (SELECT count() FROM hg_safe.db1__t)", inv(t3("hg_safe")), uns(siPhy)},
+		{"a UInt8 ALIAS (SELECT count() FROM remote('127.0.0.1','phys','x'))", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 ALIAS (SELECT count() FROM db1.p)", uns(t7), uns(t7)},
+		{"a UInt8 ALIAS 1 IN phys.x", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 EPHEMERAL (SELECT count() FROM phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, d DateTime TTL d + INTERVAL (SELECT count() FROM phys.x) DAY", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, b UInt8 DEFAULT (SELECT count() FROM phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		// Opaque INDEX / PROJECTION items: Polyglot keeps them as raw text.
+		{"a UInt8, INDEX i a IN phys.x TYPE minmax", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, INDEX i a IN (SELECT a FROM phys.x) TYPE minmax", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, INDEX i (a IN phys.x) TYPE set(0)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, INDEX i a IN {p:Identifier} TYPE minmax", inv(t2), inv(t2)},
+		{"a UInt8, INDEX i a IN `db2.x` TYPE minmax", uns(t7), uns(t7)},
+		{"a UInt8, PROJECTION p (SELECT a IN phys.x ORDER BY a)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, PROJECTION p (SELECT a FROM phys.x)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8, PROJECTION p (SELECT a IN {p:Identifier} ORDER BY a)", inv(t2), inv(t2)},
+		{"a UInt8, PROJECTION p (SELECT a IN hg_safe.db1__t ORDER BY a)", inv(t3("hg_safe")), uns(siPhy)},
+		// Already refused before this fix (string lookups are found anywhere).
+		{"a UInt8 DEFAULT joinGet('phys.x', 'a', 1)", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 DEFAULT hasColumnInTable('phys', 'x', 'a')", inv(t3("phys")), inv(t3("phys"))},
+		{"a UInt8 DEFAULT dictGet('db1.d', 'a', toUInt64(1))", inv(`dictGet target "db1.d" does not resolve through the caller's databases`),
+			inv(`dictGet target "db1.d" does not resolve through the caller's databases`)},
+	}
+	views := []string{
+		"CREATE VIEW db1.v (%s) AS SELECT 1 AS a",
+		"CREATE OR REPLACE VIEW db1.v (%s) AS SELECT 1 AS a",
+		"CREATE MATERIALIZED VIEW db1.mv (%s) ENGINE = Memory AS SELECT 1 AS a",
+		"CREATE MATERIALIZED VIEW db1.mv (%s) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a",
+		"CREATE MATERIALIZED VIEW db1.mv TO db1.o (%s) AS SELECT 1 AS a",
+		"CREATE MATERIALIZED VIEW db1.mv (%s) ENGINE = Memory POPULATE AS SELECT 1 AS a",
+		"CREATE MATERIALIZED VIEW IF NOT EXISTS db1.mv ON CLUSTER c (%s) ENGINE = Memory AS SELECT 1 AS a",
+	}
+	e := newEngine(t)
+	check := func(t *testing.T, sql string, si bool, want answer) {
+		t.Helper()
+		resp, err := doRewrite(e, sql, tablerefOpts(si))
+		if err != nil {
+			t.Fatalf("doRewrite: %v", err)
+		}
+		if resp.GetCode() != want.code || resp.GetMessage() != want.msg {
+			t.Fatalf("got %s %q, want %s %q", resp.GetCode(), resp.GetMessage(), want.code, want.msg)
+		}
+		if resp.GetSqlAfterRewrite() != sql {
+			t.Fatalf("sql = %q, want the input echoed", resp.GetSqlAfterRewrite())
+		}
+	}
+	for _, si := range []bool{false, true} {
+		for _, r := range rows {
+			want := r.off
+			if si {
+				want = r.on
+			}
+			table := fmt.Sprintf("CREATE TABLE db1.n (%s) ENGINE = Memory", r.col)
+			t.Run(fmt.Sprintf("si=%v/%s", si, table), func(t *testing.T) { check(t, table, si, want) })
+			for _, tmpl := range views {
+				sql := fmt.Sprintf(tmpl, r.col)
+				t.Run(fmt.Sprintf("si=%v/%s", si, sql), func(t *testing.T) { check(t, sql, si, want) })
+			}
+		}
+	}
+}
+
+// TestTableRef_ViewColumnListReadFreeShapesStayAccepted pins that a view
+// column list without a read keeps its answer: Success, as for the same
+// CREATE TABLE column list. The generated SQL is pinned as it is today:
+// Polyglot's generator drops a view column's DEFAULT / MATERIALIZED / ALIAS /
+// CODEC / COMMENT clauses (a documented residual, see AGENTS.md).
+func TestTableRef_ViewColumnListReadFreeShapesStayAccepted(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, want string }{
+			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT 1) ENGINE = Memory AS SELECT 1 AS a",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8) ENGINE=Memory AS SELECT 1 AS a`},
+			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT (SELECT 1)) ENGINE = Memory AS SELECT 1 AS a",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8) ENGINE=Memory AS SELECT 1 AS a`},
+			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8 MATERIALIZED 1 IN (1, 2)) ENGINE = Memory AS SELECT 1 AS a",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8) ENGINE=Memory AS SELECT 1 AS a`},
+			{"CREATE MATERIALIZED VIEW db1.mv TO db1.o (a UInt8 ALIAS 1 IN tuple(1, 2), b UInt8 CODEC(ZSTD(1))) AS SELECT 1 AS a",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.o" (a UInt8, b UInt8) AS SELECT 1 AS a`},
+			{"CREATE VIEW db1.v (a UInt8 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b",
+				`CREATE VIEW phys."db1.v" (a UInt8, b String) AS SELECT 1 AS a, 'b' AS b`},
+			{"CREATE VIEW db1.v (a, b) AS SELECT 1, 2",
+				`CREATE VIEW phys."db1.v" (a, b) AS SELECT 1, 2`},
+			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8, INDEX i a TYPE minmax) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8, INDEX i a TYPE minmax) ENGINE=MergeTree ORDER BY a AS SELECT 1 AS a`},
+			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8, b UInt8, PROJECTION p (SELECT a, b ORDER BY a)) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a, 2 AS b",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8, b UInt8, PROJECTION p (SELECT a, b ORDER BY a)) ENGINE=MergeTree ORDER BY a AS SELECT 1 AS a, 2 AS b`},
+			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8, PRIMARY KEY a) ENGINE = MergeTree AS SELECT 1 AS a",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8, PRIMARY KEY a) ENGINE=MergeTree AS SELECT 1 AS a`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ViewColumnListResiduals pins the view column-list answers that
+// differ from the same CREATE TABLE column list, and the view kinds refused
+// as a class whatever their column list holds.
+//
+//   - An INDEX / PROJECTION item is opaque text to the view pipeline, so a
+//     logical table it names reaches the R2 text refusal rather than the SI
+//     IN-target message a CREATE TABLE gets while the SI surface is active.
+//     Both refuse the statement.
+//   - Polyglot cannot parse a CONSTRAINT in a view's column list at all.
+//   - CREATE LIVE VIEW / WINDOW VIEW and CREATE DICTIONARY are refused as a
+//     class (a dictionary's attribute list is a CREATE TABLE column list to
+//     Polyglot, so T2 / T3 / R2 name it first).
+func TestTableRef_ViewColumnListResiduals(t *testing.T) {
+	const (
+		t7         = "statement is not supported"
+		liveWindow = "CREATE LIVE VIEW / WINDOW VIEW is not supported"
+	)
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		add := func(sql string, code pb.RewriteCode, msg string) {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: code, wantMsg: msg, wantSQL: sql})
+		}
+		add("CREATE MATERIALIZED VIEW db1.mv (a UInt8, PROJECTION p (SELECT a IN db1.p ORDER BY a)) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a",
+			pb.RewriteCode_UnsupportedStatement, t7)
+		add("CREATE MATERIALIZED VIEW db1.mv (a UInt8, INDEX i a IN db1.t TYPE minmax) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a",
+			pb.RewriteCode_UnsupportedStatement, t7)
+		cases = append(cases, tablerefCase{name: "view CONSTRAINT", si: si,
+			sql:      "CREATE MATERIALIZED VIEW db1.mv (a UInt8, CONSTRAINT c CHECK a IN phys.x) ENGINE = Memory AS SELECT 1 AS a",
+			wantCode: pb.RewriteCode_SyntaxError})
+		live := liveWindow
+		if si {
+			live = "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+		}
+		add("CREATE LIVE VIEW db1.lv (a UInt8, b UInt8 ALIAS a IN phys.x) AS SELECT 1 AS a", pb.RewriteCode_UnsupportedStatement, live)
+		add("CREATE WINDOW VIEW db1.wv (a UInt8, b UInt8 ALIAS a IN phys.x) ENGINE = Memory AS SELECT 1 AS a", pb.RewriteCode_UnsupportedStatement, liveWindow)
+		add("CREATE DICTIONARY db1.d (a UInt64, b UInt8 DEFAULT 0 EXPRESSION a IN phys.x) PRIMARY KEY a SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)",
+			pb.RewriteCode_InvalidRewriteRequest, "protected database phys is not addressable")
+		add("CREATE DICTIONARY db1.d (a UInt64, b UInt8 DEFAULT 0) PRIMARY KEY a SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)",
+			pb.RewriteCode_UnsupportedStatement, "CREATE DICTIONARY is not supported")
+	}
+	runTablerefCases(t, cases)
+}
