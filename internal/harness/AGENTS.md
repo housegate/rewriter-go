@@ -84,7 +84,7 @@ published corpus.
   clickhouse local --queries-file tmp/chparse.sql | grep '\\N$'
   ```
 
-  The only rows allowed to end in `\N` are the twelve pre-Spec-2026-09-26 cases whose inputs predate this rule and agree across engines: `si_reserved_column_star_rename{,_source}_rejected`, `si_with_offset{,_newline,_tab}_rejected`, `si_attach_grant_{physical,logical}_table_rejected`, `si_attach_safe_database_rejected`, `si_mixed_ordinary_with_offset_allowed`, `si_comma_si_with_offset_rejected`, `si_comma_ordinary_with_offset_allowed`, `si_create_live_view_over_si_rejected`.
+  The only rows allowed to end in `\N` are the six pre-Spec-2026-09-26 cases whose inputs predate this rule and agree across engines: `si_reserved_column_star_rename{,_source}_rejected`, `si_attach_grant_{physical,logical}_table_rejected`, `si_attach_safe_database_rejected`, `si_create_live_view_over_si_rejected`. The six `WITH OFFSET` cases left the corpus with the whole-statement parse gate: Polyglot never parsed `WITH OFFSET`, so the native engine now refuses them while rewriter-grpc answers through its compatibility shim; they are pinned in `native_parse_gate_test.go`.
 - A shape only one engine models (a Polyglot walk or generator limit, a top-level parenthesised `SELECT`) is engine-local. Pin it in that engine's own tests (`native_tableref_test.go` at the repository root), never in this corpus: spec 2026-09-26 §5 makes its outcome depend on "where the engine models the position".
 - The differential (`TestStorageIntegrityGolden` with `REWRITER_ORACLE_ADDR`) compares a rejection's `original_accessed_tables` only when the case pins `want_accessed` (spec §5: a rejection may report a partial list), the same rule the C++ runner applies. A success's list is always compared, in order.
 

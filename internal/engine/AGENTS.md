@@ -14,6 +14,7 @@
 | Write/DDL classification | `writes.go` | Structured vs raw write nodes and rewrite slots |
 | DB/global/grant/object helpers | `dblevel.go`, `global.go`, `grant.go`, `objtarget.go` | Statement-family AST handling; GRANT/REVOKE uses generic-dialect recovery |
 | Parser guard | `guard.go` | Bracket nesting limit before polyglot parse |
+| Whole-statement parse gate | `wholestmt.go` | `CheckParsedInFull`: refuse a statement Polyglot did not consume in full |
 | AST shape fixtures | `testdata/ast-shapes`, `characterize_test.go` | Snapshot corpus and its regeneration path |
 
 ## CONVENTIONS
@@ -35,6 +36,7 @@
 - Do not assume raw SQL and structured AST disagree safely. When polyglot loses object-kind fidelity, preserve raw-text checks in callers or explicit inspector fields.
 - Do not replace generic-dialect GRANT recovery with string parsing unless the harness and oracle prove the same privilege-delta semantics.
 - Do not bypass `exceedsNestingDepth` on new parse entrypoints.
+- Do not generate SQL from a user statement's AST without `CheckParsedInFull`: the ClickHouse dialect silently skips what it cannot parse.
 
 ## LOCAL VERIFICATION
 

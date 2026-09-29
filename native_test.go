@@ -64,9 +64,12 @@ func TestPassThroughClassifiesAndEchoes(t *testing.T) {
 // fakeEngine is a deterministic Engine for contract tests that must not depend
 // on polyglot's (lenient) parser behavior or the native FFI lib.
 type fakeEngine struct {
-	parseErr      error
-	parseAST      engine.AST
-	tokenizeErr   error
+	parseErr    error
+	parseAST    engine.AST
+	tokenizeErr error
+	// tokenizeOK is the number of initial Tokenize calls that succeed before
+	// tokenizeErr applies.
+	tokenizeOK    int
 	tokenizeCalls int
 }
 
@@ -92,7 +95,7 @@ func (f *fakeEngine) RenameTables(a engine.AST, m map[string]string) (engine.AST
 func (f *fakeEngine) QualifyTables(a engine.AST, db string) (engine.AST, error) { return a, nil }
 func (f *fakeEngine) Tokenize(string) (engine.AST, error) {
 	f.tokenizeCalls++
-	if f.tokenizeErr != nil {
+	if f.tokenizeErr != nil && f.tokenizeCalls > f.tokenizeOK {
 		return nil, f.tokenizeErr
 	}
 	return engine.AST("[]"), nil
@@ -162,6 +165,7 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 		e := &fakeEngine{
 			parseAST:    engine.AST(`{"select":{}}`),
 			tokenizeErr: tokenErr,
+			tokenizeOK:  1, // the whole-statement parse gate
 		}
 		resp, err := doRewrite(e, "SELECT 1", opts)
 		if err != nil {
@@ -169,6 +173,20 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 		}
 		if resp.GetCode() != pb.RewriteCode_Success {
 			t.Fatalf("resp = %+v, unrelated SELECT must not be rejected because Tokenize is unavailable", resp)
+		}
+	})
+
+	t.Run("parse gate cannot tokenize", func(t *testing.T) {
+		e := &fakeEngine{
+			parseAST:    engine.AST(`{"select":{}}`),
+			tokenizeErr: tokenErr,
+		}
+		resp, err := doRewrite(e, "SELECT 1", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage {
+			t.Fatalf("resp = %+v, a statement the gate cannot check must be refused", resp)
 		}
 	})
 
@@ -214,6 +232,7 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 			e := &fakeEngine{
 				parseAST:    engine.AST(`{"raw":{"sql":"opaque"}}`),
 				tokenizeErr: tokenErr,
+				tokenizeOK:  1, // the whole-statement parse gate
 			}
 			resp, err := doRewrite(e, tc.sql, opts)
 			if err != nil {
@@ -222,8 +241,8 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != StorageIntegrityUnmodelledMessage {
 				t.Fatalf("resp = %+v, active-SI catch-all must reject the unrelated raw statement", resp)
 			}
-			if e.tokenizeCalls != 1 {
-				t.Fatalf("Tokenize calls = %d, want final annotation only", e.tokenizeCalls)
+			if e.tokenizeCalls != 2 {
+				t.Fatalf("Tokenize calls = %d, want the parse gate and the final annotation only", e.tokenizeCalls)
 			}
 		})
 	}

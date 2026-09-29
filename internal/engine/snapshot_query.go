@@ -214,6 +214,9 @@ type snapshotAnalyzer struct {
 // It never invokes the ordinary rewrite or materialization fail-open paths.
 func AnalyzeSnapshot(e Engine, sql string, opts SnapshotOptions) (*SnapshotPlan, error) {
 	ast, err := e.ParseOne(sql)
+	if err == nil {
+		err = CheckParsedInFull(e, sql, ast)
+	}
 	if err != nil {
 		return nil, snapshotStatement
 	}
