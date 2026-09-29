@@ -713,7 +713,11 @@ func SetInsertBody(ast AST, body AST) (AST, error) {
 // as a standalone statement AST (create_table.as_select, peeled of any
 // parenthesization wrapper), or ok=false when absent. polyglot drops the body
 // of `EMPTY AS SELECT` on parse; doRewrite removes the EMPTY keyword first
-// (StripCreateTableEmpty), so the body is present here for that form too. A
+// (StripCreateTableEmpty), so the body is present here for that form too. When
+// the EMPTY-stripped statement does not reparse, StripCreateTableEmpty finds
+// no EMPTY and the statement falls through and is rewritten without its body;
+// dynamic mode refuses (sealCreateTableEmpty) only when EMPTY cannot be
+// reinserted after a successful rewrite. A
 // parenthesized body (`AS (SELECT …)`, and further nesting like
 // `AS ((SELECT …))`) is polyglot's {"subquery":{"this":…, …}} wrapper
 // (verified via probe, including the double-nested case); subqueryShells

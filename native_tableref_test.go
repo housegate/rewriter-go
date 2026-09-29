@@ -470,6 +470,16 @@ func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
 			wantSQL: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM phys.`db2.x`"},
 		{name: "ctas empty active source", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
 			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory EMPTY AS (SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t")`, wantAcc: []string{"db1.n", "db1.t"}},
+		// The EMPTY-stripped form parses and is rewritten, but InsertCreateTableEmpty
+		// cannot locate the body in the generated SQL (FINAL SAMPLE), so
+		// sealCreateTableEmpty refuses instead of forwarding a CTAS without EMPTY
+		// (a data copy).
+		{name: "ctas empty unreparseable is sealed", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported",
+			wantSQL: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1"},
+		{name: "ctas empty unreparseable is sealed with the SI catch-all", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage,
+			wantSQL: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1"},
 		{name: "ctas active source", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
 			wantAcc: []string{"db1.n", "db1.t"}},
 		{name: "ctas into active target still refused", sql: "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o", si: true,
