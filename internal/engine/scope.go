@@ -34,6 +34,16 @@ func scopeWalk(node any, name string, protected func(TableTarget) bool,
 	bindings map[string]bool, blockProtected bool, cteScope map[string]bool) bool {
 	switch n := node.(type) {
 	case map[string]any:
+		// A query-bodied table function's body is an independent query: no
+		// enclosing CTE or qualifier binding reaches into it.
+		if fn, ok := n["function"].(map[string]any); ok && QueryBodiedTableFunction(nameOf(fn)) {
+			for _, v := range fn {
+				if scopeWalk(v, name, protected, map[string]bool{}, false, nil) {
+					return true
+				}
+			}
+			return false
+		}
 		// A nested query block re-derives its own tables and bindings.
 		if sel, ok := n["select"].(map[string]any); ok {
 			scope := forkCTEScope(sel, cteScope)

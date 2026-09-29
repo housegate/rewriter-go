@@ -25,7 +25,7 @@
 - `ParseOne` returns a single-statement object. Polyglot operations that require arrays must use the local wrap/unwrap helpers.
 - `ParseGeneric` exists for GRANT/REVOKE forms that ClickHouse dialect leaves as opaque `command` nodes; keep that recovery local to the engine seam.
 - Wrap errors with an `engine:` prefix so fail-open callers can distinguish unexpected engine failures.
-- Table traversal must stay CTE-aware: real tables are visited, in-scope CTE aliases are skipped, and column-qualifier false positives are not treated as table references.
+- Table traversal must stay CTE-aware: real tables are visited, in-scope CTE aliases are skipped, and column-qualifier false positives are not treated as table references. A query-bodied table function (`view` / `viewIfPermitted` / `viewExplain`, `QueryBodiedTableFunction`) starts an empty scope: ClickHouse 26.2 binds no outer CTE inside its body, so a name there is always a table.
 - Raw SQL helpers in `writes.go` exist because polyglot can lose object-kind fidelity. Preserve explicit raw-text checks when structured AST fields are insufficient.
 - `TestCharacterizeAST` in `characterize_test.go` regenerates `testdata/ast-shapes/*.json` when `POLYGLOT_SQL_FFI_PATH` is set; treat those snapshots as generated fixtures.
 - For generated SQL formatting differences, prefer semantic comparison through `DiffSQL` rather than exact string expectations.

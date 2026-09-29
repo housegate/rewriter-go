@@ -397,7 +397,7 @@ func dispatchCreateTable(e engine.Engine, ast engine.AST, sql string, info engin
 	if !ok {
 		return resp, true, nil // reject populated by applyStructuredSlots
 	}
-	rewritten, ok, err = rewriteEmbeddedBody(e, rewritten, sql, opts, engine.ExtractCreateSelectBody, engine.SetCreateSelectBody, resp)
+	rewritten, ok, err = rewriteEmbeddedBody(e, rewritten, sql, opts, engine.ExtractCreateSelectBody, engine.SetCreateSelectBody, resp, sel, false)
 	if err != nil {
 		return nil, false, err
 	}
@@ -529,18 +529,8 @@ func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.Write
 				return nil, false, err
 			}
 			mergeViewBody(resp, bodyResp)
-			if sel.Mode == nameresolve.ModeDynamic {
-				for _, accessed := range bodyResp.GetOriginalAccessedTables() {
-					_, key, ok := nameresolve.LookupStorageIntegrity(accessed.GetOriginalDatabase(), accessed.GetOriginalTable(), sel.Dynamic)
-					if !ok {
-						continue
-					}
-					_, authorized := nameresolve.AuthorizeStorageIntegrityLogical(accessed.GetOriginalDatabase(), sel.Dynamic)
-					if authorized {
-						rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
-						return resp, true, nil
-					}
-				}
+			if rejectStorageIntegrityBodyReads(resp, bodyResp, sel) {
+				return resp, true, nil
 			}
 			if bodyResp.Code != pb.RewriteCode_Success {
 				resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
@@ -597,7 +587,8 @@ func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.Wri
 	if !ok {
 		return resp, true, nil // reject populated by applyStructuredSlots
 	}
-	rewritten, ok, err = rewriteEmbeddedBody(e, rewritten, sql, opts, engine.ExtractInsertBody, engine.SetInsertBody, resp)
+	rewritten, ok, err = rewriteEmbeddedBody(e, rewritten, sql, opts, engine.ExtractInsertBody, engine.SetInsertBody, resp,
+		sel, insertTargetIsStorageIntegrity(info, sel))
 	if err != nil {
 		return nil, false, err
 	}
@@ -629,9 +620,11 @@ func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.Wri
 // the code changes; the SELECT pipeline's message text is kept verbatim.
 // dispatchView's OWN body-rejection code path (its bodyResp.Code assignment,
 // a few lines above dispatchView's call site) is untouched by this helper.
+// refuseSIReads (an INSERT into an Active target) refuses a body that reads
+// an Active table, as a view body is refused, ahead of the body's own code.
 func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts []*pb.RewriteOption,
 	extract func(engine.AST) (engine.AST, bool, error), set func(engine.AST, engine.AST) (engine.AST, error),
-	resp *pb.RewriteSQLResponse) (engine.AST, bool, error) {
+	resp *pb.RewriteSQLResponse, sel nameresolve.Selection, refuseSIReads bool) (engine.AST, bool, error) {
 	body, has, err := extract(rewritten)
 	if err != nil || !has {
 		return rewritten, err == nil, err
@@ -641,6 +634,9 @@ func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts
 		return nil, false, err
 	}
 	mergeViewBody(resp, bodyResp)
+	if refuseSIReads && rejectStorageIntegrityBodyReads(resp, bodyResp, sel) {
+		return nil, false, nil
+	}
 	if bodyResp.Code != pb.RewriteCode_Success {
 		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, bodyResp.Message
 		return nil, false, nil
@@ -650,6 +646,46 @@ func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+// rejectStorageIntegrityBodyReads refuses a write whose embedded body reads an
+// authorized logical storage-integrity table where the derived safe/unsafe
+// read is not admitted: a view / materialized-view body, and the INSERT …
+// SELECT body of an Active target (spec 2026-09-26 §7 "Sources": the signed
+// lane admits only a client payload, so an Active source stays a refusal for
+// an SI target). The write message names the first such source; the caller
+// has already merged the body's bookkeeping after its own targets.
+func rejectStorageIntegrityBodyReads(resp, bodyResp *pb.RewriteSQLResponse, sel nameresolve.Selection) bool {
+	if sel.Mode != nameresolve.ModeDynamic {
+		return false
+	}
+	for _, accessed := range bodyResp.GetOriginalAccessedTables() {
+		_, key, ok := nameresolve.LookupStorageIntegrity(accessed.GetOriginalDatabase(), accessed.GetOriginalTable(), sel.Dynamic)
+		if !ok {
+			continue
+		}
+		if _, authorized := nameresolve.AuthorizeStorageIntegrityLogical(accessed.GetOriginalDatabase(), sel.Dynamic); authorized {
+			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			return true
+		}
+	}
+	return false
+}
+
+// insertTargetIsStorageIntegrity reports whether an INSERT's target is a
+// logical storage-integrity table of a dynamic request. The SI write preflight
+// has already refused an unauthorized one, so a hit is an Active target the
+// signed lane owns.
+func insertTargetIsStorageIntegrity(info engine.WriteInfo, sel nameresolve.Selection) bool {
+	if sel.Mode != nameresolve.ModeDynamic {
+		return false
+	}
+	for _, slot := range info.Slots {
+		if _, _, ok := nameresolve.LookupStorageIntegrity(slot.Target.DB, slot.Target.Table, sel.Dynamic); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeViewBody folds the body SELECT's bookkeeping into the view response: the

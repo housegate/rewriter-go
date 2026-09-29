@@ -47,6 +47,14 @@ func globalWalk(node any, scope map[string]bool) {
 			promoteINs(sel, scope)
 			return
 		}
+		// A query-bodied table function's body is an independent query: no
+		// enclosing CTE binds a name inside it (see QueryBodiedTableFunction).
+		if fn, ok := n["function"].(map[string]any); ok && QueryBodiedTableFunction(nameOf(fn)) {
+			for _, v := range fn {
+				globalWalk(v, nil)
+			}
+			return
+		}
 		for _, v := range n {
 			globalWalk(v, scope)
 		}

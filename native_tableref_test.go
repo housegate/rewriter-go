@@ -2601,3 +2601,171 @@ func TestTableRef_HasColumnInTableArgumentsAreNotResplit(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_OuterCTEDoesNotShadowViewBody pins that a CTE declared outside
+// a view(SELECT …) table-function body never binds a name inside it. Measured
+// on ClickHouse 26.2 (analyzer on, the default): `WITH t AS (…) SELECT * FROM
+// view(SELECT * FROM t)` reads the table t of the current database, not the
+// CTE, at the SELECT root and in INSERT … SELECT / CREATE TABLE … AS SELECT
+// bodies; an ordinary subquery `FROM (SELECT * FROM t)` does resolve the CTE.
+// The engine used to treat the name as the CTE and forward it verbatim, so
+// `db2.x` read another tenant's physical table and `db1.t` read the ordinary
+// physical table behind the Active db1.t, bypassing hg_safe. A view() body
+// name now resolves as a table — rewritten, reported and SI-checked — exactly
+// as it does without the outer CTE. In CREATE VIEW / MATERIALIZED VIEW bodies
+// and under the legacy analyzer ClickHouse resolves the CTE instead; there
+// the rewrite is fail-safe (it can only reach the caller's own governed
+// table).
+func TestTableRef_OuterCTEDoesNotShadowViewBody(t *testing.T) {
+	const siWrite = "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	type shadow struct {
+		label      string
+		in, out    string // the name as written, and as the generator prints it
+		ref, refSI string // the rewritten body reference without / with the SI surface
+		acc        string // its OriginalAccessedTables entry
+		active     bool   // the reference is the Active db1.t under the SI surface
+	}
+	shadows := []shadow{
+		{"other tenant", "`db2.x`", `"db2.x"`, `phys."db1.db2.x" "db2.x"`, `phys."db1.db2.x" "db2.x"`, ".db2.x", false},
+		{"quoted twin", "`db1.t`", `"db1.t"`, `phys."db1.db1.t" "db1.t"`, `phys."db1.db1.t" "db1.t"`, ".db1.t", false},
+		{"plain", "t", "t", `phys."db1.t" t`, `(SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS t`, ".t", true},
+	}
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, s := range shadows {
+			ref := s.ref
+			if si {
+				ref = s.refSI
+			}
+			with := "WITH " + s.in + " AS (SELECT 1) "
+			withOut := "WITH " + s.out + " AS (SELECT 1) "
+			add := func(shape, sql, wantSQL string, wantAcc []string) {
+				cases = append(cases, tablerefCase{name: shape + "/" + s.label, sql: sql, si: si,
+					wantCode: pb.RewriteCode_Success, wantSQL: wantSQL, wantAcc: wantAcc})
+			}
+			refuse := func(shape, sql string, wantAcc []string) {
+				cases = append(cases, tablerefCase{name: shape + "/" + s.label, sql: sql, si: si,
+					wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: siWrite, wantSQL: sql, wantAcc: wantAcc})
+			}
+			add("root", with+"SELECT * FROM view(SELECT * FROM "+s.in+")",
+				withOut+"SELECT * FROM view(SELECT * FROM "+ref+")", []string{s.acc})
+			add("root nested subquery", with+"SELECT * FROM view(SELECT * FROM (SELECT * FROM "+s.in+"))",
+				withOut+"SELECT * FROM view(SELECT * FROM (SELECT * FROM "+ref+"))", []string{s.acc})
+			add("root nested view", with+"SELECT * FROM view(SELECT * FROM view(SELECT * FROM "+s.in+"))",
+				withOut+"SELECT * FROM view(SELECT * FROM view(SELECT * FROM "+ref+"))", []string{s.acc})
+			add("root upper-case VIEW", with+"SELECT * FROM VIEW(SELECT * FROM "+s.in+")", "", []string{s.acc})
+			add("root inner CTE reads the outer name", with+"SELECT * FROM view(WITH u AS (SELECT * FROM "+s.in+") SELECT * FROM u)",
+				"", []string{s.acc})
+			add("insert select", "INSERT INTO db1.o "+with+"SELECT * FROM view(SELECT * FROM "+s.in+")",
+				`INSERT INTO phys."db1.o" `+withOut+"SELECT * FROM view(SELECT * FROM "+ref+")", []string{"db1.o", s.acc})
+			add("ctas", "CREATE TABLE db1.n ENGINE = Memory AS "+with+"SELECT * FROM view(SELECT * FROM "+s.in+")",
+				`CREATE TABLE phys."db1.n" ENGINE=Memory AS (`+withOut+"SELECT * FROM view(SELECT * FROM "+ref+"))", []string{"db1.n", s.acc})
+			viewSQL := "CREATE VIEW db1.v AS " + with + "SELECT * FROM view(SELECT * FROM " + s.in + ")"
+			mvSQL := "CREATE MATERIALIZED VIEW db1.mv TO db1.o AS " + with + "SELECT * FROM db1.p, view(SELECT * FROM " + s.in + ") AS u"
+			if si && s.active {
+				// A view / MV body reading an Active table is refused, as it is
+				// without the outer CTE.
+				refuse("view", viewSQL, []string{"db1.v", s.acc})
+				refuse("materialized view", mvSQL, []string{"db1.mv", "db1.o", "db1.p", s.acc})
+			} else {
+				add("view", viewSQL, `CREATE VIEW phys."db1.v" AS `+withOut+"SELECT * FROM view(SELECT * FROM "+ref+")",
+					[]string{"db1.v", s.acc})
+				add("materialized view", mvSQL,
+					`CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.o" AS `+withOut+`SELECT * FROM phys."db1.p" "db1.p" CROSS JOIN view(SELECT * FROM `+ref+") AS u",
+					[]string{"db1.mv", "db1.o", "db1.p", s.acc})
+			}
+
+			// Controls: the CTE keeps binding outside a view() body.
+			for _, sql := range []string{
+				with + "SELECT * FROM " + s.in,
+				with + "SELECT * FROM (SELECT * FROM " + s.in + ")",
+				with + "SELECT * FROM view(SELECT 1) AS v, " + s.in,
+				"SELECT * FROM view(" + with + "SELECT * FROM " + s.in + ")",
+			} {
+				cases = append(cases, tablerefCase{name: "control/" + sql, sql: sql, si: si,
+					wantCode: pb.RewriteCode_Success, wantAcc: []string{}})
+			}
+		}
+
+		// An IN operand inside the view() body is a table too.
+		inRef := `phys."db1.t"`
+		if si {
+			inRef = "(SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)"
+		}
+		cases = append(cases, tablerefCase{name: "root IN operand", si: si,
+			sql:      "WITH t AS (SELECT 1) SELECT * FROM view(SELECT * FROM db1.o WHERE a IN t)",
+			wantCode: pb.RewriteCode_Success,
+			wantSQL:  `WITH t AS (SELECT 1) SELECT * FROM view(SELECT * FROM phys."db1.o" "db1.o" WHERE a IN ` + inRef + ")",
+			wantAcc:  []string{"db1.o", ".t"}})
+		// A scalar argument of a data-only table function is not a view()
+		// body: ClickHouse 26.2 resolves the CTE there.
+		cases = append(cases, tablerefCase{name: "control/numbers scalar argument", si: si,
+			sql:      "WITH t AS (SELECT 1) SELECT * FROM numbers((SELECT count() FROM t))",
+			wantCode: pb.RewriteCode_Success, wantSQL: "WITH t AS (SELECT 1) SELECT * FROM numbers((SELECT count() FROM t))",
+			wantAcc: []string{}})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_OuterCTEDoesNotHideReservedColumnInViewBody pins that the
+// reserved-row-id check sees a view() body through an outer CTE of the same
+// name: the body reads the Active table, so `_hg_row_id` there is refused
+// exactly as it is without the CTE.
+func TestTableRef_OuterCTEDoesNotHideReservedColumnInViewBody(t *testing.T) {
+	e := newEngine(t)
+	want, err := doRewrite(e, "SELECT * FROM view(SELECT _hg_row_id FROM t)", tablerefOpts(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want.GetCode() == pb.RewriteCode_Success {
+		t.Fatalf("baseline unexpectedly succeeded: %s", want.GetSqlAfterRewrite())
+	}
+	got, err := doRewrite(e, "WITH t AS (SELECT 1 AS _hg_row_id) SELECT * FROM view(SELECT _hg_row_id FROM t)", tablerefOpts(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetCode() != want.GetCode() || got.GetMessage() != want.GetMessage() {
+		t.Fatalf("got %s %q, want %s %q", got.GetCode(), got.GetMessage(), want.GetCode(), want.GetMessage())
+	}
+}
+
+// TestTableRef_ActiveToActiveInsertIsRefused pins spec 2026-09-26 §7
+// ("Sources"): an INSERT … SELECT into an Active table whose body reads an
+// Active table is refused — the signed lane admits only a client payload, so
+// the source can never become the derived read there — with the write
+// message naming the source, the target reported first. An ordinary source
+// keeps the signed-lane marking, and without the SI surface nothing changes.
+func TestTableRef_ActiveToActiveInsertIsRefused(t *testing.T) {
+	const siWrite = "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	var cases []tablerefCase
+	for _, c := range []struct {
+		sql string
+		acc []string
+	}{
+		{"INSERT INTO db1.t SELECT * FROM db1.t", []string{"db1.t", "db1.t"}},
+		{"INSERT INTO db1.t SELECT * FROM t", []string{"db1.t", ".t"}},
+		{"INSERT INTO t SELECT * FROM db1.t", []string{".t", "db1.t"}},
+		{"INSERT INTO db1.t SELECT * FROM (SELECT * FROM db1.t)", []string{"db1.t", "db1.t"}},
+		{"INSERT INTO db1.t SELECT * FROM view(SELECT * FROM db1.t)", []string{"db1.t", "db1.t"}},
+		{"INSERT INTO db1.t SELECT * FROM db1.o UNION ALL SELECT * FROM db1.t", nil},
+		{"INSERT INTO db1.t WITH c AS (SELECT * FROM db1.t) SELECT * FROM c", []string{"db1.t", "db1.t"}},
+		{"INSERT INTO db1.t SELECT a, (SELECT max(a) FROM db1.t) FROM db1.o", nil},
+		{"INSERT INTO db1.t WITH t AS (SELECT 1) SELECT * FROM view(SELECT * FROM t)", []string{"db1.t", ".t"}},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: siWrite, wantSQL: c.sql, wantAcc: c.acc})
+		cases = append(cases, tablerefCase{name: "no SI surface/" + c.sql, sql: c.sql, si: false,
+			wantCode: pb.RewriteCode_Success})
+	}
+	cases = append(cases,
+		tablerefCase{name: "ordinary source keeps the signed-lane marking", si: true,
+			sql:      "INSERT INTO db1.t SELECT * FROM db1.o",
+			wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.t" SELECT * FROM phys."db1.o" "db1.o"`,
+			wantAcc: []string{"db1.t", "db1.o"}},
+		tablerefCase{name: "quoted twin source is not the Active table", si: true,
+			sql:      "INSERT INTO db1.t SELECT * FROM `db1.t`",
+			wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.t" SELECT * FROM phys."db1.db1.t" "db1.t"`,
+			wantAcc: []string{"db1.t", ".db1.t"}},
+	)
+	runTablerefCases(t, cases)
+}
