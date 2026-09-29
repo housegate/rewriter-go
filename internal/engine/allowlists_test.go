@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -118,12 +119,12 @@ func TestCollectSourceFunctionNamesAndCreateTableStorage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		name, argc, settings, ok, err := CreateTableStorage(e, ast)
+		engines, settings, ok, err := CreateTableStorage(e, ast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !ok || name != "MergeTree" || argc != 0 || len(settings) != 1 || settings[0] != "storage_policy" {
-			t.Fatalf("got (name=%q argc=%d settings=%v ok=%v)", name, argc, settings, ok)
+		if !ok || !reflect.DeepEqual(engines, []StorageEngine{{"MergeTree", 0}}) || len(settings) != 1 || settings[0] != "storage_policy" {
+			t.Fatalf("got (engines=%v settings=%v ok=%v)", engines, settings, ok)
 		}
 	})
 
@@ -132,12 +133,12 @@ func TestCollectSourceFunctionNamesAndCreateTableStorage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		name, argc, settings, ok, err := CreateTableStorage(e, ast)
+		engines, settings, ok, err := CreateTableStorage(e, ast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !ok || name != "ReplicatedMergeTree" || argc != 2 || len(settings) != 0 {
-			t.Fatalf("got (name=%q argc=%d settings=%v ok=%v)", name, argc, settings, ok)
+		if !ok || !reflect.DeepEqual(engines, []StorageEngine{{"ReplicatedMergeTree", 2}}) || len(settings) != 0 {
+			t.Fatalf("got (engines=%v settings=%v ok=%v)", engines, settings, ok)
 		}
 	})
 
@@ -146,12 +147,36 @@ func TestCollectSourceFunctionNamesAndCreateTableStorage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		name, argc, settings, ok, err := CreateTableStorage(e, ast)
+		engines, settings, ok, err := CreateTableStorage(e, ast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !ok || name != "Memory" || argc != 0 || len(settings) != 0 {
-			t.Fatalf("got (name=%q argc=%d settings=%v ok=%v)", name, argc, settings, ok)
+		if !ok || !reflect.DeepEqual(engines, []StorageEngine{{"Memory", 0}}) || len(settings) != 0 {
+			t.Fatalf("got (engines=%v settings=%v ok=%v)", engines, settings, ok)
+		}
+	})
+
+	t.Run("every ENGINE clause, in source order", func(t *testing.T) {
+		for _, c := range []struct {
+			sql  string
+			want []StorageEngine
+		}{
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = URL('http://127.0.0.1/x', CSV) ENGINE = Memory",
+				[]StorageEngine{{"URL", 2}, {"Memory", 0}}},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory ENGINE = Merge('db1', '^x') AS SELECT 1 AS a",
+				[]StorageEngine{{"Memory", 0}, {"Merge", 2}}},
+		} {
+			ast, err := e.ParseOne(c.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engines, _, ok, err := CreateTableStorage(e, ast)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || !reflect.DeepEqual(engines, c.want) {
+				t.Fatalf("%s: got (engines=%v ok=%v), want %v", c.sql, engines, ok, c.want)
+			}
 		}
 	})
 
@@ -160,12 +185,12 @@ func TestCollectSourceFunctionNamesAndCreateTableStorage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		name, argc, settings, ok, err := CreateTableStorage(e, ast)
+		engines, settings, ok, err := CreateTableStorage(e, ast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !ok || name != "" || argc != 0 || len(settings) != 1 || settings[0] != "disk" {
-			t.Fatalf("got (name=%q argc=%d settings=%v ok=%v)", name, argc, settings, ok)
+		if !ok || len(engines) != 0 || len(settings) != 1 || settings[0] != "disk" {
+			t.Fatalf("got (engines=%v settings=%v ok=%v)", engines, settings, ok)
 		}
 	})
 
@@ -174,7 +199,7 @@ func TestCollectSourceFunctionNamesAndCreateTableStorage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _, _, ok, err := CreateTableStorage(e, ast)
+		_, _, ok, err := CreateTableStorage(e, ast)
 		if err != nil {
 			t.Fatal(err)
 		}

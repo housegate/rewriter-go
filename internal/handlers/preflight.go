@@ -279,10 +279,9 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 // PreflightTableReferences (run only while the storage-integrity surface is
 // inactive) and rewriteSelectCore / preflightStorageIntegrityWrite (run only
 // while it is active, immediately after their own SI namespace policy finds
-// nothing to reject), so an SI-owned message wins. A CREATE TABLE's engine name is
-// checked only when CreateTableStorage found one: an ALTER TABLE … MODIFY
-// SETTING has no engine of its own, and CreateTableStorage reports that shape
-// with an empty engineName rather than a bare (refused) engine name.
+// nothing to reject), so an SI-owned message wins. Every ENGINE clause
+// CreateTableStorage found is checked, in source order; an ALTER TABLE …
+// MODIFY SETTING has no engine of its own and reports none.
 func rejectDisallowedCarriers(e engine.Engine, ast engine.AST, resp *pb.RewriteSQLResponse) (bool, error) {
 	names, err := engine.CollectSourceFunctionNames(ast)
 	if err != nil {
@@ -298,20 +297,20 @@ func rejectDisallowedCarriers(e engine.Engine, ast engine.AST, resp *pb.RewriteS
 			return true, nil
 		}
 	}
-	name, argc, settings, ok, err := engine.CreateTableStorage(e, ast)
+	engines, settings, ok, err := engine.CreateTableStorage(e, ast)
 	if err != nil {
 		return false, err
 	}
 	if !ok {
 		return false, nil
 	}
-	if name != "" {
-		switch engine.ClassifyTableEngine(name, argc) {
+	for _, eng := range engines {
+		switch engine.ClassifyTableEngine(eng.Name, eng.ArgCount) {
 		case engine.TableEngineRefused:
-			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineRefusedMessage(name)
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineRefusedMessage(eng.Name)
 			return true, nil
 		case engine.TableEngineUnknown:
-			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineUnknownMessage(name)
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableEngineUnknownMessage(eng.Name)
 			return true, nil
 		}
 	}

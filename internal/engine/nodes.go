@@ -326,9 +326,16 @@ func CollectSourceFunctionNames(ast AST) ([]string, error) {
 	return out, nil
 }
 
-// CreateTableStorage returns the CREATE TABLE / CREATE MATERIALIZED VIEW
-// engine name/arg-count and every SETTINGS key from either of the two shapes
-// the T5 policy inspects (spec 2026-09-26 §5, R4):
+// StorageEngine is one ENGINE clause of a CREATE TABLE / CREATE MATERIALIZED
+// VIEW: the engine name as written and its argument count.
+type StorageEngine struct {
+	Name     string
+	ArgCount int
+}
+
+// CreateTableStorage returns every CREATE TABLE / CREATE MATERIALIZED VIEW
+// ENGINE clause, in source order, and every SETTINGS key from either of the
+// two shapes the T5 policy inspects (spec 2026-09-26 §5, R4):
 //
 //   - a CREATE TABLE's engine_property (decoded the same way
 //     decodeTableEngineNamespaceRef reads it: property.this.anonymous.this.
@@ -340,15 +347,21 @@ func CollectSourceFunctionNames(ast AST) ([]string, error) {
 //     the same shape alterCrossTableTargets already reads for other raw ALTER
 //     forms — so its setting keys are recovered by tokenizing, not by a
 //     structured field read. There is no engine to check for an ALTER, so
-//     engineName is always "" here; the caller must not treat that as a bare
-//     engine name.
+//     engines is always empty here.
+//
+// Every engine_property is returned, not only the last: Polyglot keeps a
+// second ENGINE clause (`ENGINE = URL(…) ENGINE = Memory`) as a second
+// property and generates both, so the allowlist must see each of them. An
+// engine_property whose name cannot be decoded is an error (the caller seals
+// it as UnsupportedStatement): an engine the allowlist cannot name is never
+// forwarded.
 //
 // ok=false when ast is neither shape (or a CREATE TABLE with no engine and no
 // settings at all — nothing for the allowlist to check).
-func CreateTableStorage(e Engine, ast AST) (engineName string, argCount int, settings []string, ok bool, err error) {
+func CreateTableStorage(e Engine, ast AST) (engines []StorageEngine, settings []string, ok bool, err error) {
 	var root map[string]any
 	if err := json.Unmarshal(ast, &root); err != nil {
-		return "", 0, nil, false, fmt.Errorf("engine: decode create table storage: %w", err)
+		return nil, nil, false, fmt.Errorf("engine: decode create table storage: %w", err)
 	}
 	// A materialized view with its own storage (CREATE MATERIALIZED VIEW …
 	// ENGINE = … [SETTINGS …] AS SELECT …) carries the same engine and
@@ -368,16 +381,20 @@ func CreateTableStorage(e Engine, ast AST) (engineName string, argCount int, set
 				continue
 			}
 			if engProp, ok := pm["engine_property"].(map[string]any); ok {
-				engineName, argCount = decodeEngineProperty(engProp)
+				name, argCount := decodeEngineProperty(engProp)
+				if name == "" {
+					return nil, nil, false, fmt.Errorf("engine: undecodable ENGINE clause")
+				}
+				engines = append(engines, StorageEngine{Name: name, ArgCount: argCount})
 			}
 			if setProp, ok := pm["settings_property"].(map[string]any); ok {
 				settings = append(settings, settingsPropertyKeys(setProp)...)
 			}
 		}
-		if engineName == "" && len(settings) == 0 {
-			return "", 0, nil, false, nil
+		if len(engines) == 0 && len(settings) == 0 {
+			return nil, nil, false, nil
 		}
-		return engineName, argCount, settings, true, nil
+		return engines, settings, true, nil
 	}
 	if body, isAlterTable := root[NodeAlterTable].(map[string]any); isAlterTable {
 		actions, _ := body["actions"].([]any)
@@ -396,16 +413,16 @@ func CreateTableStorage(e Engine, ast AST) (engineName string, argCount int, set
 			}
 			keys, kerr := modifySettingKeys(e, sql)
 			if kerr != nil {
-				return "", 0, nil, false, kerr
+				return nil, nil, false, kerr
 			}
 			settings = append(settings, keys...)
 		}
 		if len(settings) == 0 {
-			return "", 0, nil, false, nil
+			return nil, nil, false, nil
 		}
-		return "", 0, settings, true, nil
+		return nil, settings, true, nil
 	}
-	return "", 0, nil, false, nil
+	return nil, nil, false, nil
 }
 
 // decodeEngineProperty reads one engine_property node's identifier/argument

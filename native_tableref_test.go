@@ -2068,3 +2068,126 @@ func TestTableRef_AliasedInOperandIsATableOperand(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_InnerStorageEngineForms pins spec 2026-09-26 T3 / T5 on every
+// position a CREATE statement can name a storage engine, not only the one
+// ENGINE clause of a CREATE TABLE or a materialized view's own storage:
+//
+//   - `CREATE MATERIALIZED VIEW … TO INNER [UUID '…'] ENGINE = …` (ClickHouse
+//     26.2 creates `.inner_id.<uuid>` with that engine, so
+//     `ENGINE = Merge('phys','^x')` reads the raw physical tables);
+//   - a window view's `INNER ENGINE`;
+//   - a TimeSeries table's `DATA` / `TAGS` / `METRICS [INNER UUID] ENGINE`;
+//   - a refreshable view's `REFRESH … [APPEND] TO INNER UUID … ENGINE`;
+//   - a second ENGINE clause (T5 used to check only the last one).
+//
+// A shape the engine models gets T3 then T5 exactly like a CREATE TABLE
+// engine; a shape it cannot inspect (Polyglot has no `INNER UUID` /
+// `INNER ENGINE` grammar and stops before the engine) is refused, never
+// forwarded.
+func TestTableRef_InnerStorageEngineForms(t *testing.T) {
+	const uuid = "'3bd68e3e-0000-4000-8000-000000000001'"
+	const t7 = "statement is not supported"
+	const body = " AS SELECT 1 AS a"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		add := func(sql string, code pb.RewriteCode, msg string) {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: code, wantMsg: msg, wantSQL: sql})
+		}
+		// Every TO INNER UUID form: Polyglot stops at UUID, so the engine is
+		// not inspectable and the statement is refused whatever its engine.
+		for _, eng := range []string{
+			"Merge('phys','^x')", "Merge('hg_safe','^x')", "Merge('db1','^x')",
+			"Buffer(phys, x, 1, 10, 100, 10000, 1000000, 10000000, 100000000)",
+			"Distributed('c', 'phys', 'x')", "Dictionary(phys.d)",
+			"URL('http://127.0.0.1/x', CSV)", "MySQL('h:3306', 'db', 't', 'u', 'p')",
+			"MergeTree ORDER BY a", "Memory", "MergeTree ORDER BY a SETTINGS disk = 'd'",
+		} {
+			add("CREATE MATERIALIZED VIEW db1.mv TO INNER UUID "+uuid+" ENGINE = "+eng+body, pb.RewriteCode_UnsupportedStatement, t7)
+		}
+		for _, sql := range []string{
+			"CREATE MATERIALIZED VIEW db1.mv TO INNER UUID " + uuid + body,
+			"create materialized view db1.mv to inner uuid " + uuid + " engine = Merge('phys','^x') as select 1 as a",
+			"CREATE MATERIALIZED VIEW db1.mv UUID " + uuid + " TO INNER UUID " + uuid + " ENGINE = Merge('phys','^x')" + body,
+			"CREATE MATERIALIZED VIEW IF NOT EXISTS db1.mv ON CLUSTER c TO INNER UUID " + uuid + " ENGINE = Merge('phys','^x')" + body,
+			"CREATE OR REPLACE MATERIALIZED VIEW db1.mv TO INNER UUID " + uuid + " ENGINE = Merge('phys','^x')" + body,
+			"CREATE MATERIALIZED VIEW db1.mv (a UInt8) TO INNER UUID " + uuid + " ENGINE = Merge('phys','^x')" + body,
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR APPEND TO INNER UUID " + uuid + " ENGINE = Merge('phys','^x')" + body,
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR APPEND TO INNER UUID " + uuid + " ENGINE = MergeTree ORDER BY a" + body,
+			"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR TO INNER UUID " + uuid + " ENGINE = MergeTree ORDER BY a" + body,
+			// TimeSeries inner targets: Polyglot stops at DATA / TAGS / METRICS.
+			"CREATE TABLE db1.ts ENGINE = TimeSeries DATA ENGINE = Merge('phys','^x')",
+			"CREATE TABLE db1.ts ENGINE = TimeSeries DATA ENGINE = MergeTree ORDER BY a TAGS ENGINE = Merge('phys','^x') METRICS ENGINE = Memory",
+			"CREATE TABLE db1.ts ENGINE = TimeSeries METRICS ENGINE = Merge('phys','^x')",
+			"CREATE TABLE db1.ts ENGINE = TimeSeries TAGS ENGINE = URL('http://127.0.0.1/x', CSV)",
+			"CREATE TABLE db1.ts ENGINE = TimeSeries DATA INNER UUID " + uuid + " TAGS ENGINE = Merge('phys','^x')",
+			"CREATE TABLE db1.ts (a UInt64) ENGINE = TimeSeries DATA phys.x",
+			// An unquoted TO INNER followed by ENGINE: ClickHouse reads
+			// `TO INNER` as the table INNER and then refuses TO with ENGINE,
+			// so the shape is refused rather than forwarded as that table.
+			"CREATE MATERIALIZED VIEW db1.mv TO INNER ENGINE = Memory" + body,
+			"CREATE MATERIALIZED VIEW db1.mv TO INNER ENGINE = MergeTree ORDER BY a" + body,
+		} {
+			add(sql, pb.RewriteCode_UnsupportedStatement, t7)
+		}
+		// The window-view family is refused as a class.
+		for _, sql := range []string{
+			"CREATE WINDOW VIEW db1.wv INNER ENGINE = Merge('phys','^x') ENGINE = Memory AS SELECT count(a) FROM db1.o GROUP BY tumble(now(), INTERVAL '1' SECOND)",
+			"CREATE WINDOW VIEW db1.wv TO db1.t2 INNER ENGINE = Merge('phys','^x') AS SELECT count(a) FROM db1.o GROUP BY tumble(now(), INTERVAL '1' SECOND)",
+			"CREATE WINDOW VIEW db1.wv TO INNER UUID " + uuid + " INNER ENGINE = Merge('phys','^x') AS SELECT count(a) FROM db1.o GROUP BY tumble(now(), INTERVAL '1' SECOND)",
+			"CREATE OR REPLACE WINDOW VIEW db1.wv INNER ENGINE URL('http://127.0.0.1/x', CSV) AS SELECT 1",
+		} {
+			add(sql, pb.RewriteCode_UnsupportedStatement, "CREATE LIVE VIEW / WINDOW VIEW is not supported")
+		}
+		// Modelled positions: T3 before T5, SI messages first while the
+		// surface is active.
+		siSafe := func(inactive pb.RewriteCode, inactiveMsg, activeMsg string) (pb.RewriteCode, string) {
+			if si {
+				return pb.RewriteCode_UnsupportedStatement, activeMsg
+			}
+			return inactive, inactiveMsg
+		}
+		for _, tgt := range []string{"TO INNER ", "", "REFRESH EVERY 1 HOUR ", "REFRESH EVERY 1 HOUR TO INNER UUID " + uuid + " "} {
+			add("CREATE MATERIALIZED VIEW db1.mv "+tgt+"ENGINE = Merge('phys','^x')"+body,
+				pb.RewriteCode_InvalidRewriteRequest, "protected database phys is not addressable")
+			code, msg := siSafe(pb.RewriteCode_InvalidRewriteRequest, "protected database hg_safe is not addressable",
+				"storage-integrity physical table hg_safe.x is not directly addressable")
+			add("CREATE MATERIALIZED VIEW db1.mv "+tgt+"ENGINE = Buffer(hg_safe, x, 1, 10, 100, 10000, 1000000, 10000000, 100000000)"+body, code, msg)
+			code, msg = siSafe(pb.RewriteCode_UnsupportedStatement, "table engine Distributed is not accepted",
+				"storage-integrity logical database db1 is not directly addressable through Distributed table engine")
+			add("CREATE MATERIALIZED VIEW db1.mv "+tgt+"ENGINE = Distributed('c', 'db1', 'x')"+body, code, msg)
+			for _, eng := range []string{"URL('http://127.0.0.1/x', CSV)", "MySQL('h:3306', 'db', 't', 'u', 'p')", "Dictionary(db1.d)", "Kafka"} {
+				add("CREATE MATERIALIZED VIEW db1.mv "+tgt+"ENGINE = "+eng+body,
+					pb.RewriteCode_UnsupportedStatement, "table engine "+eng[:strings.IndexAny(eng+"(", "(")]+" is not accepted")
+			}
+		}
+		// A second ENGINE clause: every clause is checked, not the last one.
+		for _, c := range []struct{ sql, eng string }{
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = URL('http://127.0.0.1/x', CSV) ENGINE = Memory", "URL"},
+			{"CREATE TABLE db1.n (a UInt64) ENGINE = Memory ENGINE = URL('http://127.0.0.1/x', CSV)", "URL"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = URL('http://127.0.0.1/x', CSV) ENGINE = Memory" + body, "URL"},
+			{"CREATE MATERIALIZED VIEW db1.mv ENGINE = MySQL('h:3306', 'db', 't', 'u', 'p') ENGINE = MergeTree ORDER BY a" + body, "MySQL"},
+			{"CREATE MATERIALIZED VIEW db1.mv TO INNER ENGINE = URL('http://127.0.0.1/x', CSV) ENGINE = Memory" + body, "URL"},
+		} {
+			add(c.sql, pb.RewriteCode_UnsupportedStatement, "table engine "+c.eng+" is not accepted")
+		}
+		code, msg := siSafe(pb.RewriteCode_UnsupportedStatement, "table engine Merge is not accepted",
+			"storage-integrity logical database db1 is not directly addressable through Merge table engine")
+		add("CREATE TABLE db1.n (a UInt64) ENGINE = Merge('db1','^x') ENGINE = Memory", code, msg)
+		add("CREATE TABLE db1.n (a UInt64) ENGINE = Merge('phys','^x') ENGINE = Memory",
+			pb.RewriteCode_InvalidRewriteRequest, "protected database phys is not addressable")
+		// Still accepted: an allowed engine of the view's own storage, and a
+		// TO target that is a table named INNER.
+		cases = append(cases,
+			tablerefCase{name: "own storage allowed", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory" + body,
+				wantCode: pb.RewriteCode_Success, wantSQL: `CREATE MATERIALIZED VIEW phys."db1.mv" ENGINE=Memory AS SELECT 1 AS a`},
+			tablerefCase{name: "TO table named INNER", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv TO INNER" + body,
+				wantCode: pb.RewriteCode_Success, wantSQL: `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.INNER" AS SELECT 1 AS a`},
+			tablerefCase{name: "TO table named quoted INNER", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv TO `INNER`" + body,
+				wantCode: pb.RewriteCode_Success, wantSQL: `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.INNER" AS SELECT 1 AS a`},
+			tablerefCase{name: "TO db1.INNER", si: si, sql: "CREATE MATERIALIZED VIEW db1.mv TO db1.INNER" + body,
+				wantCode: pb.RewriteCode_Success, wantSQL: `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.INNER" AS SELECT 1 AS a`},
+		)
+	}
+	runTablerefCases(t, cases)
+}
