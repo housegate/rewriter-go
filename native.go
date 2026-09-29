@@ -263,6 +263,19 @@ func rewriteStatement(e engine.Engine, sql string, opts []*pb.RewriteOption) (*p
 		}
 	}
 
+	// Whole-statement parse gate: a statement Polyglot did not consume in
+	// full has an AST, and would generate SQL, that means something other
+	// than the input, and no later check can see the part that was not
+	// parsed. It is refused in every mode, before any policy check, as a
+	// position no rewrite reaches (T7 text). finalize still lets the SI
+	// annotation name an SI object the statement addresses.
+	if cerr := engine.CheckParsedInFull(e, sql, ast); cerr != nil {
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = engine.UnsupportedStatementMessage
+		finalize(resp, ast, sql, ec, siVersion, e, selection)
+		return resp, nil
+	}
+
 	// Table-reference policy (spec 2026-09-26 §5): identifier parameters and
 	// protected databases are refused before any handler can rewrite them.
 	if presp, handled, perr := handlers.PreflightTableReferences(e, ast, sql, opts); perr != nil {
