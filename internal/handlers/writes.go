@@ -369,8 +369,8 @@ func dispatchSingle(e engine.Engine, ast engine.AST, info engine.WriteInfo, sel 
 // write), then — for CREATE TABLE ... AS SELECT — runs the embedded body
 // through the same SELECT pipeline a view body uses (rewriteEmbeddedBody),
 // merging its bookkeeping into resp before regenerating (spec 2026-09-26 T4,
-// second half). `EMPTY AS SELECT` carries no as_select at all (Step 1), so the
-// body step is a no-op for that form.
+// second half). `EMPTY AS SELECT` reaches this handler without its EMPTY
+// keyword (doRewrite strips it and puts it back), so its body is rewritten too.
 func dispatchCreateTable(e engine.Engine, ast engine.AST, sql string, info engine.WriteInfo, opts []*pb.RewriteOption, sel nameresolve.Selection) (*pb.RewriteSQLResponse, bool, error) {
 	resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_CREATE_TABLE)
 	if info.AsTableFunction {
@@ -602,7 +602,7 @@ func dispatchInsert(e engine.Engine, ast engine.AST, sql string, info engine.Wri
 // CREATE TABLE … AS SELECT body and merges its bookkeeping after the
 // statement's own targets (spec 2026-09-26 T4). Mirrors dispatchView's body
 // step; an SI source becomes the derived read the FROM path emits. extract
-// returning has=false (VALUES / FORMAT / EMPTY AS SELECT / plain CREATE TABLE)
+// returning has=false (VALUES / FORMAT / plain CREATE TABLE)
 // is a no-op: the caller's `rewritten` AST is returned unchanged with ok=true
 // so it continues to Generate normally. A body rejection (bodyResp.Code !=
 // Success) is reported via resp and ok=false so the caller stops and returns
