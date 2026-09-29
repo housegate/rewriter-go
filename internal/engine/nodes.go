@@ -657,8 +657,10 @@ const (
 // single IN operand (`x IN <op>`, `x IN (<op>)`, `in(x, <op>)` and the rest of
 // the callable IN family) is a table reference (spec 2026-09-26 T2-T4):
 //
-//   - `paren` wrappers are unwrapped to any depth, so `x IN ((db.t))` is the
-//     same operand as `x IN db.t`;
+//   - `paren` and `alias` wrappers are unwrapped to any depth and in any
+//     interleaving, so `x IN ((db.t))`, `x IN (db.t AS z)` and
+//     `x IN ((db.t) AS z)` are the same operand as `x IN db.t`
+//     (inOperandAlias);
 //   - a parameter node, or an identifier whose table or database part is an
 //     Identifier parameter, is a T2 hit;
 //   - an identifier operand is decoded structurally from the node's own
@@ -671,11 +673,14 @@ const (
 func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespaceRefDetail) {
 	node, _ := operand.(map[string]any)
 	for node != nil {
-		paren, ok := node["paren"].(map[string]any)
+		wrapper, ok := node["paren"].(map[string]any)
+		if !ok {
+			wrapper, ok = inOperandAlias(node)
+		}
 		if !ok {
 			break
 		}
-		node, _ = paren["this"].(map[string]any)
+		node, _ = wrapper["this"].(map[string]any)
 	}
 	if node == nil {
 		return inOperandValue, namespaceRefDetail{}
@@ -719,6 +724,28 @@ func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespace
 		return inOperandParameter, namespaceRefDetail{}
 	}
 	return inOperandValue, namespaceRefDetail{}
+}
+
+// inOperandAlias returns the body of an aliased IN operand, `x IN (db.t AS z)`
+// or `in(x, db.t AS z)`: Polyglot drops the parentheses and emits the operand
+// as {"alias": {"this": <operand>, "alias": z, ...}}. Measured on ClickHouse
+// 26.2, the aliased operand is the same table-valued IN as `x IN (db.t)` (it
+// reads db.t), so it is decoded, checked, reported and rewritten exactly like
+// the unaliased operand.
+//
+// The rewrite drops the alias: applyInOperandDecision replaces the whole
+// operand, alias wrapper included, so `a IN (db1.o AS z)` becomes
+// `a IN (phys."db1.o")`, byte-identical to the unaliased rewrite. Measured on
+// 26.2, ClickHouse accepts both `a IN (phys."db1.o" AS z)` and the dropped
+// form with the same result, and an IN operand's alias can be referenced
+// nowhere else in the query (`SELECT z …` and `… AND a IN z` both fail with
+// UNKNOWN_IDENTIFIER), so dropping it changes no query ClickHouse would run.
+func inOperandAlias(node map[string]any) (map[string]any, bool) {
+	alias, ok := node["alias"].(map[string]any)
+	if !ok || alias["this"] == nil {
+		return nil, false
+	}
+	return alias, true
 }
 
 func inOperandFromSingleDetail(detail namespaceRefDetail) (inOperandKind, namespaceRefDetail) {

@@ -1903,3 +1903,115 @@ func TestTableRef_EngineLocalShapes(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_AliasedInOperandIsATableOperand pins that an aliased IN
+// operand, `x IN (db.t AS z)`, is the same table operand as `x IN (db.t)`:
+// ClickHouse 26.2 executes both as a table-valued IN that reads db.t, and the
+// alias can be referenced nowhere else (UNKNOWN_IDENTIFIER). Polyglot emits
+// the operand as an `alias` node, which the IN-operand decoder used to leave
+// to the value path, so a protected or storage-integrity physical table was
+// forwarded unchecked, unreported and unrewritten (spec 2026-09-26 T2-T4).
+// Every expectation is the unaliased equivalent's answer; a refusal echoes the
+// caller's aliased SQL, and a rewrite drops the alias exactly as the unaliased
+// operand is rewritten.
+func TestTableRef_AliasedInOperandIsATableOperand(t *testing.T) {
+	const (
+		protPhys   = "protected database phys is not addressable"
+		protSafe   = "protected database hg_safe is not addressable"
+		siSafe     = "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+		paramMsg   = "query parameters are not supported in a database or table position"
+		plainScan  = `SELECT * FROM phys."db1.t" "db1.t" WHERE `
+		siScan     = `SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t" WHERE `
+		safeDerive = `(SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)`
+	)
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		scan := plainScan
+		if si {
+			scan = siScan
+		}
+		// Protected phys: refused with T3 in both SI states, like `IN (phys.x)`.
+		for _, sql := range []string{
+			"SELECT * FROM db1.t WHERE a IN (phys.x AS z)",
+			"SELECT * FROM db1.t WHERE a IN ((phys.x AS z))",
+			"SELECT * FROM db1.t WHERE a IN ((phys.x) AS z)",
+			"SELECT * FROM db1.t WHERE a NOT IN (phys.x AS z)",
+			"SELECT * FROM db1.t WHERE a GLOBAL IN (phys.x AS z)",
+			"SELECT * FROM db1.t WHERE (a, b) IN (phys.x AS z)",
+			"SELECT * FROM db1.t WHERE in(a, phys.x AS z)",
+			"SELECT * FROM db1.t WHERE nullIn(a, phys.x AS z)",
+			"SELECT * FROM db1.t WHERE a IN (SELECT 1 FROM db1.o WHERE b IN (phys.x AS z))",
+			"SELECT * FROM (SELECT * FROM db1.t WHERE a IN (phys.x AS z))",
+			"ALTER TABLE db1.t DELETE WHERE a IN (phys.x AS z)",
+			"INSERT INTO db1.t SELECT * FROM db1.o WHERE a IN (phys.x AS z)",
+			"SELECT * FROM db1.t WHERE a IN (phys.x AS z) SETTINGS max_threads = 1",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: protPhys, wantSQL: sql, wantAcc: []string{"phys."}})
+		}
+		// hg_safe: T3 with the surface inactive, the SI handlers' message with
+		// it active, like `IN (hg_safe.db1__t)`.
+		for _, c := range []struct {
+			sql    string
+			siCode pb.RewriteCode
+			siAcc  []string
+		}{
+			{"SELECT * FROM db1.t WHERE a IN (hg_safe.db1__t AS z)", pb.RewriteCode_RewriteError, []string{"db1.t", "hg_safe.db1__t"}},
+			{"SELECT * FROM db1.t WHERE in(a, hg_safe.db1__t AS z)", pb.RewriteCode_RewriteError, []string{"db1.t", "hg_safe.db1__t"}},
+			{"INSERT INTO db1.t SELECT * FROM db1.o WHERE a IN (hg_safe.db1__t AS z)", pb.RewriteCode_UnsupportedStatement, []string{"hg_safe.db1__t"}},
+		} {
+			tc := tablerefCase{name: c.sql, sql: c.sql, si: si, wantSQL: c.sql,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: protSafe, wantAcc: []string{"hg_safe."}}
+			if si {
+				tc.wantCode, tc.wantMsg, tc.wantAcc = c.siCode, siSafe, c.siAcc
+			}
+			cases = append(cases, tc)
+		}
+		// T2: an Identifier parameter under an alias, like `IN ({p:Identifier})`.
+		cases = append(cases, tablerefCase{name: "parameter", si: si,
+			sql:      "SELECT * FROM db1.t WHERE a IN ({p:Identifier} AS z)",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: paramMsg,
+			wantSQL: "SELECT * FROM db1.t WHERE a IN ({p:Identifier} AS z)", wantAcc: []string{}})
+		// A logical source is resolved, reported and rewritten like `IN (db1.o)`;
+		// the alias is dropped with the operand it named.
+		selfRead := `(phys."db1.t")`
+		if si {
+			selfRead = safeDerive
+		}
+		for _, c := range []struct {
+			sql, want string
+			acc       []string
+		}{
+			{"SELECT * FROM db1.t WHERE a IN (db1.o AS z)", scan + `a IN (phys."db1.o")`, []string{"db1.o", "db1.t"}},
+			{"SELECT * FROM db1.t WHERE a IN ((db1.o) AS z)", scan + `a IN (phys."db1.o")`, []string{"db1.o", "db1.t"}},
+			{"SELECT * FROM db1.t WHERE in(a, db1.o AS z)", scan + `in(a, phys."db1.o")`, []string{"db1.o", "db1.t"}},
+			{"SELECT * FROM db1.t WHERE a IN (o AS z)", scan + `a IN (phys."db1.o")`, []string{"db1.t", ".o"}},
+			{"SELECT * FROM db1.t WHERE a IN (db1.t AS z)", scan + `a IN ` + selfRead, []string{"db1.t"}},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: c.acc})
+		}
+		// Values stay values: an aliased subquery or literal is unchanged.
+		for _, v := range []string{"((SELECT 1) AS z)", "(1 AS z)"} {
+			sql := "SELECT * FROM db1.t WHERE a IN " + v
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: scan + "a IN " + v, wantAcc: []string{"db1.t"}})
+		}
+		// R2: an aliased table operand in a position no rewrite reaches is
+		// refused like `IN (db1.p)` there (T7 with the surface inactive, the SI
+		// IN-table message with it active), not forwarded unrewritten.
+		r2Code, r2Msg, r2Acc := pb.RewriteCode_UnsupportedStatement, "statement is not supported", []string{}
+		if si {
+			r2Msg, r2Acc = "storage-integrity logical database db1 is not directly addressable through IN table target", []string{"db1."}
+		}
+		for _, sql := range []string{
+			"DELETE FROM db1.o WHERE a IN (db1.p AS z)",
+			"UPDATE db1.o SET b = 1 WHERE a IN (db1.p AS z)",
+			"CREATE TABLE db1.n (a UInt64, b UInt8 DEFAULT a IN (db1.p AS z)) ENGINE = Memory",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: r2Code, wantMsg: r2Msg, wantSQL: sql, wantAcc: r2Acc})
+		}
+	}
+	runTablerefCases(t, cases)
+}
