@@ -42,6 +42,33 @@ func TestCheckRegenerated(t *testing.T) {
 		{"definer string", "CREATE DEFINER='live' VIEW db1.v AS SELECT 1", ""},
 		{"driver table", "CREATE TABLE `db1`.`p_e` (`id` String, `n` UInt64 DEFAULT 0 COMMENT 'c' CODEC(Delta, ZSTD(1)), INDEX `i` id TYPE bloom_filter GRANULARITY 1, PROJECTION `p` (SELECT * ORDER BY `n`)) ENGINE = ReplacingMergeTree(`n`) PARTITION BY `n` ORDER BY (`id`) SETTINGS index_granularity=8192 COMMENT 'h'", ""},
 		{"command keeps its text", "SHOW CREATE TABLE db1.o XYZ", ""},
+		{"grant command keeps its text", "GRANT SELECT ON db1.o TO u1", ""},
+		{"raw node keeps its text", "CREATE LIVE VIEW other.v AS SELECT 1", ""},
+		{"streamed values with columns and settings is an insert node", "INSERT INTO db1.o (a, b) SETTINGS async_insert = 1 VALUES", ""},
+
+		// A command or raw node whose own text is not the input (final review I1).
+		{"streamed values", "INSERT INTO db1.o (a, b) VALUES", differs + "lost [A B DB1 O], added nothing"},
+		{"streamed values without columns", "INSERT INTO db1.o VALUES", differs + "lost [DB1 O], added nothing"},
+		{"streamed values with settings", "INSERT INTO db1.o SETTINGS async_insert = 1 VALUES",
+			differs + "lost [1 EQ ASYNC_INSERT DB1 O SETTINGS], added nothing"},
+		{"streamed values into a function", "INSERT INTO FUNCTION remote('x', db1.o) VALUES",
+			differs + "lost [x DB1 FUNCTION O REMOTE], added nothing"},
+		{"raw live view loses sql security", "CREATE SQL SECURITY DEFINER LIVE VIEW other.v AS SELECT 1",
+			differs + "lost [DEFINER SECURITY SQL], added nothing"},
+
+		// Column modifiers are compared in order: Polyglot reorders them, and
+		// ClickHouse accepts one order only (final review Minor 1).
+		{"column modifiers in clickhouse order", "CREATE TABLE db1.n (d Date, a Int32 DEFAULT 1 COMMENT 'x' CODEC(ZSTD) TTL d + INTERVAL 1 DAY) ENGINE = MergeTree ORDER BY d TTL d + INTERVAL 1 DAY COMMENT 'h'", ""},
+		{"codec before comment", "CREATE TABLE db1.n (a Int32 CODEC(ZSTD) COMMENT 'x') ENGINE = Memory",
+			differs + "column modifiers reordered from [CODEC COMMENT] to [COMMENT CODEC]"},
+		{"ttl before default", "CREATE TABLE db1.n (d Date, a Int32 TTL d + INTERVAL 1 DAY DEFAULT 1) ENGINE = MergeTree ORDER BY d",
+			differs + "column modifiers reordered from [TTL DEFAULT] to [DEFAULT TTL]"},
+		{"add column codec before comment", "ALTER TABLE db1.o ADD COLUMN a Int32 CODEC(ZSTD) COMMENT 'x'",
+			differs + "column modifiers reordered from [CODEC COMMENT] to [COMMENT CODEC]"},
+		{"materialized before comment", "CREATE TABLE db1.n (a Int32 MATERIALIZED 1 COMMENT 'x') ENGINE = Memory",
+			differs + "column modifiers reordered from [MATERIALIZED COMMENT] to [COMMENT MATERIALIZED]"},
+		{"codec before primary key", "CREATE TABLE db1.n (a Int32 CODEC(ZSTD) PRIMARY KEY) ENGINE = MergeTree",
+			differs + "column modifiers reordered from [CODEC PRIMARY KEY] to [PRIMARY KEY CODEC]"},
 
 		// Fix round 1: shapes the stricter rules must keep passing.
 		{"clickhouse escapes kept", `SELECT 'it''s', 'a\'b', '\\', '\n', '\x41', $$a\_b$$, '''q''' FROM db1.o`, ""},
@@ -372,10 +399,40 @@ func TestCheckRegeneratedErrors(t *testing.T) {
 			t.Fatalf("generate %d / tokenize %d calls, want 1 / 2", f.generateCalls, f.tokenizeCalls)
 		}
 	})
-	t.Run("command node", func(t *testing.T) {
-		f := &regenErrEngine{genErr: errGen, tokenizeErr: errTok}
-		if err := CheckRegenerated(f, "SHOW x", AST(`{"command":{"this":"SHOW x"}}`)); err != nil {
-			t.Fatalf("err = %v, want nil: a command node is regenerated verbatim", err)
+	// A command or raw node is compared by its own text: Generate is never
+	// called, and a tokenizer error or an unreadable text is an error.
+	for name, ast := range map[string]AST{
+		"command node": AST(`{"command":{"this":"SHOW x"}}`),
+		"raw node":     AST(`{"raw":{"sql":"SHOW x"}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &regenErrEngine{genErr: errGen}
+			if err := CheckRegenerated(f, "SHOW x", ast); err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if f.generateCalls != 0 || f.tokenizeCalls != 2 {
+				t.Fatalf("generate %d / tokenize %d calls, want 0 / 2", f.generateCalls, f.tokenizeCalls)
+			}
+		})
+		t.Run(name+" tokenizer on the input", func(t *testing.T) {
+			f := &regenErrEngine{tokenizeErr: errTok}
+			if err := CheckRegenerated(f, "SHOW x", ast); !errors.Is(err, errTok) {
+				t.Fatalf("err = %v, want the tokenizer error", err)
+			}
+		})
+		t.Run(name+" tokenizer on its text", func(t *testing.T) {
+			f := &regenErrEngine{tokenizeErr: errTok, tokenizeOK: 1}
+			if err := CheckRegenerated(f, "SHOW x", ast); !errors.Is(err, errTok) {
+				t.Fatalf("err = %v, want the tokenizer error", err)
+			}
+		})
+	}
+	t.Run("unreadable node text", func(t *testing.T) {
+		for _, ast := range []AST{AST(`{"command":{"this":1}}`), AST(`{"raw":{"sql":1}}`)} {
+			f := &regenErrEngine{}
+			if err := CheckRegenerated(f, "SHOW x", ast); err == nil {
+				t.Fatalf("CheckRegenerated(%s) = nil, want the decode error", ast)
+			}
 		}
 	})
 }

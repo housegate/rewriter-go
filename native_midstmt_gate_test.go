@@ -1,10 +1,13 @@
 package rewriter
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // TestMidStatementDropGate pins the refusal of a statement Polyglot parsed in
@@ -41,11 +44,28 @@ func TestMidStatementDropGate(t *testing.T) {
 			"SELECT toStartOfDay(t) FROM db1.o",
 			"SELECT group_concat(s, '-') FROM db1.o",
 			"SELECT startsWith(s, 'x') FROM db1.o",
+			// Column modifiers reordered (final review Minor 1).
+			"CREATE TABLE db1.n (a Int32 CODEC(ZSTD) COMMENT 'x') ENGINE = Memory",
+			"ALTER TABLE db1.o ADD COLUMN a Int32 CODEC(ZSTD) COMMENT 'x'",
 			// An SI table keeps the T7 text.
 			"SELECT * FROM db1.t ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		// A streamed-VALUES INSERT is a command node that lost its table; the
+		// active SI surface refuses it as an unmodelled class first.
+		for _, sql := range []string{
+			"INSERT INTO db1.o (a, b) VALUES",
+			"INSERT INTO db1.o VALUES",
+			"INSERT INTO db1.o SETTINGS async_insert = 1 VALUES",
+		} {
+			msg := unsupported
+			if si {
+				msg = StorageIntegrityUnmodelledMessage
+			}
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: sql})
 		}
 		// Cosmetic respellings pass.
 		for _, sql := range []string{
@@ -74,6 +94,13 @@ func TestMidStatementDropGateEveryMode(t *testing.T) {
 	for _, sql := range []string{
 		"DELETE FROM db1.o IN PARTITION 1 WHERE a = 1",
 		"SELECT a FROM db1.o ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
+		// Polyglot keeps a streamed-VALUES INSERT as a command node whose
+		// text is INSERT INTO VALUES (final review I1 / M3). Dynamic mode
+		// refuses it at the T7 fallthrough before any Success is built, the
+		// other modes at the gate; the answer must be the same.
+		"INSERT INTO db1.o (a, b) VALUES",
+		"INSERT INTO db1.o VALUES",
+		"INSERT INTO db1.o SETTINGS async_insert = 1 VALUES",
 	} {
 		for name, opts := range map[string][]*pb.RewriteOption{
 			"no rewrite": nil,
@@ -91,6 +118,87 @@ func TestMidStatementDropGateEveryMode(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestMidStatementDropGateResponseShape pins every field of a gate answer
+// (task 2 review M3): the CREATE TABLE … EMPTY path, which checks the text
+// without EMPTY and splices it back; a GRANT, whose command text is compared
+// and whose privileges_deltas survive; and a refusal the gate converted from
+// Success. A converted refusal echoes the input and clears statement_type,
+// but keeps existence_clause, the contract version and the handler's
+// original_accessed_tables / table_rewrites, including an SI table's
+// physical name (review M1, parked: HouseGate turns every non-Success into a
+// RejectedError and forwards none of these fields).
+func TestMidStatementDropGateResponseShape(t *testing.T) {
+	e := newEngine(t)
+	for _, tc := range []struct {
+		name string
+		opts []*pb.RewriteOption
+		sql  string
+		want string // the protojson response
+	}{
+		{"empty/dynamic", tablerefOpts(false),
+			"CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT a FROM db1.o",
+			`{"message":"success","sqlAfterRewrite":"CREATE TABLE phys.\"db1.n\" ENGINE=Memory EMPTY AS (SELECT a FROM phys.\"db1.o\" \"db1.o\")",
+			  "statementType":"STATEMENT_TYPE_CREATE_TABLE","tableRewrites":{"db1.n":"phys.db1.n","db1.o":"phys.db1.o"},
+			  "originalAccessedTables":[{"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"n","physicalDatabase":"phys"},
+			    {"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"o","physicalDatabase":"phys"}]}`},
+		{"empty/no rewrite", nil,
+			"CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT a FROM db1.o",
+			`{"message":"success","sqlAfterRewrite":"CREATE TABLE db1.n ENGINE=Memory EMPTY AS (SELECT a FROM db1.o)",
+			  "statementType":"STATEMENT_TYPE_CREATE_TABLE",
+			  "originalAccessedTables":[{"originalDatabase":"db1","originalTable":"n"},{"originalDatabase":"db1","originalTable":"o"}]}`},
+		{"empty refused/dynamic", tablerefOpts(false),
+			"CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT a FROM db1.o LIMIT 2 BY a LIMIT 3",
+			`{"code":"UnsupportedStatement","message":"statement is not supported",
+			  "sqlAfterRewrite":"CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT a FROM db1.o LIMIT 2 BY a LIMIT 3",
+			  "tableRewrites":{"db1.n":"phys.db1.n","db1.o":"phys.db1.o"},
+			  "originalAccessedTables":[{"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"n","physicalDatabase":"phys"},
+			    {"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"o","physicalDatabase":"phys"}]}`},
+		{"grant/dynamic", tablerefOpts(false), "GRANT SELECT ON db1.o TO u1",
+			`{"message":"success","sqlAfterRewrite":"SELECT 'GRANT SELECT ON db1.o TO u1' AS gstmt","statementType":"STATEMENT_TYPE_GRANT",
+			  "privilegesDeltas":[{"action":"ACTION_GRANT","grantees":[{"name":"u1"}],"logicalDatabase":"db1","originalDatabase":"db1",
+			    "originalTable":"o","physicalDatabase":"phys","physicalTable":"db1.o","privileges":["SELECT"],"scope":"SCOPE_TABLE"}]}`},
+		{"grant/si", tablerefOpts(true), "GRANT SELECT ON db1.o TO u1",
+			`{"message":"success","sqlAfterRewrite":"SELECT 'GRANT SELECT ON db1.o TO u1' AS gstmt","statementType":"STATEMENT_TYPE_GRANT",
+			  "storageIntegrityContractVersion":"STORAGE_INTEGRITY_CONTRACT_V2",
+			  "privilegesDeltas":[{"action":"ACTION_GRANT","grantees":[{"name":"u1"}],"logicalDatabase":"db1","originalDatabase":"db1",
+			    "originalTable":"o","physicalDatabase":"phys","physicalTable":"db1.o","privileges":["SELECT"],"scope":"SCOPE_TABLE"}]}`},
+		{"refused si table", tablerefOpts(true), "SELECT * FROM db1.t ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
+			`{"code":"UnsupportedStatement","message":"statement is not supported",
+			  "sqlAfterRewrite":"SELECT * FROM db1.t ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
+			  "storageIntegrityContractVersion":"STORAGE_INTEGRITY_CONTRACT_V2","tableRewrites":{"db1.t":"hg_safe.db1__t"},
+			  "originalAccessedTables":[{"isStorageIntegrity":true,"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"t","physicalDatabase":"phys"}]}`},
+		{"refused keeps existence clause", tablerefOpts(false), "CREATE VIEW IF NOT EXISTS db1.v AS SELECT a FROM db1.o LIMIT 2 BY a LIMIT 3",
+			`{"code":"UnsupportedStatement","message":"statement is not supported","existenceClause":"EXISTENCE_CLAUSE_IF_NOT_EXISTS",
+			  "sqlAfterRewrite":"CREATE VIEW IF NOT EXISTS db1.v AS SELECT a FROM db1.o LIMIT 2 BY a LIMIT 3",
+			  "tableRewrites":{"db1.o":"phys.db1.o","db1.v":"phys.db1.v"},
+			  "originalAccessedTables":[{"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"v","physicalDatabase":"phys"},
+			    {"logicalDatabase":"db1","originalDatabase":"db1","originalTable":"o","physicalDatabase":"phys"}]}`},
+		{"refused streamed values/no rewrite", nil, "INSERT INTO db1.o (a, b) VALUES",
+			`{"code":"UnsupportedStatement","message":"statement is not supported","sqlAfterRewrite":"INSERT INTO db1.o (a, b) VALUES"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := doRewrite(e, tc.sql, tc.opts)
+			if err != nil {
+				t.Fatalf("doRewrite: %v", err)
+			}
+			b, err := protojson.Marshal(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want any
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatalf("want: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("resp = %s\nwant %s", b, tc.want)
+			}
+		})
 	}
 }
 

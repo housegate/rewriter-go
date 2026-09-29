@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -31,14 +32,19 @@ var ErrNotRegeneratedFaithfully = errors.New("engine: generate: the regenerated 
 // Literals and quoted identifiers are compared by the value ClickHouse reads
 // from their source text (literalSpelling, numberKey), never by the value
 // Polyglot decoded. The multisets must be equal, apart from the neutral
-// additions spellingDiff allows. Every rewrite a caller applies afterwards
-// changes only names, so a faithful identity regeneration is what makes the
-// rewritten SQL faithful.
+// additions spellingDiff allows, and the column-declaration modifiers must
+// keep their order (columnModifierOrder). Every rewrite a caller applies
+// afterwards changes only names, so a faithful identity regeneration is what
+// makes the rewritten SQL faithful.
 //
-// A command or raw node carries its text and is regenerated verbatim, so it
-// always passes; the handlers that re-render a command from parsed fields
-// check their own coverage. An INSERT statement whose AST carries a FORMAT
-// data clause (insertHasFormatClause, the gate GenerateInsert splices on) is
+// A command or raw node is compared by its own text (CommandSQL, RawSQL),
+// which is what Generate prints for it: that text is not always the input.
+// Polyglot keeps a streamed-VALUES INSERT (INSERT INTO db1.o (a, b) VALUES,
+// with no rows) as the command INSERT INTO VALUES, table and columns gone, and
+// a raw CREATE … LIVE VIEW loses a DEFINER / SQL SECURITY prefix. The
+// handlers that re-render a command from parsed fields check their own
+// coverage on top of this. An INSERT statement whose AST carries a FORMAT data
+// clause (insertHasFormatClause, the gate GenerateInsert splices on) is
 // compared only up to the name after its last FORMAT keyword: what follows is
 // data that GenerateInsert splices back verbatim (the parse gate's payload
 // rule). A column or alias named format is not such a clause. Any other
@@ -56,10 +62,7 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 	if err != nil {
 		return err
 	}
-	if kind == NodeCommand || kind == NodeRaw {
-		return nil
-	}
-	gen, err := e.Generate(ast)
+	gen, err := regeneratedText(e, kind, ast)
 	if err != nil {
 		return err
 	}
@@ -84,10 +87,53 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 		}
 	}
 	lost, added := spellingDiff(fidelitySpellings(sql, in, true, operatorsKept(out)), fidelitySpellings(gen, out, false, nil))
-	if len(lost) == 0 && len(added) == 0 {
-		return nil
+	if len(lost) != 0 || len(added) != 0 {
+		return fmt.Errorf("%w: lost %s, added %s", ErrNotRegeneratedFaithfully, spellingList(lost), spellingList(added))
 	}
-	return fmt.Errorf("%w: lost %s, added %s", ErrNotRegeneratedFaithfully, spellingList(lost), spellingList(added))
+	if a, b := columnModifierOrder(sql, in), columnModifierOrder(gen, out); !slices.Equal(a, b) {
+		return fmt.Errorf("%w: column modifiers reordered from [%s] to [%s]", ErrNotRegeneratedFaithfully, strings.Join(a, " "), strings.Join(b, " "))
+	}
+	return nil
+}
+
+// columnModifierOrder lists, in order, the column-declaration modifier
+// keywords of a statement: DEFAULT, MATERIALIZED, ALIAS, EPHEMERAL, COMMENT,
+// CODEC, TTL and PRIMARY KEY. ClickHouse accepts them only in that order
+// within a column (measured on 26.2), and Polyglot prints a column's
+// modifiers in an order of its own (CODEC(ZSTD) COMMENT 'x' as COMMENT 'x'
+// CODEC(ZSTD), MATERIALIZED 1 COMMENT 'x' as COMMENT 'x' MATERIALIZED 1): a
+// reordering turns a statement ClickHouse rejects into one it accepts, or the
+// reverse. The multiset comparison cannot see order, so CheckRegenerated
+// compares these lists too. A quoted word is an identifier, not a modifier.
+func columnModifierOrder(src string, toks []rawToken) []string {
+	var out []string
+	for i, tk := range toks {
+		raw := src[tk.Span.Start:tk.Span.End]
+		if raw == "" || !isWordStart(raw) {
+			continue
+		}
+		switch w := strings.ToUpper(raw); w {
+		case "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL", "COMMENT", "CODEC", "TTL":
+			out = append(out, w)
+		case "PRIMARY":
+			if i+1 < len(toks) && strings.EqualFold(toks[i+1].Text, "KEY") {
+				out = append(out, "PRIMARY KEY")
+			}
+		}
+	}
+	return out
+}
+
+// regeneratedText is the SQL Polyglot prints for ast: a command or raw node's
+// own text, any other node's Generate output.
+func regeneratedText(e Engine, kind string, ast AST) (string, error) {
+	switch kind {
+	case NodeCommand:
+		return CommandSQL(ast)
+	case NodeRaw:
+		return RawSQL(ast)
+	}
+	return e.Generate(ast)
 }
 
 // throughFormatName keeps the tokens up to and including the name after the
