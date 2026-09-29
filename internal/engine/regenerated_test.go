@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -54,7 +55,6 @@ func TestCheckRegenerated(t *testing.T) {
 		{"div beside alias and order", "SELECT a DIV 2 AS x, t.a MOD {p:UInt8} FROM db1.o AS t ORDER BY a DIV 2 DESC", ""},
 		{"ternary of lower operators", "SELECT a OR b ? c + 1 : d AND e, NOT a ? b IS NULL : c IN (1) FROM db1.o", ""},
 		{"insert select column named format", "INSERT INTO db1.o SELECT format FROM db1.p", ""},
-		{"insert select format tail is ignored data", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON SETTINGS max_threads = 1", ""},
 
 		// Dropped or respelled with a different meaning.
 		{"delete in partition", "DELETE FROM db1.o IN PARTITION '2024-01' WHERE a = 1",
@@ -130,6 +130,60 @@ func TestCheckRegenerated(t *testing.T) {
 		{"format column hides char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = 1", differs + "lost [CHAR_LENGTH], added [LENGTH]"},
 		{"format alias hides from", "INSERT INTO db1.o SELECT format x FROM db1.p", differs + "lost [FROM DB1.P], added nothing"},
 		{"format column hides startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x')", differs + "lost [STARTSWITH], added [STARTS_WITH]"},
+
+		// Fix round 2 (re-review N1): a balanced CASE … END lower bound does
+		// not hide the AND of its BETWEEN; the regeneration regroups
+		// x BETWEEN … AND a <=> b as (x BETWEEN … AND a) <=> b.
+		{"null-safe equality after between case", "SELECT x BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a <=> b FROM db1.o", differs + "lost [NULLSAFE_EQ], added [DISTINCT FROM IS NOT]"},
+		{"null-safe equality after not between case", "SELECT x NOT BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a <=> b FROM db1.o", differs + "lost [NULLSAFE_EQ], added [DISTINCT FROM IS NOT]"},
+		{"null-safe equality after between simple case", "SELECT x BETWEEN CASE c WHEN 1 THEN 1 END AND a <=> b FROM db1.o", differs + "lost [NULLSAFE_EQ], added [DISTINCT FROM IS NOT]"},
+		{"null-safe equality after between case in where", "SELECT a FROM db1.o WHERE x BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a <=> b", differs + "lost [NULLSAFE_EQ], added [DISTINCT FROM IS NOT]"},
+		{"null-safe equality after between case in delete", "DELETE FROM db1.o WHERE x BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a <=> b", differs + "lost [NULLSAFE_EQ], added [DISTINCT FROM IS NOT]"},
+		{"not like after between case", "SELECT x BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a NOT LIKE b FROM db1.o", differs + "lost [NOT LIKE], added [NOT]"},
+		{"not ilike after between case", "SELECT x BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a NOT ILIKE b FROM db1.o", differs + "lost [NOT ILIKE], added [NOT]"},
+		{"regexp after between case", "SELECT x BETWEEN CASE WHEN c THEN 1 ELSE 2 END AND a REGEXP b FROM db1.o", differs + "lost [REGEXP], added [MATCH]"},
+		{"null-safe equality after is not distinct from", "SELECT x IS NOT DISTINCT FROM y AND a <=> b, x BETWEEN 1 AND 2 AND y IS DISTINCT FROM z AND s NOT LIKE 'x' FROM db1.o", ""},
+		{"between and then a logical and", "SELECT x BETWEEN 1 AND 2 AND a <=> b, x NOT BETWEEN CASE WHEN c THEN 1 END AND 2 AND s NOT LIKE 'x' FROM db1.o", ""},
+		{"logical and after case", "SELECT CASE WHEN c THEN 1 END AND a <=> b, CASE WHEN c AND s REGEXP 'x' THEN 1 END FROM db1.o", ""},
+		{"logical and in join on", "SELECT * FROM db1.o JOIN db1.p ON o.a = p.a AND o.b <=> p.b", ""},
+
+		// Fix round 2 (re-review N2): the text after FORMAT <name> in an
+		// INSERT … SELECT is dropped only when it is comments: with input()
+		// it is the rows (measured on 26.2: FORMAT TSV 9 inserts 9, and
+		// FORMAT TSV -- c inserts the row "-- c").
+		{"insert select format comments", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON /* c */ -- d", ""},
+		{"insert select input data", "INSERT INTO db1.o SELECT * FROM input('a UInt8') FORMAT TSV 7", differs + "lost [7], added nothing"},
+		{"insert select input comment is data", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT TSV -- c", differs + "lost [-- C], added nothing"},
+		{"insert select format settings tail", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON SETTINGS max_threads = 1", differs + "lost [SETTINGS MAX_THREADS = 1], added nothing"},
+		{"insert select format semicolon tail", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON;", differs + "lost [;], added nothing"},
+
+		// Fix round 2 (re-review N3): ClickHouse reads a number only with each
+		// _ between two digits (measured on 26.2: 1e_3, 0x_1F, 1_e3, 1__0,
+		// 0x1F_ and 1_ are identifiers, 1._5 and 1.5a syntax errors).
+		{"underscore after exponent", "SELECT 1e_3", differs + "lost [1e_3], added [1e3]"},
+		{"underscore after exponent in delete", "DELETE FROM db1.o WHERE a = 1e_3", differs + "lost [1e_3], added [1e3]"},
+		{"underscore after hex prefix", "SELECT 0x_1F", differs + "lost [0x_1F], added [0x1F]"},
+		{"underscore before exponent", "SELECT 1_e3", differs + "lost [1_e3], added [1_e3]"},
+		{"double underscore", "SELECT 1__0", differs + "lost [1__0], added [1__0]"},
+		{"trailing underscore", "SELECT 0x1F_", differs + "lost [0x1F], added [0x1F]"},
+		{"underscore after point", "SELECT 1._5", differs + "lost [1._5], added [1.5]"},
+		{"letter after a float", "SELECT 1.5a", differs + "lost [1.5a], added [1.5a]"},
+		{"underscores between digits", "SELECT 1_000, 0x1_F, 0b1_01, 1.5_0, 1e1_0, 1_000.5, 0_1, 0x1F_F, 0x1e_3 FROM db1.o", ""},
+
+		// Fix round 2 (re-review N4): ClickHouse rejects OR at the top of the
+		// else branch (measured on 26.2; AND, NOT, BETWEEN, IN, LIKE, IS,
+		// comparisons and <=> are accepted there); Polyglot makes it valid.
+		{"ternary else or", "SELECT a ? b : c OR d FROM db1.o", differs + "lost [COLON PARAMETER], added [IF]"},
+		{"ternary else or in where", "SELECT a FROM db1.o WHERE a ? b : c OR d", differs + "lost [COLON PARAMETER], added [IF]"},
+		{"ternary else and or", "SELECT a ? b : c AND d OR e FROM db1.o", differs + "lost [COLON PARAMETER], added [IF]"},
+		{"ternary else comparison or", "SELECT a ? b : c = d OR e FROM db1.o", differs + "lost [COLON PARAMETER], added [IF]"},
+		{"ternary else and, then or", "SELECT a ? b : c AND d, a ? b OR c : d, a ? b : (c OR d) FROM db1.o", ""},
+
+		// Fix round 2 (re-review N5): ALTER … DELETE / UPDATE keeps its
+		// expressions verbatim, so an input respelling does not apply where
+		// the regeneration still spells the operator as the input does.
+		{"alter delete keeps its operators", "ALTER TABLE db1.o DELETE WHERE d <=> e AND s REGEXP 'x' AND t NOT ILIKE 'y'", ""},
+		{"alter delete keeps div and a ternary", "ALTER TABLE db1.o DELETE WHERE d DIV 2 AND (a ? b : c)", ""},
 
 		// Review M3: cosmetic respellings still refused (fail closed).
 		{"mod of a parenthesised operand", "SELECT a MOD (2 + 1) FROM db1.o", differs + "lost [MOD], added [PERCENT]"},
@@ -355,6 +409,27 @@ func TestNumberKey(t *testing.T) {
 		{"0x", ""},
 		{"0b12", ""},
 		{"1a", ""},
+		// Fix round 2 (re-review N3): an _ must sit between two digits of the
+		// literal's radix (measured on 26.2).
+		{"0x1_F", "31"},
+		{"0x1F_F", "511"},
+		{"0x1e_3", "483"},
+		{"0b1_01", "5"},
+		{"0_1", "1"},
+		{"1.5_0", "F3/2"},
+		{"1e1_0", "F10000000000"},
+		{"1_000.5", "F2001/2"},
+		{"0x1p1_0", "F1024"},
+		{"1e_3", ""},
+		{"0x_1F", ""},
+		{"1_e3", ""},
+		{"1__0", ""},
+		{"0x1F_", ""},
+		{"1._5", ""},
+		{"1_", ""},
+		{"_1", ""},
+		{"0b_1", ""},
+		{"0x1F_p1", ""},
 		{"", ""},
 	} {
 		got, ok := numberKey(tc.raw)
@@ -403,5 +478,50 @@ func TestLiteralSpelling(t *testing.T) {
 	}
 	if got := literalSpelling(`'01'`, "W:INTERVAL", true); got.key != "N:1" {
 		t.Errorf("INTERVAL '01' = %q, want the number 1", got.key)
+	}
+}
+
+// TestIsLogicalAnd pins the backward scan behind a respelling after an AND
+// (re-review N1): a balanced bracket or CASE … END is one unit, each BETWEEN
+// owns the next AND, and a chain the scan cannot classify is not proven
+// logical, so the respelling is refused. Each row is a token-type stream
+// whose last token is the AND in question.
+func TestIsLogicalAnd(t *testing.T) {
+	for _, tc := range []struct {
+		types string
+		want  bool
+	}{
+		{"SELECT VAR AND", true},
+		{"SELECT VAR BETWEEN NUMBER AND", false},
+		{"SELECT VAR NOT BETWEEN NUMBER AND", false},
+		{"SELECT VAR BETWEEN NUMBER AND NUMBER AND", true},
+		{"SELECT VAR BETWEEN CASE WHEN VAR THEN NUMBER ELSE NUMBER END AND", false},
+		{"SELECT VAR BETWEEN CASE VAR WHEN NUMBER THEN NUMBER END AND", false},
+		{"SELECT VAR BETWEEN L_PAREN NUMBER R_PAREN AND", false},
+		{"SELECT CASE WHEN VAR THEN NUMBER END AND", true},
+		{"SELECT CASE WHEN VAR AND", true},
+		{"WHERE VAR BETWEEN NUMBER AND NUMBER OR VAR AND", true},
+		{"L_PAREN VAR BETWEEN NUMBER AND", false},
+		{"VAR BETWEEN L_PAREN VAR AND", true}, // the AND is inside the bracket
+		{"ON VAR DOT VAR EQ VAR DOT VAR AND", true},
+		{"WHERE EXISTS L_PAREN SELECT NUMBER R_PAREN AND", true},
+		{"WHERE VAR IS NOT DISTINCT FROM VAR AND", true},
+		{"SELECT DISTINCT VAR AND", true},
+		{"WHERE VAR BETWEEN VAR BETWEEN NUMBER AND NUMBER AND", false}, // a BETWEEN inside a BETWEEN's bounds
+		{"WHERE VAR FROM VAR AND", false},                              // not IS [NOT] DISTINCT FROM
+		{"SELECT VAR PARAMETER VAR COLON VAR AND", false},              // a ternary: not classified
+		{"SELECT VAR SOMETHING_ELSE AND", false},                       // an unknown token
+		{"SELECT NUMBER R_PAREN AND", false},                           // unbalanced
+		{"SELECT L_PAREN NUMBER END AND", false},                       // mismatched
+		{"SELECT CASE NUMBER R_PAREN AND", false},                      // mismatched
+		{"VAR AND", true},
+	} {
+		var toks []rawToken
+		for _, tt := range strings.Fields(tc.types) {
+			toks = append(toks, rawToken{TokenType: tt, Text: tt})
+		}
+		if got := isLogicalAnd(toks, len(toks)-1); got != tc.want {
+			t.Errorf("isLogicalAnd(%s) = %v, want %v", tc.types, got, tc.want)
+		}
 	}
 }
