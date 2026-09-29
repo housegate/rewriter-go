@@ -334,3 +334,108 @@ func TestTableRef_CorrelatedAliasInOperandPins(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// aliasInKeywords are the bare SQL keywords Polyglot parses as a no-parens
+// function call (`{"function": {"name": "NOW", "no_parens": true}}`) while
+// ClickHouse 26.2 has no niladic-keyword syntax and reads each as an ordinary,
+// usually unresolvable identifier (review round 2, N1).
+var aliasInKeywords = []string{
+	"CURDATE", "CURRENT_CATALOG", "CURRENT_DATE", "CURRENT_DATETIME", "CURRENT_ROLE",
+	"CURRENT_SCHEMA", "CURRENT_TIME", "CURRENT_USER", "GETDATE", "LOCALTIME",
+	"LOCALTIMESTAMP", "NOW", "PI", "SESSION_USER", "SYSDATE", "SYSDATETIME",
+	"SYSTEM_USER", "SYSTIMESTAMP", "UTC_DATE", "UTC_TIME", "UTC_TIMESTAMP",
+}
+
+// TestTableRef_KeywordWithAliasIsNotAnInBinding checks that a WITH alias whose
+// value is a bare keyword (upper or lower case, parenthesised or not) does not
+// bind an IN operand. Measured on ClickHouse 26.2, `WITH NOW AS z … a IN z`
+// reads the table named z under the new analyzer (same scope and nested), and
+// the old analyzer substitutes the keyword in a nested scope and reads the
+// table named after it. The answer must equal the answer with the alias
+// renamed.
+func TestTableRef_KeywordWithAliasIsNotAnInBinding(t *testing.T) {
+	e := newEngine(t)
+	contexts := aliasInContexts()
+	decls := []struct{ name, sql string }{
+		{"with same scope", "WITH {V} AS {N} SELECT * FROM db1.o WHERE {P}"},
+		{"with enclosing scope", "WITH {V} AS {N} SELECT * FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE {P})"},
+		{"with under a same-named table alias", "WITH {V} AS {N} SELECT * FROM db1.o AS {N} WHERE {P}"},
+	}
+	preds := []string{"a IN {R}", "a NOT IN ({R})", "globalIn(a, {R})"}
+	for _, ctxName := range []string{"mapped", "empty"} {
+		opts := contexts[ctxName]
+		for _, si := range []bool{false, true} {
+			for _, decl := range decls {
+				for _, kw := range aliasInKeywords {
+					for _, v := range []string{kw, strings.ToLower(kw), "(" + kw + ")", "((" + strings.ToLower(kw) + "))"} {
+						for _, name := range aliasInNames {
+							for _, pred := range preds {
+								sql := strings.ReplaceAll(decl.sql, "{V}", v)
+								runAliasInMetamorphic(t, e, ctxName, opts(si), si, decl.name, sql, name, pred)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestTableRef_KeywordPins pins N1's storage-integrity twin, N2's direct
+// keyword operand, and the parenthesised calls that still bind.
+func TestTableRef_KeywordPins(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			// N1: the quoted one-part name `"db1.t"` is the table db1."db1.t",
+			// phys."db1.db1.t" — never the Active db1.t, whose ordinary
+			// physical table ClickHouse read before.
+			tablerefCase{name: "keyword with named like the SI twin", si: si,
+				sql:      `WITH NOW AS "db1.t" SELECT a FROM db1.o WHERE a IN "db1.t"`,
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `WITH NOW AS "db1.t" SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.db1.t"`,
+				wantAcc:  []string{"db1.o", ".db1.t"}},
+			tablerefCase{name: "keyword with nested", si: si,
+				sql:      `WITH (current_date) AS "other.secret" SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE in(a, "other.secret"))`,
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `WITH (current_date) AS "other.secret" SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE in(a, phys."db1.other.secret"))`,
+				wantAcc:  []string{"db1.o", "db1.p", ".other.secret"}},
+			// N2: a bare keyword operand is an unqualified table; ClickHouse
+			// reads phys.NOW for `a IN NOW` under both analyzers.
+			tablerefCase{name: "direct keyword operand", si: si,
+				sql:      "SELECT a FROM db1.o WHERE a IN NOW",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.NOW"`,
+				wantAcc:  []string{".NOW", "db1.o"}},
+			tablerefCase{name: "direct keyword operand parenthesised", si: si,
+				sql:      "SELECT a FROM db1.o WHERE a IN (current_user)",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (phys."db1.current_user")`,
+				wantAcc:  []string{".current_user", "db1.o"}},
+			tablerefCase{name: "direct keyword operand callable nested", si: si,
+				sql:      "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE globalIn(a, CURRENT_DATE))",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE globalIn(a, phys."db1.CURRENT_DATE"))`,
+				wantAcc:  []string{".CURRENT_DATE", "db1.o", "db1.p"}},
+		)
+		// A parenthesised call binds as an expression under both analyzers
+		// (NOW(), PI(), CURRENT_DATE(), current_user() measured): the operand
+		// stays untouched and unreported, and a call operand is a value.
+		for _, c := range []struct{ sql, want string }{
+			{"WITH NOW() AS s SELECT a FROM db1.o WHERE a IN s",
+				`WITH NOW() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN s`},
+			{"WITH now() AS s SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN s)",
+				`WITH now() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE a IN s)`},
+			{"WITH PI() AS s SELECT a FROM db1.o WHERE in(a, s)",
+				`WITH PI() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE in(a, s)`},
+			{"WITH (current_user()) AS s SELECT a FROM db1.o AS s WHERE a IN s",
+				`WITH (current_user()) AS s SELECT a FROM phys."db1.o" AS s WHERE a IN s`},
+			{"SELECT a FROM db1.o WHERE a IN NOW()",
+				`SELECT a FROM phys."db1.o" "db1.o" WHERE a IN NOW()`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}

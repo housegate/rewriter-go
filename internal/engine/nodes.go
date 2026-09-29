@@ -749,7 +749,40 @@ func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespace
 	if unresolvedIdentifierNode(node) {
 		return inOperandParameter, namespaceRefDetail{}
 	}
+	// A bare keyword (`a IN NOW`, `a IN (current_user)`) is a no-parens
+	// function node to Polyglot but an ordinary identifier to ClickHouse 26.2,
+	// which reads the table of that name in the current database under both
+	// analyzers. It is an unqualified table operand like `a IN b`.
+	if name, ok := noParensKeywordName(node); ok {
+		return inOperandTable, namespaceRefDetail{
+			ref: NamespaceRef{
+				Source:              NamespaceRefInTable,
+				Target:              TableTarget{Table: name},
+				UsesCurrentDatabase: true,
+			},
+			tableOrigin: namespaceValueIdentifier,
+		}
+	}
 	return inOperandValue, namespaceRefDetail{}
+}
+
+// noParensKeywordName returns the spelling of a bare keyword that Polyglot
+// parsed as a no-parens, argument-less function call (`NOW`, `CURRENT_DATE`,
+// `current_user`, `PI`, …). ClickHouse has no niladic-keyword syntax: such a
+// word is an identifier, so it must never count as a function call.
+func noParensKeywordName(node map[string]any) (string, bool) {
+	fn, ok := node["function"].(map[string]any)
+	if !ok || len(node) != 1 {
+		return "", false
+	}
+	if noParens, _ := fn["no_parens"].(bool); !noParens {
+		return "", false
+	}
+	if args, _ := fn["args"].([]any); len(args) != 0 {
+		return "", false
+	}
+	name, _ := fn["name"].(string)
+	return name, name != ""
 }
 
 // inOperandAlias returns the body of an aliased IN operand, `x IN (db.t AS z)`
@@ -1096,7 +1129,7 @@ type readSourceVisitor struct {
 //     alias;
 //   - aliases: a WITH expression alias whose value is provably not a table
 //     reference (`WITH 1 AS c`, `WITH (1, 2) AS c`, `WITH f(x) AS c`,
-//     `WITH (SELECT 1) AS c`) binds an IN operand as an expression in every
+//     `WITH (SELECT 1) AS c`; not `WITH NOW AS c`, a bare keyword) binds an IN operand as an expression in every
 //     nested scope. An identifier value (`WITH "other.secret" AS c`,
 //     `WITH w AS c`) binds nothing: ClickHouse reads a table through it, so
 //     declareCTEBinding leaves it out and lets it shadow an enclosing binding;
@@ -1657,8 +1690,10 @@ func declareCTEBinding(scope readSourceScope, cte map[string]any) {
 // withValueIsNotTableReference reports whether a WITH expression alias's value
 // is provably not a table reference, so that the alias binds an IN operand of
 // its name as an expression. Measured on ClickHouse 26.2 with both analyzers:
-// a literal, a tuple or array of literals, a function call and a scalar
-// subquery bind as expressions at every depth; an identifier value (bare,
+// a literal, a tuple or array of literals, a parenthesised function call and a
+// scalar subquery bind as expressions at every depth (a no-parens keyword such
+// as `NOW` or `CURRENT_DATE`, which Polyglot parses as a function call, is an
+// identifier to ClickHouse); an identifier value (bare,
 // quoted, parenthesised, qualified or unresolvable), including another alias,
 // makes ClickHouse read a table in the IN position (the table the identifier
 // names, or the table named after the alias). Anything else is treated as an
@@ -1679,11 +1714,13 @@ func withValueIsNotTableReference(node any) bool {
 	if cteBodyIsReadQuery(m) {
 		return true
 	}
-	if _, ok := m["function"].(map[string]any); ok {
-		return true
-	}
-	if _, ok := m["aggregate_function"].(map[string]any); ok {
-		return true
+	// A parenthesised call only: a no-parens keyword (`NOW`, `CURRENT_DATE`)
+	// is an identifier to ClickHouse, which reads a table through it.
+	for _, kind := range []string{"function", "aggregate_function"} {
+		if fn, ok := m[kind].(map[string]any); ok {
+			noParens, _ := fn["no_parens"].(bool)
+			return !noParens
+		}
 	}
 	return !containsNameReference(m)
 }
@@ -1704,6 +1741,14 @@ func containsNameReference(node any) bool {
 		for key, child := range n {
 			if nameReferenceKeys[key] || containsNameReference(child) {
 				return true
+			}
+			// A no-parens function node is a bare keyword, i.e. a name.
+			if key == "function" || key == "aggregate_function" {
+				if fn, ok := child.(map[string]any); ok {
+					if noParens, _ := fn["no_parens"].(bool); noParens {
+						return true
+					}
+				}
 			}
 		}
 	case []any:
