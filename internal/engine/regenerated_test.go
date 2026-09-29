@@ -8,6 +8,8 @@ import (
 
 const differs = "engine: generate: the regenerated statement differs from the input: "
 
+const hash = " contains a #, which ClickHouse reads as a comment or an unrecognised token"
+
 func TestCheckRegenerated(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {
@@ -271,6 +273,22 @@ func TestCheckRegenerated(t *testing.T) {
 		{"mod of a parenthesised operand", "SELECT a MOD (2 + 1) FROM db1.o", differs + "lost [MOD], added [PERCENT]"},
 		{"regexp of a parenthesised operand", "SELECT a REGEXP ('x' = 1) FROM db1.o", differs + "lost [REGEXP], added [MATCH]"},
 		{"format values rows", "INSERT INTO db1.o FORMAT Values (1, 'x')", differs + "lost [FORMAT], added nothing"},
+
+		// A # in a regenerated bare word: ClickHouse reads `# ` as a comment
+		// to the end of the line, so the tail of the statement disappears, and
+		// any other # is an unrecognised token. Polyglot prints the alias of a
+		// bare tuple without its quotes ("x#" as x#), so the spellings match.
+		{"tuple alias with a hash", `SELECT (1, 2) AS "x#" FROM db1.o`, differs + `the regenerated token "x#"` + hash},
+		{"tuple alias with a hash in with", `WITH (1, 2) AS "x#" SELECT a FROM db1.o`, differs + `the regenerated token "x#"` + hash},
+		{"tuple alias with a hash inside", `SELECT (1, 2) AS "x#x" FROM db1.o`, differs + `the regenerated token "x#x"` + hash},
+		{"tuple alias with a hash between", `WITH (1, 2) AS "a#b" SELECT a FROM db1.o`, differs + `the regenerated token "a#b"` + hash},
+		{"tuple alias with a hash backtick", "SELECT (1, 2, 3) AS `x#` FROM db1.o", differs + `the regenerated token "x#"` + hash},
+		{"bare word with a hash", "SELECT a#b FROM db1.o", differs + `the regenerated token "a#b"` + hash},
+		{"quoted identifier with a hash keeps its quotes", `SELECT a AS "x#" FROM db1.o`, ""},
+		{"array alias with a hash keeps its quotes", `SELECT [1, 2] AS "x#" FROM db1.o`, ""},
+		{"string with a hash", "SELECT '#', 'x# y' FROM db1.o", ""},
+		{"hash comment", "SELECT a # comment\nFROM db1.o", ""},
+		{"hash bang comment", "SELECT a #! comment\nFROM db1.o", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ast, err := e.ParseOne(tc.sql)

@@ -74,6 +74,9 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 	if err != nil {
 		return err
 	}
+	if err := checkBareTokens(gen, out); err != nil {
+		return err
+	}
 	if kind == NodeInsert {
 		switch {
 		case insertHasFormatClause(ast):
@@ -96,6 +99,32 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 	}
 	if a, b := columnModifierOrder(sql, in), columnModifierOrder(gen, out); !slices.Equal(a, b) {
 		return fmt.Errorf("%w: column modifiers reordered from [%s] to [%s]", ErrNotRegeneratedFaithfully, strings.Join(a, "; "), strings.Join(b, "; "))
+	}
+	return nil
+}
+
+// checkBareTokens refuses a regenerated statement in which an unquoted token
+// contains a # Polyglot's tokenizer keeps a # that follows a
+// word character inside the word (x#, a#b), so a quoted identifier whose
+// generator dropped its quotes, such as the alias of a bare parenthesised
+// tuple ("x#" printed as x#), is one bare word. ClickHouse's lexer does not:
+// `#` followed by a space or ! starts a comment to the end of the line, which
+// silently drops the rest of the statement, and any other # is an
+// unrecognised token (measured on 26.8: SELECT (1,2) AS x# FROM system.one
+// returns (1,2) without reading the table; x#x is a syntax error). The
+// comparison of spellings cannot see this, because the input's quoted
+// identifier and the regenerated bare word spell alike. A # in a comment, a
+// string or a quoted identifier is not a token character and is not checked.
+// The rule also covers a client's own bare word with a #, which ClickHouse
+// reads the same way, so refusing it only fails closed.
+func checkBareTokens(gen string, toks []rawToken) error {
+	for _, tk := range toks {
+		if isQuotedLexeme(tk.TokenType) {
+			continue
+		}
+		if raw := gen[tk.Span.Start:tk.Span.End]; strings.Contains(raw, "#") {
+			return fmt.Errorf("%w: the regenerated token %q contains a #, which ClickHouse reads as a comment or an unrecognised token", ErrNotRegeneratedFaithfully, raw)
+		}
 	}
 	return nil
 }

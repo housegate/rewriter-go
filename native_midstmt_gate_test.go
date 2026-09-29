@@ -638,6 +638,14 @@ func TestMidStatementDropGateUnquotedAlias(t *testing.T) {
 	add("report/with", "WITH (1, 2) AS \"x SELECT a FROM phys.`other.secret` --\" SELECT a FROM db1.o")
 	add("report/projection", "SELECT (1, 2) AS \"x FROM phys.`other.secret` --\" FROM db1.o")
 	add("report/hg_unsafe", "WITH (1, 2) AS \"x SELECT a FROM hg_unsafe.db1__t --\" SELECT a FROM db1.o")
+	// A single-token alias unquoted to a word with a # in it: ClickHouse reads
+	// `# ` and `#!` as a comment to the end of the line, which drops the rest
+	// of the regenerated statement, and any other # is an unrecognised token.
+	for _, alias := range []string{"x#", "x#x", "a#b", "#x", "x#!", "#"} {
+		add("hash alias/with/"+alias, "WITH (1, 2) AS \""+alias+"\" SELECT a FROM db1.o")
+		add("hash alias/projection/"+alias, "SELECT (1, 2) AS \""+alias+"\" FROM db1.o")
+		add("hash alias/backtick/"+alias, "SELECT (1, 2, 3) AS `"+alias+"` FROM db1.o")
+	}
 	// Polyglot cannot parse a negated or NOT tuple as a WITH item (a SyntaxError
 	// before the gate); in a projection it loses the quotes like a bare tuple.
 	add("projection/negated tuple", "SELECT -(1, 2) AS \"x FROM phys.`other.secret` --\" FROM db1.o")
