@@ -3015,3 +3015,45 @@ func TestTableRef_UnresolvedUnqualifiedPrecedence(t *testing.T) {
 		}
 	}
 }
+
+// TestTableRef_UnresolvedNameDoesNotStripSIWriteRefusalMap pins that the
+// empty-table_rewrites rule applies only when the final rejection is the
+// unresolved-name refusal: a view or MV body that reads an authorized SI table
+// is refused by the SI write refusal, and its table_rewrites must be the same
+// whether or not the body also names an unresolved table.
+func TestTableRef_UnresolvedNameDoesNotStripSIWriteRefusalMap(t *testing.T) {
+	e := newEngine(t)
+	phys := "phys"
+	const siWrite = "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	for _, ctx := range []string{"", "db9"} {
+		dyn := tablerefDynamic(true)
+		dyn.UpstreamLogicalDatabaseInContext = ctx
+		dyn.UpstreamPhysicalDatabaseInContext = &phys
+		opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
+		for _, pair := range [][2]string{
+			{"CREATE VIEW db1.v AS SELECT * FROM db1.t", "CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN t2 USING (a)"},
+			{"CREATE MATERIALIZED VIEW db1.mv TO db1.x AS SELECT * FROM db1.t",
+				"CREATE MATERIALIZED VIEW db1.mv TO db1.x AS SELECT * FROM db1.t JOIN t2 USING (a)"},
+		} {
+			t.Run(fmt.Sprintf("ctx=%q/%s", ctx, pair[1]), func(t *testing.T) {
+				var maps [2]map[string]string
+				for i, sql := range pair {
+					resp, err := doRewrite(e, sql, opts)
+					if err != nil {
+						t.Fatalf("doRewrite(%q): %v", sql, err)
+					}
+					if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != siWrite {
+						t.Fatalf("%q: got %s %q, want the SI write refusal", sql, resp.GetCode(), resp.GetMessage())
+					}
+					maps[i] = resp.GetTableRewrites()
+				}
+				if maps[0]["db1.t"] != "hg_safe.db1__t" {
+					t.Fatalf("baseline table_rewrites = %v, want db1.t → hg_safe.db1__t", maps[0])
+				}
+				if !reflect.DeepEqual(maps[0], maps[1]) {
+					t.Fatalf("table_rewrites = %v, want %v (same as without the unresolved name)", maps[1], maps[0])
+				}
+			})
+		}
+	}
+}

@@ -533,8 +533,8 @@ func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.Write
 				return resp, true, nil
 			}
 			if bodyResp.Code != pb.RewriteCode_Success {
-				clearOnUnresolved(resp, bodyResp)
 				resp.Code, resp.Message = bodyResp.Code, bodyResp.Message
+				clearOnUnresolved(resp)
 				return resp, true, nil
 			}
 			if rewritten, err = engine.SetViewBody(rewritten, newBody); err != nil {
@@ -639,8 +639,8 @@ func rewriteEmbeddedBody(e engine.Engine, rewritten engine.AST, sql string, opts
 		return nil, false, nil
 	}
 	if bodyResp.Code != pb.RewriteCode_Success {
-		clearOnUnresolved(resp, bodyResp)
 		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, bodyResp.Message
+		clearOnUnresolved(resp)
 		return nil, false, nil
 	}
 	out, err := set(rewritten, newBody)

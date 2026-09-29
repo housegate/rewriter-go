@@ -22,6 +22,7 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption, so
 		return nil, err
 	}
 	if resp.Code != pb.RewriteCode_Success {
+		clearOnUnresolved(resp)
 		return resp, nil // reject: leave SqlAfterRewrite empty; native.finalize echoes the input
 	}
 	sql, err := e.Generate(rewritten)
@@ -313,12 +314,12 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		return nil, nil, siErr
 	}
 	if haveUnresolved {
-		// No partial table_rewrites map leaks: the walk may already have
-		// recorded the tables it rewrote before the refusal. The embedded-body
-		// callers clear their own target entries too (clearOnUnresolved).
+		// The partial table_rewrites map is kept here: each caller empties the
+		// map only when this refusal is its FINAL answer (clearOnUnresolved),
+		// so a different refusal that outranks it (the SI write refusal of a
+		// view body) keeps the map it would have without the unresolved name.
 		resp.Code = pb.RewriteCode_InvalidRewriteRequest
 		resp.Message = nameresolve.UnresolvedUnqualifiedTableMessage(unresolved)
-		resp.TableRewrites = map[string]string{}
 		return ast, resp, nil
 	}
 
@@ -404,13 +405,16 @@ func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*p
 	return out
 }
 
-// clearOnUnresolved empties the enclosing write statement's table_rewrites
-// when its embedded body was refused for an unresolved unqualified name, so
-// the rejection carries no partial map (the body's own map is already empty).
-func clearOnUnresolved(dst, body *pb.RewriteSQLResponse) {
-	if body.GetCode() == pb.RewriteCode_InvalidRewriteRequest &&
-		nameresolve.IsUnresolvedUnqualifiedTableMessage(body.GetMessage()) {
-		dst.TableRewrites = map[string]string{}
+// clearOnUnresolved empties resp's table_rewrites when its FINAL message is
+// the unresolved-unqualified refusal (whatever code the caller gave it: an
+// embedded INSERT … SELECT / CTAS body answers UnsupportedStatement), so that
+// rejection carries no partial map — neither the tables the walk rewrote
+// before the refusal nor a write statement's own targets. Every caller of
+// rewriteSelectCore calls it after settling its final code and message.
+func clearOnUnresolved(resp *pb.RewriteSQLResponse) {
+	if resp.GetCode() != pb.RewriteCode_Success &&
+		nameresolve.IsUnresolvedUnqualifiedTableMessage(resp.GetMessage()) {
+		resp.TableRewrites = map[string]string{}
 	}
 }
 
