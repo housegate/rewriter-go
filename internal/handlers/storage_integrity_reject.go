@@ -69,6 +69,11 @@ func AnnotateStorageIntegrityRejectAST(e engine.Engine, resp *pb.RewriteSQLRespo
 	// (a column DEFAULT / MATERIALIZED subquery, spec 2026-09-26 R2) is still
 	// a proven table reference: spec 2026-09-26 §5 puts the SI message (T3)
 	// ahead of the ordinary-stage refusal.
+	// T2 (an Identifier parameter in a table position) precedes T3 in that
+	// same order, so its message is never upgraded.
+	if resp.GetMessage() == engine.IdentifierParameterMessage {
+		return
+	}
 	if kind, kerr := engine.NodeKind(ast); kerr != nil || kind == engine.NodeCommand {
 		return
 	}
