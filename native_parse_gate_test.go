@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -88,6 +89,30 @@ func TestWholeStatementParseGateEveryMode(t *testing.T) {
 			}
 			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "statement is not supported" ||
 				resp.GetSqlAfterRewrite() != sql || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_UNSPECIFIED {
+				t.Fatalf("resp = %+v", resp)
+			}
+		})
+	}
+}
+
+// MaterializeSQL must not sign a statement it did not parse in full: before
+// the gate it returned the materialized prefix as Success.
+func TestMaterializeRefusesStatementNotParsedInFull(t *testing.T) {
+	e := newEngine(t)
+	now := int64(1_700_000_000_000_000_000)
+	for _, sql := range []string{
+		"INSERT INTO db1.o SELECT now() FROM db1.p AS a XYZ",
+		"INSERT INTO db1.o SELECT now() FROM db1.p SELECT * FROM phys.x",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			resp, err := doMaterializeSQL(e, &pb.MaterializeSQLRequest{Sql: sql,
+				Inputs: &pb.MaterializationInputs{NowUnixNs: &now}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.GetCode() != pb.MaterializeCode_MaterializeSyntaxError ||
+				!strings.Contains(resp.GetMessage(), "statement was not parsed in full") ||
+				resp.GetSqlAfterMaterialization() != sql || len(resp.GetReplacements()) != 0 {
 				t.Fatalf("resp = %+v", resp)
 			}
 		})

@@ -43,6 +43,9 @@ func doMaterializeSQL(e engine.Engine, req *pb.MaterializeSQLRequest) (*pb.Mater
 	resp.MaterializerProfileId = profileID
 
 	ast, err := e.ParseOne(sql)
+	if err == nil {
+		err = engine.CheckParsedInFull(e, sql, ast)
+	}
 	if err != nil {
 		resp.Code = pb.MaterializeCode_MaterializeSyntaxError
 		resp.Message = err.Error()

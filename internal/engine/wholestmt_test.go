@@ -79,3 +79,24 @@ func TestCheckParsedInFull(t *testing.T) {
 		})
 	}
 }
+
+// The snapshot-query analyser admits only a statement parsed in full: before
+// the gate it prepared the parsed prefix and dropped the rest.
+func TestSnapshotRefusesStatementNotParsedInFull(t *testing.T) {
+	e := newTestEngine(t)
+	catalog := []SnapshotTable{
+		{Database: "tenant", Name: "copy", ID: "target", Columns: []SnapshotColumn{{Name: "value", Type: "Int64", Ordinary: true}}},
+		{Database: "tenant", Name: "events", ID: "source", Columns: []SnapshotColumn{{Name: "value", Type: "Int64", Ordinary: true}}},
+	}
+	for _, sql := range []string{
+		"INSERT INTO tenant.copy SELECT value FROM tenant.events AS e XYZ",
+		"INSERT INTO tenant.copy SELECT value FROM tenant.events SELECT * FROM phys.x",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			p, err := AnalyzeSnapshot(e, sql, SnapshotOptions{Database: "tenant", Catalog: catalog})
+			if p != nil || !errors.Is(err, snapshotStatement) {
+				t.Fatalf("plan = %v, err = %v; want the INVALID_INPUT statement refusal", p, err)
+			}
+		})
+	}
+}
