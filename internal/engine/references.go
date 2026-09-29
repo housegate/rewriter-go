@@ -140,8 +140,22 @@ func addOpaqueAlterDatabases(e Engine, ast AST, sql string, add func(string)) er
 // name (spec 2026-09-26 T3, controller ruling 1): the joinGet family, the
 // dictGet/dictHas/dictIsIn/dictGetHierarchy/dictGetChildren/dictGetDescendants
 // family, and hasColumnInTable.
+//
+// name is a Polyglot-decoded function name (a matcher passes either an AST
+// .name or a QUOTED_IDENTIFIER .Text). The ClickHouse identifier escapes are
+// finished first (decodeIdentifierEscapes), so a quoted `\NjoinGet` or
+// `joinG\x65t` — which ClickHouse resolves to the real lookup and runs — is
+// matched, not bypassed. A name that cannot be decoded fails closed as a lookup
+// so the caller refuses it; ClickHouse would fail such a statement anyway.
+// The prefix match stays case-insensitive as a deliberate over-match: ClickHouse
+// resolves these names case-sensitively, so a wrong-case spelling only reads
+// nothing.
 func IsStringLookup(name string) bool {
-	lower := strings.ToLower(name)
+	decoded, ok := decodeIdentifierEscapes(name)
+	if !ok {
+		return true
+	}
+	lower := strings.ToLower(decoded)
 	switch lower {
 	case "joinget", "joingetornull":
 		return true
