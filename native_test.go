@@ -1146,6 +1146,12 @@ func TestStorageIntegrityContract_LiveViewOrderedSourceAndAliasRegressions(t *te
 		},
 		{
 			// A FROM alias does not bind an IN operand, so `t` names db1.t.
+			// The live view is an unmodelled class under SI; the final
+			// annotation (Spec I D2, AnnotateStorageIntegrityRejectAST) names
+			// the first SI object the statement proves and, for a logical SI
+			// table, always uses the shared write-reject text whatever the
+			// table's role. The shared corpus pins the same text for a live
+			// view that only reads db1.t (si_create_live_view_over_si_rejected).
 			name:    "FROM alias is not an IN binding",
 			sql:     "CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
 			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",

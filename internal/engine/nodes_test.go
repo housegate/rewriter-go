@@ -1284,6 +1284,24 @@ func TestCollectEmbeddedReadSources_InTableOperandsRespectOutputAndTableAliases(
 			},
 		},
 		{
+			name: "identifier-valued WITH alias is not an IN binding",
+			sql:  `WITH "other.secret" AS t SELECT * FROM other.u WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "identifier-valued WITH alias shadows an enclosing constant one",
+			sql:  `WITH 1 AS t SELECT * FROM other.u WHERE id IN (WITH w AS t SELECT id FROM other.w WHERE in(id, t))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
 			name: "enclosing WITH expression alias stays an IN binding",
 			sql:  `WITH 1 AS t SELECT * FROM other.u AS t WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
 			want: []readSourceView{

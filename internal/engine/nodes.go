@@ -1094,8 +1094,12 @@ type readSourceVisitor struct {
 //   - ctes: a read-query CTE name (`WITH c AS (SELECT …)`) binds a FROM table
 //     and an IN operand in every nested scope, even under a same-named table
 //     alias;
-//   - aliases: a WITH expression alias (`WITH 1 AS c`, `WITH (SELECT 1) AS c`)
-//     binds an IN operand as an expression in every nested scope;
+//   - aliases: a WITH expression alias whose value is provably not a table
+//     reference (`WITH 1 AS c`, `WITH (1, 2) AS c`, `WITH f(x) AS c`,
+//     `WITH (SELECT 1) AS c`) binds an IN operand as an expression in every
+//     nested scope. An identifier value (`WITH "other.secret" AS c`,
+//     `WITH w AS c`) binds nothing: ClickHouse reads a table through it, so
+//     declareCTEBinding leaves it out and lets it shadow an enclosing binding;
 //   - projection: a projection alias binds an IN operand as an expression
 //     only in its own SELECT. In a nested SELECT the old analyzer reads the
 //     table of that name, so it is never inherited.
@@ -1640,7 +1644,76 @@ func declareCTEBinding(scope readSourceScope, cte map[string]any) {
 		scope.ctes[name] = true
 		return
 	}
-	scope.aliases[name] = true
+	if withValueIsNotTableReference(cte["this"]) {
+		scope.aliases[name] = true
+		return
+	}
+	// An identifier value (or a chain through another alias) binds nothing,
+	// and it shadows any enclosing binding of the same name.
+	delete(scope.aliases, name)
+	delete(scope.ctes, name)
+}
+
+// withValueIsNotTableReference reports whether a WITH expression alias's value
+// is provably not a table reference, so that the alias binds an IN operand of
+// its name as an expression. Measured on ClickHouse 26.2 with both analyzers:
+// a literal, a tuple or array of literals, a function call and a scalar
+// subquery bind as expressions at every depth; an identifier value (bare,
+// quoted, parenthesised, qualified or unresolvable), including another alias,
+// makes ClickHouse read a table in the IN position (the table the identifier
+// names, or the table named after the alias). Anything else is treated as an
+// identifier: the operand is then rewritten as a table, which fails safe.
+func withValueIsNotTableReference(node any) bool {
+	for {
+		m, ok := node.(map[string]any)
+		if !ok || len(m) != 1 {
+			return false
+		}
+		paren, ok := m["paren"].(map[string]any)
+		if !ok {
+			break
+		}
+		node = paren["this"]
+	}
+	m := node.(map[string]any)
+	if cteBodyIsReadQuery(m) {
+		return true
+	}
+	if _, ok := m["function"].(map[string]any); ok {
+		return true
+	}
+	if _, ok := m["aggregate_function"].(map[string]any); ok {
+		return true
+	}
+	return !containsNameReference(m)
+}
+
+// nameReferenceKeys are the AST node kinds that can carry a name ClickHouse
+// might resolve to a table (or a nested query that can).
+var nameReferenceKeys = map[string]bool{
+	"column": true, "identifier": true, "dot": true, "parameter": true,
+	"star": true, "lambda": true, "table": true, "subquery": true,
+	NodeSelect: true, NodeUnion: true, NodeIntersect: true, NodeExcept: true,
+}
+
+// containsNameReference reports whether node has any name-bearing node, so
+// that a value without one (literals and operators over them) is a constant.
+func containsNameReference(node any) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		for key, child := range n {
+			if nameReferenceKeys[key] || containsNameReference(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range n {
+			if containsNameReference(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cteBodyIsReadQuery(node any) bool {

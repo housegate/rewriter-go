@@ -198,7 +198,11 @@ func TestAnnotateStorageIntegrityReject_LiveViewVerifierRegressions(t *testing.T
 			"CREATE LIVE VIEW other.v AS WITH RECURSIVE t AS (SELECT * FROM t) SELECT * FROM t", "original"},
 		{"output alias is not an IN table",
 			"CREATE LIVE VIEW other.v AS SELECT tuple(1,2) AS t, 1 IN t", "original"},
-		// A FROM alias does not bind an IN operand, so `t` names db1.t.
+		// A FROM alias does not bind an IN operand, so `t` names db1.t. The
+		// annotation uses the shared write-reject text for any logical SI
+		// table a refused statement proves, whatever its role; the corpus
+		// pins it for a live view that only reads db1.t
+		// (si_create_live_view_over_si_rejected).
 		{"FROM alias is not an IN binding",
 			"CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
 			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
