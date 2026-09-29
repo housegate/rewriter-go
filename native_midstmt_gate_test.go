@@ -551,3 +551,185 @@ func TestMaterializeRefusesStatementNotRegeneratedFaithfully(t *testing.T) {
 		t.Fatalf("a faithful statement still materializes: resp = %+v, err = %v", resp, err)
 	}
 }
+
+// TestMidStatementDropGateUnquotedAlias pins the gate's refusal of a
+// SQL-injection shape through an alias.
+//
+// DEFECT (Polyglot, measured on v0.12.1 through the pinned build): Polyglot
+// drops the quotes of a quoted alias on a bare parenthesised tuple, both in a
+// WITH item and in a projection, so the alias text is printed as SQL. On a
+// build without this gate
+//
+//	WITH (1, 2) AS "x SELECT a FROM phys.`other.secret` --" SELECT a FROM db1.o
+//
+// was rewritten to
+//
+//	WITH (1, 2) AS x SELECT a FROM phys.`other.secret` -- SELECT a FROM phys."db1.o" "db1.o"
+//
+// and answered Success: a cross-tenant read. Nothing else in the rewriter
+// looks at the regenerated text, so CheckRegenerated is the only barrier; a
+// change that weakens its comparison of quoted identifiers reopens this hole.
+//
+// Measured with engine.Generate against the input (a quoted alias `x y`, in
+// WITH and in a projection): the quotes are lost after a tuple of any arity
+// ((1, 2), (1, 2, 3), (a, b), (1, 'x'), (1, [2])), after -tuple, NOT tuple and
+// a tuple in a comparison or arithmetic (as a WITH item the negated and NOT
+// forms are a Polyglot SyntaxError instead); they are kept after an array literal
+// ([1, 2], [], [a], [(1, 2)]), tuple(…), array(…), map(…), a one-element
+// parenthesised expression, a nested ((1, 2)), a (SELECT …) scalar subquery,
+// a tuple cast to a type, a tuple element access, an IN predicate and a scalar
+// literal, column, function call or CASE. A backtick alias loses its quotes
+// the same way.
+func TestMidStatementDropGateUnquotedAlias(t *testing.T) {
+	const unsupported = "statement is not supported"
+	e := newEngine(t)
+
+	// Every alias below is one quoted identifier in the input; unquoted it
+	// would run as SQL.
+	injections := []string{
+		"x SELECT a FROM phys.`other.secret` --",
+		"x FROM phys.`other.secret` --",
+		"x SELECT a FROM hg_unsafe.db1__t --",
+		"x\nSELECT a FROM phys.`other.secret`",
+		"x y",
+		"x\ty",
+		"x--",
+		"x/*",
+		"x;",
+		"x)",
+		"x.y",
+	}
+	shapes := []struct{ name, expr string }{
+		{"pair", "(1, 2)"},
+		{"triple", "(1, 2, 3)"},
+		{"columns", "(a, b)"},
+		{"mixed", "(1, 'x')"},
+		{"tuple with array", "(1, [2])"},
+		{"tuple comparison", "(1, 2) = (3, 4)"},
+		{"tuple sum", "(1, 2) + (3, 4)"},
+	}
+	// The forms an aliased expression can sit in. WITH and the projection are
+	// the ones the defect was found in; the rest measured the same.
+	forms := []struct{ name, tmpl string }{
+		{"with", "WITH %s AS %s SELECT a FROM db1.o"},
+		{"projection", "SELECT %s AS %s FROM db1.o"},
+		{"subquery projection", "SELECT * FROM (SELECT %s AS %s FROM db1.o)"},
+		{"cte body", "WITH c AS (SELECT %s AS %s) SELECT a FROM db1.o"},
+		{"where", "SELECT a FROM db1.o WHERE %s AS %s"},
+		{"group by", "SELECT a FROM db1.o GROUP BY %s AS %s"},
+		{"function argument", "SELECT f(%s AS %s) FROM db1.o"},
+		{"create view", "CREATE VIEW db1.v AS SELECT %s AS %s FROM db1.o"},
+		{"insert select", "INSERT INTO db1.o SELECT %s AS %s FROM db1.p"},
+	}
+	type row struct{ name, sql string }
+	var refused []row
+	add := func(name, sql string) { refused = append(refused, row{name, sql}) }
+	for _, form := range forms {
+		for _, shape := range shapes {
+			// The full injection, in both quote styles.
+			add(form.name+"/"+shape.name+"/double/injection", fillAliasForm(form.tmpl, shape.expr, `"`+injections[0]+`"`))
+			// A backtick alias cannot contain a backtick, so it uses a plain
+			// injection.
+			add(form.name+"/"+shape.name+"/backtick/injection", fillAliasForm(form.tmpl, shape.expr, "`x SELECT a FROM hg_unsafe.db1__t --`"))
+		}
+	}
+	// The verbatim statements from the report, and each injection alias on the
+	// two forms the defect was found in.
+	add("report/with", "WITH (1, 2) AS \"x SELECT a FROM phys.`other.secret` --\" SELECT a FROM db1.o")
+	add("report/projection", "SELECT (1, 2) AS \"x FROM phys.`other.secret` --\" FROM db1.o")
+	add("report/hg_unsafe", "WITH (1, 2) AS \"x SELECT a FROM hg_unsafe.db1__t --\" SELECT a FROM db1.o")
+	// Polyglot cannot parse a negated or NOT tuple as a WITH item (a SyntaxError
+	// before the gate); in a projection it loses the quotes like a bare tuple.
+	add("projection/negated tuple", "SELECT -(1, 2) AS \"x FROM phys.`other.secret` --\" FROM db1.o")
+	add("projection/not tuple", "SELECT NOT (1, 2) AS \"x FROM phys.`other.secret` --\" FROM db1.o")
+	for _, inj := range injections {
+		for _, form := range forms[:2] {
+			for _, shape := range shapes[:3] {
+				add("alias/"+form.name+"/"+shape.name+"/"+strings.NewReplacer("\n", `\n`, "\t", `\t`).Replace(inj),
+					fillAliasForm(form.tmpl, shape.expr, `"`+inj+`"`))
+			}
+		}
+	}
+
+	for _, r := range refused {
+		for mode, opts := range commandModes() {
+			t.Run(mode+"/"+r.name, func(t *testing.T) {
+				resp, err := doRewrite(e, r.sql, opts)
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+					t.Fatalf("code = %s (%s), want UnsupportedStatement; sql_after_rewrite = %q", resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
+				}
+				if resp.GetMessage() != unsupported {
+					t.Fatalf("message = %q, want %q", resp.GetMessage(), unsupported)
+				}
+				if resp.GetSqlAfterRewrite() != r.sql {
+					t.Fatalf("sql_after_rewrite = %q, want the input echoed", resp.GetSqlAfterRewrite())
+				}
+			})
+		}
+	}
+
+	// Shapes that keep their quotes are not refused: the alias stays one
+	// quoted identifier, whatever it contains, and the regenerated statement
+	// is the one the client wrote. The rewritten text must still carry the
+	// alias inside its quotes.
+	for _, r := range []row{
+		{"array in with", "WITH [1, 2] AS \"x SELECT a FROM phys.`other.secret` --\" SELECT a FROM db1.o"},
+		{"array in projection", "SELECT [1, 2] AS \"x FROM phys.`other.secret` --\" FROM db1.o"},
+		{"empty array", "WITH [] AS \"x SELECT a FROM hg_unsafe.db1__t --\" SELECT a FROM db1.o"},
+		{"array of tuples", "SELECT [(1, 2)] AS \"x y\" FROM db1.o"},
+		{"array function", "SELECT array(1, 2) AS \"x y\" FROM db1.o"},
+		{"tuple function", "SELECT tuple(1, 2) AS \"x y\" FROM db1.o"},
+		{"map function", "SELECT map('k', 1) AS \"x y\" FROM db1.o"},
+		{"tuple element access", "SELECT (1, 2).1 AS \"x y\" FROM db1.o"},
+		{"scalar subquery", "SELECT (SELECT 1, 2) AS \"x y\" FROM db1.o"},
+		{"column", "SELECT a AS \"x SELECT 1 --\" FROM db1.o"},
+	} {
+		for mode, opts := range commandModes() {
+			t.Run(mode+"/keeps quotes/"+r.name, func(t *testing.T) {
+				resp, err := doRewrite(e, r.sql, opts)
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if resp.GetCode() != pb.RewriteCode_Success {
+					t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+				}
+				alias := r.sql[strings.Index(r.sql, `AS "`)+len(`AS `):]
+				alias = alias[:strings.Index(alias[1:], `"`)+2]
+				if !strings.Contains(resp.GetSqlAfterRewrite(), " AS "+alias) {
+					t.Fatalf("sql_after_rewrite = %q lost the quotes of %s", resp.GetSqlAfterRewrite(), alias)
+				}
+			})
+		}
+	}
+
+	// A tuple alias with no special characters loses its quotes but stays the
+	// same identifier, and the gate accepts it: the raw token spelling is
+	// unchanged (measured: `xy`, `x`, and a keyword such as `from` all print
+	// unquoted, and ClickHouse 26.8 reads each as the alias).
+	for _, sql := range []string{
+		`SELECT (1, 2) AS "xy" FROM db1.o`,
+		`WITH (1, 2) AS "xy" SELECT a FROM db1.o`,
+		`SELECT (1, 2) AS xy FROM db1.o`,
+	} {
+		for mode, opts := range commandModes() {
+			t.Run(mode+"/plain alias/"+sql, func(t *testing.T) {
+				resp, err := doRewrite(e, sql, opts)
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if resp.GetCode() != pb.RewriteCode_Success {
+					t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
+				}
+			})
+		}
+	}
+}
+
+// fillAliasForm substitutes the expression and the (already quoted) alias into
+// a form template's two %s verbs without interpreting % in either.
+func fillAliasForm(tmpl, expr, alias string) string {
+	return strings.Replace(strings.Replace(tmpl, "%s", expr, 1), "%s", alias, 1)
+}
