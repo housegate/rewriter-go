@@ -42,9 +42,11 @@ var ErrNotRegeneratedFaithfully = errors.New("engine: generate: the regenerated 
 // compared only up to the name after its last FORMAT keyword: what follows is
 // data that GenerateInsert splices back verbatim (the parse gate's payload
 // rule). A column or alias named format is not such a clause. An INSERT …
-// SELECT … FORMAT <name> is compared in full, apart from a text of only
-// comments after the name when the statement reads no input(): ClickHouse
-// ignores that text (withoutIgnoredData).
+// SELECT … FORMAT <name> that reads input() anywhere is refused unless the
+// text after the name is the client-streaming form, [ \t]*\n? (any more is
+// rows, isStreamedDataTail); otherwise it is compared in full, apart from a
+// text of only comments after the name, which ClickHouse ignores
+// (withoutIgnoredData).
 func CheckRegenerated(e Engine, sql string, ast AST) error {
 	kind, err := NodeKind(ast)
 	if err != nil {
@@ -70,6 +72,11 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 		case insertHasFormatClause(ast):
 			in, out = throughFormatName(in), throughFormatName(out)
 		case insertSelectHasFormat(ast):
+			if readsInput(in) {
+				if tail := afterFormatName(sql, in); !isStreamedDataTail(tail) {
+					return fmt.Errorf("%w: lost input() data %q, added nothing", ErrNotRegeneratedFaithfully, tail)
+				}
+			}
 			in = withoutIgnoredData(sql, in)
 		}
 	}
@@ -105,24 +112,47 @@ func insertSelectHasFormat(ast AST) bool {
 
 // withoutIgnoredData drops the tokenizer's inline-data token (a zero-width
 // token at EOF right after FORMAT <name>, whose text is the rest of the
-// statement) from an INSERT … SELECT … FORMAT <name> <text> when <text> is
-// only comments and the statement reads no input(). ClickHouse then ignores
-// the text (measured on 26.2: formatQuery drops it), and Generate drops it
-// too. Any other text is kept and compared, so its loss refuses: with input()
-// the text is the rows (INSERT … SELECT * FROM input('a String') FORMAT TSV 9
-// inserts 9, and … FORMAT TSV -- c inserts the row "-- c"), and a text that is
-// not a comment is not known to be ignored. No other token is dropped: in
-// INSERT … SELECT format x FROM p the select has no FORMAT clause, so the
-// FROM p the tokenizer took for data is compared, and its loss refused.
+// statement) from an INSERT … SELECT … FORMAT <name> <text> that reads no
+// input() when <text> is only comments. ClickHouse then ignores the text
+// (measured on 26.2: formatQuery drops it), and Generate drops it too. Any
+// other text is kept and compared, so its loss refuses: a text that is not a
+// comment is not known to be ignored. A statement that reads input() never
+// gets here with a text (CheckRegenerated refuses it first). No other token
+// is dropped: in INSERT … SELECT format x FROM p the select has no FORMAT
+// clause, so the FROM p the tokenizer took for data is compared, and its
+// loss refused.
 func withoutIgnoredData(sql string, toks []rawToken) []rawToken {
 	n := len(toks)
 	if n < 3 || toks[n-1].Span.Start != toks[n-1].Span.End || toks[n-3].TokenType != "FORMAT" {
 		return toks
 	}
-	if !onlyComments(sql[toks[n-2].Span.End:]) || readsInput(toks) {
+	if !onlyComments(sql[toks[n-2].Span.End:]) {
 		return toks
 	}
 	return toks[:n-1]
+}
+
+// afterFormatName returns the source text after the name that follows the
+// last FORMAT keyword, or the whole statement when there is none.
+func afterFormatName(sql string, toks []rawToken) string {
+	for i := len(toks) - 2; i >= 0; i-- {
+		if toks[i].TokenType == "FORMAT" {
+			return sql[toks[i+1].Span.End:]
+		}
+	}
+	return sql
+}
+
+// isStreamedDataTail reports whether the text after the FORMAT name of an
+// INSERT … SELECT that reads input() carries no rows: ClickHouse skips
+// [ \t]*\n? there and reads the rest as data, even blank lines and comments
+// (measured on 26.2 over HTTP: FORMAT CSV, CSV\n and CSV \t\n insert nothing,
+// while CSV\n \n and CSV \t\n\t\n insert a row, and FORMAT TSV -- c inserts
+// the row "-- c"). An empty text is the real client-streaming form, where the
+// rows arrive separately.
+func isStreamedDataTail(tail string) bool {
+	tail = strings.TrimLeft(tail, " \t")
+	return tail == "" || tail == "\n"
 }
 
 // onlyComments reports whether s is whitespace, -- line comments and /* */
@@ -149,7 +179,8 @@ func onlyComments(s string) bool {
 	return true
 }
 
-// readsInput reports whether a statement calls the input() table function.
+// readsInput reports whether a statement calls the input() table function
+// anywhere, in a CTE or a subquery too: input followed by (, in any case.
 func readsInput(toks []rawToken) bool {
 	for i := 0; i+1 < len(toks); i++ {
 		if strings.EqualFold(toks[i].Text, "input") && toks[i+1].TokenType == "L_PAREN" {

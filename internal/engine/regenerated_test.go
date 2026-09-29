@@ -152,8 +152,21 @@ func TestCheckRegenerated(t *testing.T) {
 		// it is the rows (measured on 26.2: FORMAT TSV 9 inserts 9, and
 		// FORMAT TSV -- c inserts the row "-- c").
 		{"insert select format comments", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON /* c */ -- d", ""},
-		{"insert select input data", "INSERT INTO db1.o SELECT * FROM input('a UInt8') FORMAT TSV 7", differs + "lost [7], added nothing"},
-		{"insert select input comment is data", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT TSV -- c", differs + "lost [-- C], added nothing"},
+		{"insert select input data", "INSERT INTO db1.o SELECT * FROM input('a UInt8') FORMAT TSV 7", differs + `lost input() data " 7", added nothing`},
+		{"insert select input comment is data", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT TSV -- c", differs + `lost input() data " -- c", added nothing`},
+
+		// Fix round 3 (re-review 2 R1): with input() anywhere in the statement,
+		// any text after the FORMAT name beyond [ \t]*\n? is data, whether or
+		// not the tokenizer emitted a data token (measured on 26.2 over HTTP:
+		// FORMAT CSV, CSV\n and CSV \t\n insert nothing; CSV\n \n and
+		// CSV \t\n\t\n insert a row; a CTE's FORMAT TSV -- c inserts "-- c").
+		{"insert cte input comment is data", "INSERT INTO db1.o WITH x AS (SELECT * FROM input('a String')) SELECT * FROM x FORMAT TSV -- c", differs + `lost input() data " -- c", added nothing`},
+		{"insert cte input block comment is data", "INSERT INTO db1.o WITH x AS (SELECT * FROM input('a String')) SELECT * FROM x FORMAT CSV /* c */", differs + `lost input() data " /* c */", added nothing`},
+		{"insert select input blank line is data", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV\n \n", differs + `lost input() data "\n \n", added nothing`},
+		{"insert select input whitespace lines are data", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT TSV \t\n\t\n", differs + `lost input() data " \t\n\t\n", added nothing`},
+		{"insert select input streamed", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV", ""},
+		{"insert select input streamed after a newline", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV\n", ""},
+		{"insert select input streamed after blanks and a newline", "INSERT INTO db1.o SELECT * FROM input('a String') FORMAT CSV \t\n", ""},
 		{"insert select format settings tail", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON SETTINGS max_threads = 1", differs + "lost [SETTINGS MAX_THREADS = 1], added nothing"},
 		{"insert select format semicolon tail", "INSERT INTO db1.o SELECT a FROM db1.p FORMAT JSON;", differs + "lost [;], added nothing"},
 
