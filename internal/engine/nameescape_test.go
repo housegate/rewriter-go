@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestDecodeIdentifierEscapes pins the residual ClickHouse identifier decode
 // this package applies on top of Polyglot's tokenizer output. Inputs are
@@ -14,19 +17,19 @@ func TestDecodeIdentifierEscapes(t *testing.T) {
 		ok   bool
 	}{
 		{"in", "in", true},
-		{`\Nin`, "in", true},        // \N decodes to nothing
+		{`\Nin`, "in", true}, // \N decodes to nothing
 		{`i\Nn`, "in", true},
 		{`in\N`, "in", true},
 		{`\N\Nin`, "in", true},
-		{`\in`, `\in`, true},        // unknown escape keeps its backslash
-		{`\\in`, `\in`, true},       // Polyglot already collapsed the source \\ to one \; \i stays unknown
+		{`\in`, `\in`, true},  // unknown escape keeps its backslash
+		{`\\in`, `\in`, true}, // Polyglot already collapsed the source \\ to one \; \i stays unknown
 		{`joinGet`, "joinGet", true},
 		{`\NjoinGet`, "joinGet", true},
 		{`joinGe\Nt`, "joinGet", true},
-		{`\x69n`, "in", true},       // defensive: a \xHH left in the text still decodes
-		{`\xZZ`, `\xZZ`, true},      // not two hex digits: unknown escape, kept
-		{`\x6`, `\x6`, true},        // truncated \x: kept, not an error
-		{`ab\`, "", false},          // trailing lone backslash: cannot decode
+		{`\x69n`, "in", true},  // defensive: a \xHH left in the text still decodes
+		{`\xZZ`, `\xZZ`, true}, // not two hex digits: unknown escape, kept
+		{`\x6`, `\x6`, true},   // truncated \x: kept, not an error
+		{`ab\`, "", false},     // trailing lone backslash: cannot decode
 	} {
 		got, ok := decodeIdentifierEscapes(tc.in)
 		if ok != tc.ok || (ok && got != tc.want) {
@@ -44,7 +47,7 @@ func TestCanonicalCallableInName(t *testing.T) {
 		"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn",
 		"globalNullIn", "globalNotNullIn", "inIgnoreSet", "globalNotNullInIgnoreSet",
 		`\Nin`, `i\Nn`, `in\N`, // \N spellings resolve to in
-		`not\x49n`,   // -> notIn
+		`not\x49n`,    // -> notIn
 		`glob\x61lIn`, // -> globalIn
 	}
 	for _, n := range recognised {
@@ -132,5 +135,113 @@ func TestOpaqueQuotedNameDecode(t *testing.T) {
 	// The same for an opaque INSERT query text.
 	if !OpaqueInsertQueryIsUngoverned(e, "SETTINGS x=1 VALUES (`\\NjoinGet`('db2.x','v',1))") {
 		t.Errorf("OpaqueInsertQueryIsUngoverned escaped joinGet = false, want true")
+	}
+}
+
+// TestClickHouseEscapeFidelity pins the escape table measured on ClickHouse
+// 26.2 (DESCRIBE (SELECT 1 AS `…`)): \/ and \= drop the backslash, \e is ESC,
+// \: and unknown letters keep it.
+func TestClickHouseEscapeFidelity(t *testing.T) {
+	for in, want := range map[string]string{
+		`a\/b`: "a/b", `a\=b`: "a=b", `a\eb`: "a\x1bb", `a\:b`: `a\:b`, `a\qb`: `a\qb`,
+		`a\'b`: "a'b", `a\"b`: `a"b`, "a\\`b": "a`b", `a\\b`: `a\b`, `a\tb`: "a\tb", `a\0b`: "a\x00b",
+	} {
+		if got, ok := decodeIdentifierEscapes(in); !ok || got != want {
+			t.Errorf("decodeIdentifierEscapes(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+// TestDecodeQuotedIdentifier decodes source spellings exactly as ClickHouse's
+// ParserIdentifier does, and refuses what ClickHouse cannot read as a name.
+func TestDecodeQuotedIdentifier(t *testing.T) {
+	for _, tc := range []struct {
+		raw, want string
+		ok        bool
+	}{
+		{"`ph\\Nys`", "phys", true},
+		{`"ph\Nys"`, "phys", true},
+		{"`hg_\\Nsafe`", "hg_safe", true},
+		{"`t\\N`", "t", true},
+		{"`t\\\\N`", `t\N`, true}, // an escaped backslash is a real one
+		{"`\\x74`", "t", true},
+		{"`a``b`", "a`b", true},
+		{`"a""b"`, `a"b`, true},
+		{"`a\\`b`", "a`b", true},
+		{"“in”", "in", true},
+		{"“a\\Nb”", `a\Nb`, true},  // English quotes take no escapes
+		{"`\\N`", "", false},       // empty identifier
+		{"`ph\\xZZys`", "", false}, // \x without two hex digits
+		{"`ab\\x6`", "", false},    // \x swallowing the closing quote
+		{"`\\xff`", "", false},     // not UTF-8
+		{"`abc", "", false},
+		{"abc", "", false},
+	} {
+		got, ok := decodeQuotedIdentifier(tc.raw)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("decodeQuotedIdentifier(%q) = %q, %v; want %q, %v", tc.raw, got, ok, tc.want, tc.ok)
+		}
+	}
+	for raw, want := range map[string]string{`'ph\Nys'`: "phys", `'a''b'`: "a'b", `'a\\b'`: `a\b`, `'x\x41'`: "xA"} {
+		if got, ok := decodeQuotedString(raw); !ok || got != want {
+			t.Errorf("decodeQuotedString(%q) = %q, %v; want %q", raw, got, ok, want)
+		}
+	}
+}
+
+// TestQuoteIdentifierSQLRoundTrips checks that a spliced name decodes back to
+// itself, whatever bytes a decoded name may now hold.
+func TestQuoteIdentifierSQLRoundTrips(t *testing.T) {
+	for _, name := range []string{"db1.t", `t\N`, "a`b", `a\x41`, "tab\there", "esc\x1bape", "nul\x00", "é"} {
+		quoted := quoteIdentifierSQL(name)
+		if got, ok := decodeQuotedIdentifier(quoted); !ok || got != name {
+			t.Errorf("quoteIdentifierSQL(%q) = %s decodes to %q, %v", name, quoted, got, ok)
+		}
+	}
+}
+
+// TestDecodeASTIdentifiersIngestion checks the ParseOne ingestion: escaped
+// names arrive decoded, a statement without a backslash keeps Polyglot's exact
+// bytes, and an undecodable name fails the parse.
+func TestDecodeASTIdentifiersIngestion(t *testing.T) {
+	e := newTestEngine(t)
+	ast, err := e.ParseOne("SELECT `_hg_\\Nrow_id` FROM `db\\N1`.`t\\N`")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, err := CollectSelectTables(ast)
+	if err != nil || len(tables) != 1 || tables[0].DB != "db1" || tables[0].Table != "t" {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	if !strings.Contains(string(ast), `"_hg_row_id"`) {
+		t.Fatalf("column not decoded: %s", ast)
+	}
+	if _, err := e.ParseOne("SELECT * FROM `\\N`.x"); err == nil {
+		t.Fatal("empty decoded identifier parsed")
+	}
+	// No backslash: byte-identical to the fast path's input.
+	plain, _ := e.ParseOne("SELECT * FROM db1.t")
+	again, _ := decodeASTIdentifiers("SELECT * FROM db1.t", plain)
+	if string(plain) != string(again) {
+		t.Fatal("fast path changed the AST")
+	}
+	// Tokens carry the decoded text too.
+	toks, err := tokenizeRaw(e, "DELETE WHERE `ph\\Nys`.x = 'a\\Nb'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toks[2].Text != "phys" || toks[len(toks)-1].Text != "ab" {
+		t.Fatalf("tokens = %+v", toks)
+	}
+}
+
+// TestSameASTIgnoresKeyOrder keeps the whole-statement parse gate sound after
+// ingestion re-encodes an AST with sorted keys.
+func TestSameASTIgnoresKeyOrder(t *testing.T) {
+	if !sameAST(AST(`{"a":1,"b":{"c":"x"}}`), AST(`{"b":{"c":"x"},"a":1}`)) {
+		t.Fatal("reordered keys compared unequal")
+	}
+	if sameAST(AST(`{"a":1}`), AST(`{"a":2}`)) {
+		t.Fatal("different values compared equal")
 	}
 }

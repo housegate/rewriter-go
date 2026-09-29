@@ -2781,64 +2781,14 @@ func parsedIdentifierAt(e Engine, sql string, tok rawToken) (string, bool) {
 	return decodedASTIdentifier(e, tables[0].Table)
 }
 
-// decodedASTIdentifier keeps parsed identifier values authoritative. Polyglot
-// already resolves identifier quote-doubling in the AST. Its ClickHouse table
-// AST currently preserves backslash escapes, so the narrow escaped case is
-// decoded through a parsed string literal. ClassifyLiveView thereby retains its
-// one-tokenization contract instead of silently depending on a second lexer run.
-func decodedASTIdentifier(e Engine, name string) (string, bool) {
-	if name == "" {
-		return "", true
-	}
-	if !strings.ContainsRune(name, '\\') {
-		return name, true
-	}
-	// Preserve every backslash escape for the engine tokenizer. Escape only an
-	// unescaped apostrophe that would otherwise terminate this synthetic string;
-	// this is transport quoting, not a second implementation of ClickHouse's
-	// identifier escape rules.
-	var literal strings.Builder
-	literal.Grow(len(name) + 2)
-	literal.WriteByte('\'')
-	backslashes := 0
-	for i := 0; i < len(name); i++ {
-		if name[i] == '\'' && backslashes%2 == 0 {
-			literal.WriteByte('\\')
-		}
-		literal.WriteByte(name[i])
-		if name[i] == '\\' {
-			backslashes++
-		} else {
-			backslashes = 0
-		}
-	}
-	literal.WriteByte('\'')
-	ast, err := e.ParseOne("SELECT " + literal.String())
-	if err != nil {
-		return "", false
-	}
-	var root map[string]any
-	if err := json.Unmarshal(ast, &root); err != nil {
-		return "", false
-	}
-	selectBody, ok := root[NodeSelect].(map[string]any)
-	if !ok {
-		return "", false
-	}
-	expressions, ok := selectBody["expressions"].([]any)
-	if !ok || len(expressions) != 1 {
-		return "", false
-	}
-	expression, ok := expressions[0].(map[string]any)
-	if !ok {
-		return "", false
-	}
-	stringLiteral, ok := expression["literal"].(map[string]any)
-	if !ok || stringLiteral["literal_type"] != "string" {
-		return "", false
-	}
-	decoded, _ := stringLiteral["value"].(string)
-	return decoded, decoded != ""
+// decodedASTIdentifier returns a parsed identifier value unchanged. Every
+// Engine.ParseOne result already carries the name ClickHouse resolves for each
+// quoted identifier (decodeASTIdentifiers decodes it from its source
+// spelling), so decoding it a second time here would read a name ClickHouse
+// never uses: a source `t\\x41` names the table t\x41, not tA. An empty name
+// stays an empty name.
+func decodedASTIdentifier(_ Engine, name string) (string, bool) {
+	return name, true
 }
 
 // SemanticIdentifier resolves parser-preserved ClickHouse identifier escapes

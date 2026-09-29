@@ -1131,8 +1131,43 @@ func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 		}
 		toks[i].Span.Start, toks[i].Span.End = start, end
 		toks[i].Source = sql[start:end]
+		if err := decodeRawTokenText(&toks[i], sql[start:end]); err != nil {
+			return nil, err
+		}
 	}
 	return toks, nil
+}
+
+// decodeRawTokenText replaces the text of a quoted identifier or single-quoted
+// string token with the value ClickHouse decodes from its source spelling
+// (decodeQuotedIdentifier / decodeQuotedString). Polyglot keeps several
+// ClickHouse escapes verbatim in token text (`ph\Nys` for the database
+// ClickHouse reads as phys), and opaque text is forwarded verbatim, so every
+// token matcher must see ClickHouse's value. Only a spelling with a backslash
+// differs; an undecodable one fails the tokenize, which every caller treats as
+// a refusal.
+func decodeRawTokenText(tok *rawToken, raw string) error {
+	if !strings.Contains(raw, "\\") {
+		return nil
+	}
+	switch tok.TokenType {
+	case "QUOTED_IDENTIFIER":
+		decoded, ok := decodeQuotedIdentifier(raw)
+		if !ok {
+			return fmt.Errorf("engine: tokenize: quoted identifier %s cannot be decoded as ClickHouse does", raw)
+		}
+		tok.Text = decoded
+	case "STRING":
+		if !strings.HasPrefix(raw, "'") {
+			return nil // a heredoc or another literal form ClickHouse does not escape
+		}
+		decoded, ok := decodeQuotedString(raw)
+		if !ok {
+			return fmt.Errorf("engine: tokenize: string literal %s cannot be decoded as ClickHouse does", raw)
+		}
+		tok.Text = decoded
+	}
+	return nil
 }
 
 // tokenStream is the sole authority for translating Polyglot token spans.
@@ -1295,7 +1330,7 @@ func SpliceRawTables(e Engine, originalSQL string, rewrites map[TableTarget]stri
 func QuoteQualified(db, table string) string {
 	q := func(s string) string {
 		if needsQuoting(s) {
-			return "`" + s + "`"
+			return quoteIdentifierSQL(s)
 		}
 		return s
 	}

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 )
@@ -67,7 +66,7 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 		return nil // no earlier token to cut back to
 	}
 	cut, perr := e.ParseOne(sql[:toks[last].Span.Start])
-	if perr != nil || !bytes.Equal(cut, ast) {
+	if perr != nil || !sameAST(cut, ast) {
 		return nil
 	}
 	stop := firstIgnoredToken(e, sql, ast, toks[:last+1])
@@ -84,7 +83,7 @@ func firstIgnoredToken(e Engine, sql string, ast AST, toks []rawToken) int {
 	for lo < hi {
 		mid := (lo + hi) / 2
 		cut, err := e.ParseOne(sql[:toks[mid].Span.Start])
-		if err == nil && bytes.Equal(cut, ast) {
+		if err == nil && sameAST(cut, ast) {
 			hi = mid
 		} else {
 			lo = mid + 1
