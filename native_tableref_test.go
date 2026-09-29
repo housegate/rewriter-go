@@ -1871,3 +1871,25 @@ func TestTableRef_ParenthesizedInOperandUnderActiveSurface(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_EngineLocalShapes pins native-engine behaviour the shared
+// storage-integrity corpus deliberately does not: shapes the native engine
+// does not model and refuses (spec 2026-09-26 §5: "where the engine models
+// the position"), which rewriter-grpc parses into an ordinary AST.
+func TestTableRef_EngineLocalShapes(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		msg := "statement is not supported"
+		if si {
+			msg = StorageIntegrityUnmodelledMessage
+		}
+		for _, sql := range []string{
+			"(SELECT * FROM db1.o)",
+			"((SELECT * FROM db1.o))",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: sql})
+		}
+	}
+	runTablerefCases(t, cases)
+}
