@@ -2,6 +2,7 @@ package nameresolve
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
@@ -40,8 +41,23 @@ func ProtectedDatabaseRejectMessage(db string) string {
 // session's logical database in dynamic mode (spec 2026-09-26 §5). ClickHouse
 // resolves such a name in the session's current database, which is the
 // physical database, so it is refused instead of forwarded.
+//
+// The table name is inserted verbatim, without escaping a `"` it contains,
+// exactly like the T6 string-lookup message; both engines follow this.
 func UnresolvedUnqualifiedTableMessage(table string) string {
-	return `unqualified table "` + table + `" does not resolve through the session's logical database`
+	return unresolvedUnqualifiedPrefix + table + unresolvedUnqualifiedSuffix
+}
+
+const (
+	unresolvedUnqualifiedPrefix = `unqualified table "`
+	unresolvedUnqualifiedSuffix = `" does not resolve through the session's logical database`
+)
+
+// IsUnresolvedUnqualifiedTableMessage reports whether msg was built by
+// UnresolvedUnqualifiedTableMessage.
+func IsUnresolvedUnqualifiedTableMessage(msg string) bool {
+	return len(msg) >= len(unresolvedUnqualifiedPrefix)+len(unresolvedUnqualifiedSuffix) &&
+		strings.HasPrefix(msg, unresolvedUnqualifiedPrefix) && strings.HasSuffix(msg, unresolvedUnqualifiedSuffix)
 }
 
 // ValidateProtectedDatabases mirrors the reserved_databases rule: every entry

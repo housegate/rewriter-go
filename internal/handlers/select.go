@@ -296,14 +296,15 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 				}
 				return d
 			}
-			if tt.DB == "" && nameresolve.ApplyDynamic(tt.DB, tt.Table, sel.Dynamic).Status == nameresolve.StatusInvalid {
-				if !haveUnresolved {
-					unresolved, haveUnresolved = tt.Table, true
-				}
-				return engine.TableDecision{Action: engine.ActionSkip}
-			}
 		}
-		return decideTable(tt, sel, resp.TableRewrites)
+		o := nameresolve.Resolve(tt.DB, tt.Table, sel)
+		if sel.Mode == nameresolve.ModeDynamic && tt.DB == "" && o.Status == nameresolve.StatusInvalid {
+			if !haveUnresolved {
+				unresolved, haveUnresolved = tt.Table, true
+			}
+			return engine.TableDecision{Action: engine.ActionSkip}
+		}
+		return decideTable(tt, o, resp.TableRewrites)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -312,8 +313,12 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		return nil, nil, siErr
 	}
 	if haveUnresolved {
+		// No partial table_rewrites map leaks: the walk may already have
+		// recorded the tables it rewrote before the refusal. The embedded-body
+		// callers clear their own target entries too (clearOnUnresolved).
 		resp.Code = pb.RewriteCode_InvalidRewriteRequest
 		resp.Message = nameresolve.UnresolvedUnqualifiedTableMessage(unresolved)
+		resp.TableRewrites = map[string]string{}
 		return ast, resp, nil
 	}
 
@@ -330,12 +335,12 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	return rewritten, resp, nil
 }
 
-// decideTable maps a nameresolve.Outcome to an engine.TableDecision and records the
-// table_rewrites entry. SELECT is lenient: StatusInvalid → skip (no error). The
-// caller refuses an unqualified dynamic-mode StatusInvalid before reaching it,
-// so the lenient skip covers qualified unmapped names only.
-func decideTable(tt engine.TableTarget, sel nameresolve.Selection, rewrites map[string]string) engine.TableDecision {
-	o := nameresolve.Resolve(tt.DB, tt.Table, sel)
+// decideTable maps the nameresolve.Outcome already resolved for tt to an
+// engine.TableDecision and records the table_rewrites entry. SELECT is lenient:
+// StatusInvalid → skip (no error). The caller refuses an unqualified
+// dynamic-mode StatusInvalid before reaching it, so the lenient skip covers
+// qualified unmapped names only.
+func decideTable(tt engine.TableTarget, o nameresolve.Outcome, rewrites map[string]string) engine.TableDecision {
 	switch o.Status {
 	case nameresolve.StatusRewrite:
 		recordRewrite(rewrites, tt, o.PhysicalDB, o.NewTable)
@@ -397,6 +402,16 @@ func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*p
 		})
 	}
 	return out
+}
+
+// clearOnUnresolved empties the enclosing write statement's table_rewrites
+// when its embedded body was refused for an unresolved unqualified name, so
+// the rejection carries no partial map (the body's own map is already empty).
+func clearOnUnresolved(dst, body *pb.RewriteSQLResponse) {
+	if body.GetCode() == pb.RewriteCode_InvalidRewriteRequest &&
+		nameresolve.IsUnresolvedUnqualifiedTableMessage(body.GetMessage()) {
+		dst.TableRewrites = map[string]string{}
+	}
 }
 
 // qualify mirrors nameresolve.qualify (kept local to avoid exporting it).

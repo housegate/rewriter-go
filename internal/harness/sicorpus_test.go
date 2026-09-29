@@ -248,9 +248,9 @@ func siContainsEquivalent(sql, sub string) bool {
 // Intentional updates require paired PRs, an explicit byte-for-byte cmp, and a
 // recorded SHA-256 in each PR description.
 const (
-	SICorpusFingerprint uint64 = 8955073525120039774
-	SICorpusBytes       int    = 871333
-	SICorpusCases       int    = 968
+	SICorpusFingerprint uint64 = 494147062242032857
+	SICorpusBytes       int    = 886807
+	SICorpusCases       int    = 986
 )
 
 // siCorpusFingerprint is FNV-1a/64 over the exact file bytes, mirrored by
