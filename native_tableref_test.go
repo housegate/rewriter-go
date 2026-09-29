@@ -114,6 +114,7 @@ func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
 			// beside an identifier parameter keeps the T2 message.
 			"SELECT * FROM {p:Identifier} JOIN hg_safe.db1__t USING (a)",
 			"CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier} JOIN hg_safe.db1__t USING (a))) ENGINE = Memory",
+			"CHECK TABLE hg_safe.db1__t PARTITION {p:Identifier}",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg, wantSQL: sql})
