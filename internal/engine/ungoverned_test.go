@@ -249,3 +249,33 @@ func TestOpaqueInRegionEdges(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateHeaderHasInnerStorage pins the header scan that refuses an inner
+// storage clause (`INNER UUID`, `INNER ENGINE`) independently of whether the
+// pinned Polyglot parses it: a CREATE whose inner target's engine the T3 / T5
+// checks cannot see must never be forwarded.
+func TestCreateHeaderHasInnerStorage(t *testing.T) {
+	e := newTestEngine(t)
+	for sql, want := range map[string]bool{
+		"CREATE MATERIALIZED VIEW db1.mv TO INNER UUID 'u' ENGINE = Merge('phys','^x') AS SELECT 1 AS a":          true,
+		"create materialized view db1.mv to inner uuid 'u' as select 1":                                           true,
+		"CREATE MATERIALIZED VIEW db1.mv TO /* c */ INNER -- c\n UUID 'u' AS SELECT 1":                            true,
+		"CREATE MATERIALIZED VIEW db1.mv TO INNER ENGINE = Memory AS SELECT 1 AS a":                               true,
+		"CREATE MATERIALIZED VIEW db1.mv REFRESH EVERY 1 HOUR APPEND TO INNER UUID 'u' AS SELECT 1":               true,
+		"CREATE WINDOW VIEW db1.wv INNER ENGINE = Memory AS SELECT 1":                                             true,
+		"CREATE TABLE db1.ts ENGINE = TimeSeries DATA INNER UUID 'u' TAGS ENGINE = Memory":                        true,
+		"CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory AS SELECT 1 AS a":                                        false,
+		"CREATE MATERIALIZED VIEW db1.mv TO INNER AS SELECT 1 AS a":                                               false,
+		"CREATE MATERIALIZED VIEW db1.mv TO `INNER` ENGINE = Memory AS SELECT 1 AS a":                             false,
+		"CREATE MATERIALIZED VIEW db1.mv TO db1.INNER AS SELECT 1 AS a":                                           false,
+		"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS SELECT * FROM db1.a INNER JOIN db1.b USING (uuid)":           false,
+		"CREATE TABLE db1.n (inner UInt8, uuid UUID) ENGINE = MergeTree ORDER BY (inner, uuid)":                   false,
+		"CREATE TABLE db1.n ENGINE = MergeTree ORDER BY a AS SELECT * FROM db1.a INNER JOIN db1.b ON 1":           false,
+		"CREATE TABLE db1.n ENGINE = MergeTree ORDER BY a COMMENT 'INNER UUID' AS SELECT 1 AS a":                  false,
+		"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS WITH x AS (SELECT 1) SELECT * FROM x INNER JOIN x AS y ON 1": false,
+	} {
+		if got := CreateHeaderHasInnerStorage(e, sql); got != want {
+			t.Errorf("CreateHeaderHasInnerStorage(%q) = %v, want %v", sql, got, want)
+		}
+	}
+}

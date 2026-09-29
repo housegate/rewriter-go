@@ -383,6 +383,13 @@ func dispatchCreateTable(e engine.Engine, ast engine.AST, sql string, info engin
 		rejectUnsupported(resp, "CREATE DICTIONARY is not supported")
 		return resp, true, nil
 	}
+	if sel.Mode == nameresolve.ModeDynamic && engine.CreateHeaderHasInnerStorage(e, sql) {
+		// Spec 2026-09-26 §5: a TimeSeries DATA / TAGS / METRICS INNER UUID
+		// target names an inner table's engine the T3 / T5 checks cannot see.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 	rewritten, ok, err := applyStructuredSlots(ast, info, sel, resp)
 	if err != nil {
 		return nil, false, err
@@ -488,6 +495,13 @@ func dispatchView(e engine.Engine, ast engine.AST, sql string, info engine.Write
 	resp := newWriteResp(stmt)
 	if sel.Mode == nameresolve.ModeDynamic && engine.CreateViewHasRefresh(e, sql) {
 		// Spec 2026-09-26 R12: the generator drops REFRESH … [APPEND] TO.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
+	if sel.Mode == nameresolve.ModeDynamic && engine.CreateHeaderHasInnerStorage(e, sql) {
+		// Spec 2026-09-26 §5: TO INNER [UUID] names an inner table's engine
+		// the T3 / T5 checks cannot see.
 		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil

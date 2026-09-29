@@ -531,6 +531,52 @@ func CreateViewHasRefresh(e Engine, sql string) bool {
 	return false
 }
 
+// CreateHeaderHasInnerStorage reports a CREATE statement whose header (the
+// depth-0 tokens before its body's first SELECT / WITH) carries an inner
+// storage clause: the keyword INNER followed by UUID or ENGINE. That covers a
+// materialized or window view's `TO INNER UUID '…' [ENGINE = …]`, a window
+// view's `INNER ENGINE = …` and a TimeSeries table's `DATA | TAGS | METRICS
+// INNER UUID '…'`, each of which ClickHouse turns into an inner table whose
+// engine is the one named there. The pinned Polyglot has no grammar for any of
+// them (`TO INNER` becomes a TO target named INNER), so that engine never
+// reaches the T3 / T5 checks, and dynamic mode refuses the statement rather
+// than forwarding a shape it cannot inspect (spec 2026-09-26 §5). The
+// whole-statement parse gate refuses most of them first; this scan keeps the
+// refusal independent of how a future Polyglot parses them. An unquoted
+// `TO INNER ENGINE = …` also matches: ClickHouse reads it as the table INNER
+// and then refuses TO together with ENGINE. A qualified (`db1.INNER`) or
+// quoted name does not. A tokenizer failure reports true (fail closed).
+func CreateHeaderHasInnerStorage(e Engine, sql string) bool {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return true
+	}
+	word := func(i int, w string) bool {
+		return i < len(toks) && opaqueKeyword(toks[i]) && strings.EqualFold(toks[i].Text, w)
+	}
+	depth := 0
+	for i := range toks {
+		switch toks[i].TokenType {
+		case "L_PAREN":
+			depth++
+			continue
+		case "R_PAREN":
+			depth--
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		if word(i, "SELECT") || word(i, "WITH") {
+			return false
+		}
+		if word(i, "INNER") && (i == 0 || toks[i-1].TokenType != "DOT") && (word(i+1, "UUID") || word(i+1, "ENGINE")) {
+			return true
+		}
+	}
+	return false
+}
+
 // InsertFromInfile reports an INSERT … FROM INFILE statement: the pinned
 // polyglot parses it as INSERT … SELECT * FROM INFILE, which would read a
 // table named INFILE, so dynamic mode refuses it (spec 2026-09-26 R12). A
