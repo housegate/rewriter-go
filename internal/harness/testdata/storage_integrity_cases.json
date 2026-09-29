@@ -13475,17 +13475,54 @@
     "contract_version": "V2",
     "sql": "SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))",
     "dynamic": {
-      "database_map": {"db1": "phys"},
-      "known_physical_databases": ["phys"],
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
       "upstream_logical_database_in_context": "db1",
       "delim": "_",
-      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
-      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
     },
     "reject": true,
-    "want_code": "InvalidRewriteRequest", "want_stmt": "",
-    "want_message_contains": "protected database hg_safe is not addressable",
-    "want_accessed": [{"original_database": "hg_safe", "physical_database": "hg_safe", "is_storage_integrity": true}]
+    "want_code": "RewriteError",
+    "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      },
+      {
+        "original_database": "hg_safe",
+        "original_table": "db1__t",
+        "physical_database": "hg_safe",
+        "is_storage_integrity": true
+      }
+    ]
   },
   {
     "name": "si_tr_in_nested_paren_param_rejected",

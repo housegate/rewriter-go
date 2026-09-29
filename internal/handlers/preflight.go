@@ -60,9 +60,9 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		return resp, true, nil
 	}
 	// T3. A database named only through an SI-handler-blind position (a
-	// string-lookup argument, a parenthesized IN operand) is refused even
-	// while the storage-integrity surface is active, unlike an ordinary table
-	// position, which defers to the SI handlers below.
+	// string-lookup argument) is refused even while the storage-integrity
+	// surface is active, unlike an ordinary table position (a parenthesized
+	// IN operand included), which defers to the SI handlers below.
 	dbs, blindDBs, err := engine.CollectDatabaseReferenceSets(e, ast, sql)
 	if err != nil {
 		return nil, false, err

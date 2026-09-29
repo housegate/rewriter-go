@@ -212,10 +212,11 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			// changed" / self-review for the full writeup):
 			//
 			//  1. siHandlerBlindShapes: the joinGet shape's database
-			//     qualifier is a string-lookup argument, and the parenthesized
-			//     IN shape is not is_field-tagged -- no existing SI handler in
-			//     this repo classifies either position as a table reference,
-			//     so nothing downstream would otherwise reject them.
+			//     qualifier is a string-lookup argument -- no existing SI
+			//     handler classifies that position as a table reference (a
+			//     parenthesized IN operand is decoded for the SI handlers by
+			//     decodeInOperand and gets their message, spec T3), so
+			//     nothing downstream would otherwise reject it.
 			//     PreflightTableReferences now rejects a protected hit there
 			//     unconditionally too (engine.CollectDatabaseReferenceSets' blind set),
 			//     with the preflight's own generic message/code rather than an
@@ -231,7 +232,7 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			//     touch. A plain SELECT read (including CREATE VIEW's body)
 			//     keeps rejectCodeFor's RewriteError default.
 			isSIHandlerBlind := strings.Contains(shape, "joinGet") || strings.Contains(shape, "dictGet") ||
-				strings.Contains(shape, "hasColumnInTable") || strings.Contains(shape, "IN (%s.")
+				strings.Contains(shape, "hasColumnInTable")
 			isWriteSide := siWriteSideShapes[shape]
 			for _, si := range []bool{false, true} {
 				want := msg
@@ -920,9 +921,14 @@ func TestTableRef_InOperandsDecodeOnce(t *testing.T) {
 			{"SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))", "hg_safe"},
 			{"SELECT * FROM db1.o WHERE in(a, ((phys.`db2.x`)))", "phys"},
 		} {
+			code, msg := pb.RewriteCode_InvalidRewriteRequest, "protected database "+c.db+" is not addressable"
+			if si && c.db == "hg_safe" {
+				// A parenthesized IN operand is an ordinary SI-handler position:
+				// the SI message keeps precedence (spec 2026-09-26 T3).
+				code, msg = pb.RewriteCode_RewriteError, "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+			}
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
-				wantCode: pb.RewriteCode_InvalidRewriteRequest,
-				wantMsg:  "protected database " + c.db + " is not addressable", wantSQL: c.sql})
+				wantCode: code, wantMsg: msg, wantSQL: c.sql})
 		}
 		for _, sql := range []string{
 			"SELECT * FROM db1.o WHERE a IN ({p:Identifier})",
@@ -1815,6 +1821,41 @@ func TestTableRef_Residual5SignsAndSplitBrackets(t *testing.T) {
 					wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}})
 			}
 		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ParenthesizedInOperandUnderActiveSurface pins that dropping
+// the parenthesized IN operand from the SI-handler-blind set opens nothing:
+// with the SI surface active, every position that can hold `x IN ((hg_*.t))`
+// is still refused, now with the SI handlers' own message (spec 2026-09-26 T3).
+func TestTableRef_ParenthesizedInOperandUnderActiveSurface(t *testing.T) {
+	const safe = "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+	var cases []tablerefCase
+	for _, c := range []struct {
+		sql  string
+		code pb.RewriteCode
+		msg  string
+	}{
+		{"SELECT * FROM db1.o WHERE a IN (hg_safe.db1__t)", pb.RewriteCode_RewriteError, safe},
+		{"SELECT * FROM db1.o WHERE in(a, (hg_safe.db1__t))", pb.RewriteCode_RewriteError, safe},
+		{"SELECT * FROM db1.o WHERE a GLOBAL IN ((hg_unsafe.db1__t))", pb.RewriteCode_RewriteError,
+			"storage-integrity physical table hg_unsafe.db1__t is not directly addressable"},
+		{"SELECT * FROM db1.o WHERE a NOT IN ((hg_promote.x))", pb.RewriteCode_RewriteError,
+			"storage-integrity physical table hg_promote.x is not directly addressable"},
+		{"ALTER TABLE db1.o DELETE WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"DELETE FROM db1.o WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"UPDATE db1.o SET b = 1 WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"INSERT INTO db1.o SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE VIEW db1.v AS SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE TABLE db1.n (a UInt64, b UInt8 DEFAULT a IN ((hg_safe.db1__t))) ENGINE = Memory", pb.RewriteCode_UnsupportedStatement, safe},
+		{"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: true, wantCode: c.code, wantMsg: c.msg, wantSQL: c.sql})
 	}
 	runTablerefCases(t, cases)
 }
