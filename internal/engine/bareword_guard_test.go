@@ -139,3 +139,117 @@ func compactJSON(node any) string {
 	}
 	return string(b)
 }
+
+// identifierOperandWords are the bare words the pinned Polyglot parses into an
+// `identifier` node (not a `column`) in IN-operand position. ClickHouse 26.2
+// reads `a IN EXISTS` / `a IN interval` as the table of that name under both
+// analyzers (review round 3, N4). Measured over 2,405 ClickHouse keywords and
+// function names in three case spellings: these are the only ones.
+var identifierOperandWords = map[string]bool{"EXISTS": true, "INTERVAL": true}
+
+// TestBareWordInOperandsAreTables guards the direct-operand side of the rule:
+// every bare word that parses as a single IN operand (infix, parenthesised,
+// callable) decodes as a table operand, except the literals TRUE / FALSE /
+// NULL. ClickHouse reads a bare word there as a table name. It also pins which
+// words reach decodeInOperand as an `identifier` node or a no-parens function,
+// so a Polyglot bump that adds a new shape fails here, naming the word.
+func TestBareWordInOperandsAreTables(t *testing.T) {
+	e := newTestEngine(t)
+	seen := map[string]bool{}
+	for _, word := range bareWordSweep {
+		if seen[word] {
+			continue
+		}
+		seen[word] = true
+		for _, spelling := range []string{word, strings.ToLower(word)} {
+			for _, form := range []string{"a IN %s", "a IN (%s)", "in(a, %s)"} {
+				sql := "SELECT a FROM t WHERE " + strings.Replace(form, "%s", spelling, 1)
+				operand, kind, ok := parseInOperand(t, e, sql)
+				if !ok {
+					if noParensKeywords[word] || identifierOperandWords[word] {
+						t.Errorf("%s: %q no longer parses as a single IN operand", word, sql)
+					}
+					continue
+				}
+				inner := unwrapParens(operand)
+				_, isIdentifier := inner["identifier"]
+				if isIdentifier != identifierOperandWords[word] {
+					t.Errorf("%s: %q identifier-node shape changed (identifier=%v); measure it on ClickHouse and update identifierOperandWords: %s",
+						word, sql, isIdentifier, compactJSON(inner))
+				}
+				if _, isKeyword := noParensKeywordName(inner); isKeyword != noParensKeywords[word] {
+					t.Errorf("%s: %q no-parens function shape changed (keyword=%v): %s", word, sql, isKeyword, compactJSON(inner))
+				}
+				wantTable := !bareWordLiterals[word]
+				if (kind == inOperandTable) != wantTable {
+					t.Errorf("%s: %q decodes as operand kind %d, want table=%v (ClickHouse reads a bare word as a table): %s",
+						word, sql, kind, wantTable, compactJSON(inner))
+				}
+			}
+		}
+	}
+}
+
+// parseInOperand parses sql and returns the single IN operand of its WHERE
+// clause (infix or callable) and decodeInOperand's classification of it.
+func parseInOperand(t *testing.T, e Engine, sql string) (any, inOperandKind, bool) {
+	t.Helper()
+	ast, err := e.ParseOne(sql)
+	if err != nil || CheckParsedInFull(e, sql, ast) != nil {
+		return nil, 0, false
+	}
+	var root map[string]any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		t.Fatalf("decode %q: %v", sql, err)
+	}
+	sel, _ := root[NodeSelect].(map[string]any)
+	where, _ := sel["where_clause"].(map[string]any)
+	pred, _ := where["this"].(map[string]any)
+	if in, ok := pred["in"].(map[string]any); ok {
+		exprs, _ := in["expressions"].([]any)
+		if len(exprs) != 1 {
+			return nil, 0, false
+		}
+		kind, _ := decodeInNodeOperand(in)
+		return exprs[0], kind, true
+	}
+	if fn, ok := pred["function"].(map[string]any); ok {
+		args, _ := fn["args"].([]any)
+		if len(args) != 2 {
+			return nil, 0, false
+		}
+		kind, _ := decodeInOperand(args[1], false)
+		return args[1], kind, true
+	}
+	return nil, 0, false
+}
+
+// TestCompoundOverBareKeywordIsNotProof pins containsNameReference's
+// no-parens branch (review round 3, N6): a value built over a bare keyword
+// carries a name, so it is never proof that a WITH alias is not a table. The
+// same compounds over a parenthesised call stay proof.
+func TestCompoundOverBareKeywordIsNotProof(t *testing.T) {
+	e := newTestEngine(t)
+	for _, c := range []struct {
+		value    string
+		notTable bool
+	}{
+		{"-NOW", false},
+		{"NOW + 0", false},
+		{"(now, 1)", false},
+		{"[CURRENT_DATE]", false},
+		{"CAST(NOW AS String)", false},
+		{"-NOW()", true},
+		{"NOW() + 0", true},
+		{"(now(), 1)", true},
+		{"CAST(NOW() AS String)", true},
+	} {
+		value, ok := parseWithValue(t, e, c.value)
+		if !ok {
+			t.Fatalf("%q does not parse as a WITH value", c.value)
+		}
+		if got := withValueIsNotTableReference(value); got != c.notTable {
+			t.Errorf("withValueIsNotTableReference(%q) = %v, want %v: %s", c.value, got, c.notTable, compactJSON(value))
+		}
+	}
+}

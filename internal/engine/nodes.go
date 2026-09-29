@@ -749,11 +749,19 @@ func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespace
 	if unresolvedIdentifierNode(node) {
 		return inOperandParameter, namespaceRefDetail{}
 	}
-	// A bare keyword (`a IN NOW`, `a IN (current_user)`) is a no-parens
-	// function node to Polyglot but an ordinary identifier to ClickHouse 26.2,
-	// which reads the table of that name in the current database under both
-	// analyzers. It is an unqualified table operand like `a IN b`.
-	if name, ok := noParensKeywordName(node); ok {
+	// A bare keyword (`a IN NOW`, `a IN (current_user)`, `a IN EXISTS`) is a
+	// no-parens function or an `identifier` node to Polyglot but an ordinary
+	// identifier to ClickHouse 26.2, which reads the table of that name in the
+	// current database under both analyzers. It is an unqualified table
+	// operand like `a IN b`.
+	name, ok := noParensKeywordName(node)
+	if !ok {
+		// `a IN EXISTS` / `a IN interval`: Polyglot emits a bare `identifier`
+		// node (not a `column`) for these words, and ClickHouse 26.2 reads the
+		// table of that name under both analyzers (review round 3, N4).
+		name, ok = bareIdentifierOperandName(node)
+	}
+	if ok {
 		return inOperandTable, namespaceRefDetail{
 			ref: NamespaceRef{
 				Source:              NamespaceRefInTable,
@@ -764,6 +772,20 @@ func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespace
 		}
 	}
 	return inOperandValue, namespaceRefDetail{}
+}
+
+// bareIdentifierOperandName returns the name of a bare `identifier` node, the
+// shape Polyglot gives the words EXISTS and INTERVAL in IN-operand position.
+func bareIdentifierOperandName(node map[string]any) (string, bool) {
+	if len(node) != 1 {
+		return "", false
+	}
+	ident, ok := node["identifier"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	name, _ := ident["name"].(string)
+	return name, name != ""
 }
 
 // noParensKeywordName returns the spelling of a bare keyword that Polyglot

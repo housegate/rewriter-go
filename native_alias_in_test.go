@@ -418,6 +418,45 @@ func TestTableRef_KeywordPins(t *testing.T) {
 				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE globalIn(a, phys."db1.CURRENT_DATE"))`,
 				wantAcc:  []string{".CURRENT_DATE", "db1.o", "db1.p"}},
 		)
+		// N4: `EXISTS` / `INTERVAL` are Polyglot identifier nodes in operand
+		// position; ClickHouse 26.2 reads phys.EXISTS / phys.INTERVAL (any
+		// case) under both analyzers. They are unqualified tables like `a IN b`.
+		cases = append(cases,
+			tablerefCase{name: "direct EXISTS operand", si: si,
+				sql:      "SELECT a FROM db1.o WHERE a IN EXISTS",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.EXISTS"`,
+				wantAcc:  []string{".EXISTS", "db1.o"}},
+			tablerefCase{name: "direct interval operand parenthesised", si: si,
+				sql:      "SELECT a FROM db1.o WHERE a NOT IN (interval)",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a NOT IN (phys."db1.interval")`,
+				wantAcc:  []string{"db1.o", ".interval"}},
+			tablerefCase{name: "direct INTERVAL operand callable nested", si: si,
+				sql:      "INSERT INTO db1.q SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE globalIn(a, INTERVAL))",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `INSERT INTO phys."db1.q" SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE globalIn(a, phys."db1.INTERVAL"))`},
+			tablerefCase{name: "direct EXISTS operand in DELETE is refused like a IN b", si: si,
+				sql:      "DELETE FROM db1.o WHERE a IN EXISTS",
+				wantCode: pb.RewriteCode_UnsupportedStatement,
+				wantMsg:  "statement is not supported",
+				wantSQL:  "DELETE FROM db1.o WHERE a IN EXISTS"},
+		)
+		// N6: a compound over a bare keyword is a name reference too
+		// (containsNameReference's no-parens branch): ClickHouse errors on
+		// these, and the operand is rewritten rather than trusted.
+		cases = append(cases,
+			tablerefCase{name: "negated keyword with value", si: si,
+				sql:      "WITH -NOW AS z SELECT a FROM db1.o WHERE a IN z",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `WITH -NOW AS z SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.z"`,
+				wantAcc:  []string{"db1.o", ".z"}},
+			tablerefCase{name: "cast over keyword with value", si: si,
+				sql:      "WITH CAST(NOW AS String) AS z SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE in(a, z))",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `WITH CAST(NOW AS String) AS z SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE in(a, phys."db1.z"))`,
+				wantAcc:  []string{"db1.o", "db1.p", ".z"}},
+		)
 		// A parenthesised call binds as an expression under both analyzers
 		// (NOW(), PI(), CURRENT_DATE(), current_user() measured): the operand
 		// stays untouched and unreported, and a call operand is a value.
