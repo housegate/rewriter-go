@@ -1245,15 +1245,51 @@ func TestCollectEmbeddedReadSources_InTableOperandsRespectOutputAndTableAliases(
 			sql:  `SELECT tuple(1, 2) AS t, in(1, t)`,
 			want: []readSourceView{},
 		},
+		// A table-source alias never binds an IN operand: ClickHouse 26.2 reads
+		// the table named t in the current database for a same-scope alias
+		// under enable_analyzer=0, and for an enclosing SELECT's alias under
+		// both analyzers. The operand is a current-database table.
 		{
-			name: "FROM alias is scoped before projection infix IN",
+			name: "FROM alias is not an infix IN binding",
 			sql:  `SELECT id IN t FROM other.u AS t`,
-			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true}},
+			want: []readSourceView{
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+			},
 		},
 		{
-			name: "FROM alias is scoped before projection callable IN",
+			name: "FROM alias is not a callable IN binding",
 			sql:  `SELECT in(id, t) FROM other.u AS t`,
-			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true}},
+			want: []readSourceView{
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+			},
+		},
+		{
+			name: "enclosing FROM alias is not an IN binding",
+			sql:  `SELECT * FROM other.u AS t WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "enclosing projection alias is not an IN binding",
+			sql:  `SELECT 1 AS t FROM other.u WHERE id IN (SELECT id FROM other.w WHERE in(id, t))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "enclosing WITH expression alias stays an IN binding",
+			sql:  `WITH 1 AS t SELECT * FROM other.u AS t WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1087,9 +1087,28 @@ type readSourceVisitor struct {
 	sourceFunction func(name string)
 }
 
+// readSourceScope holds the names an unqualified IN operand may bind to
+// instead of a table. Measured on ClickHouse 26.2 with enable_analyzer=1 and
+// =0 (a tenant chooses the analyzer per query or per session):
+//
+//   - ctes: a read-query CTE name (`WITH c AS (SELECT …)`) binds a FROM table
+//     and an IN operand in every nested scope, even under a same-named table
+//     alias;
+//   - aliases: a WITH expression alias (`WITH 1 AS c`, `WITH (SELECT 1) AS c`)
+//     binds an IN operand as an expression in every nested scope;
+//   - projection: a projection alias binds an IN operand as an expression
+//     only in its own SELECT. In a nested SELECT the old analyzer reads the
+//     table of that name, so it is never inherited.
+//
+// A table-source alias (FROM / JOIN table, subquery or table function) binds
+// nothing here: in an enclosing SELECT both analyzers read the table of that
+// name, and in the IN's own SELECT the old analyzer does. Treating it as a
+// binding forwarded the operand verbatim, so ClickHouse read that table in
+// the session's physical database, unreported.
 type readSourceScope struct {
-	ctes    map[string]bool
-	aliases map[string]bool
+	ctes       map[string]bool
+	aliases    map[string]bool
+	projection map[string]bool
 	// unbound marks an expression position ClickHouse stores or executes
 	// outside a SELECT scope: a structured UPDATE / DELETE, an INSERT's VALUES
 	// rows, and a CREATE TABLE / CREATE VIEW / ALTER column, constraint
@@ -1426,6 +1445,8 @@ func walkReadQuery(node any, parent readSourceScope, visitor readSourceVisitor) 
 	if !ok {
 		return false, nil
 	}
+	// A nested query never sees the enclosing SELECT's projection aliases.
+	parent.projection = nil
 	if selectNode, ok := m[NodeSelect].(map[string]any); ok {
 		return true, walkSelectObjects(selectNode, parent, visitor)
 	}
@@ -1565,6 +1586,7 @@ func walkWithObjects(withNode any, parent readSourceScope, visitor readSourceVis
 			withNode = body
 		}
 	}
+	parent.projection = nil
 	with, _ := withNode.(map[string]any)
 	ctes, _ := with["ctes"].([]any)
 	if len(ctes) == 0 {
@@ -1660,9 +1682,12 @@ func isScopedCurrentDatabaseRef(ref NamespaceRef, scope readSourceScope) bool {
 	if !ref.UsesCurrentDatabase || ref.Target.DB != "" || ref.Target.Table == "" {
 		return false
 	}
-	return scope.ctes[ref.Target.Table] || scope.aliases[ref.Target.Table]
+	name := ref.Target.Table
+	return scope.ctes[name] || scope.aliases[name] || scope.projection[name]
 }
 
+// selectAliasScope gives a SELECT its own projection aliases. Its table-source
+// aliases are deliberately not bindings (see readSourceScope).
 func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSourceScope {
 	if parent.unbound {
 		// Neither a projection alias nor a table-source alias binds an IN
@@ -1671,11 +1696,9 @@ func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSou
 		// under both analyzers (see readSourceScope.unbound).
 		return parent
 	}
-	aliases := cloneReadSourceNames(parent.aliases, 4)
-	collectProjectionAliases(selectNode["expressions"], aliases)
-	collectTableSourceAliases(selectNode["from"], aliases)
-	collectJoinSourceAliases(selectNode["joins"], aliases)
-	parent.aliases = aliases
+	projection := make(map[string]bool)
+	collectProjectionAliases(selectNode["expressions"], projection)
+	parent.projection = projection
 	return parent
 }
 
@@ -1687,61 +1710,6 @@ func collectProjectionAliases(node any, aliases map[string]bool) {
 		if name := concreteIdentifierName(alias["alias"]); name != "" {
 			aliases[name] = true
 		}
-	}
-}
-
-func collectTableSourceAliases(node any, aliases map[string]bool) {
-	switch n := node.(type) {
-	case []any:
-		for _, child := range n {
-			collectTableSourceAliases(child, aliases)
-		}
-	case map[string]any:
-		if from, ok := n["from"].(map[string]any); ok {
-			collectTableSourceAliases(from["expressions"], aliases)
-			return
-		}
-		if expressions, ok := n["expressions"].([]any); ok && n["name"] == nil {
-			collectTableSourceAliases(expressions, aliases)
-			return
-		}
-		if table, ok := n["table"].(map[string]any); ok {
-			if name := concreteIdentifierName(table["alias"]); name != "" {
-				aliases[name] = true
-			}
-			return
-		}
-		if alias, ok := n["alias"].(map[string]any); ok {
-			if name := concreteIdentifierName(alias["alias"]); name != "" {
-				aliases[name] = true
-			}
-			return
-		}
-		if subquery, ok := n["subquery"].(map[string]any); ok {
-			if name := concreteIdentifierName(subquery["alias"]); name != "" {
-				aliases[name] = true
-			}
-			return
-		}
-		if paren, ok := n["paren"].(map[string]any); ok {
-			collectTableSourceAliases(paren["this"], aliases)
-			return
-		}
-		if joined, ok := n["joined_table"].(map[string]any); ok {
-			collectTableSourceAliases(joined["left"], aliases)
-			collectJoinSourceAliases(joined["joins"], aliases)
-		}
-	}
-}
-
-func collectJoinSourceAliases(node any, aliases map[string]bool) {
-	switch n := node.(type) {
-	case []any:
-		for _, child := range n {
-			collectJoinSourceAliases(child, aliases)
-		}
-	case map[string]any:
-		collectTableSourceAliases(n["this"], aliases)
 	}
 }
 

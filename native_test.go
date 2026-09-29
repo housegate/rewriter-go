@@ -1145,9 +1145,10 @@ func TestStorageIntegrityContract_LiveViewOrderedSourceAndAliasRegressions(t *te
 			message: StorageIntegrityUnmodelledMessage,
 		},
 		{
-			name:    "FROM alias is known before projection IN",
+			// A FROM alias does not bind an IN operand, so `t` names db1.t.
+			name:    "FROM alias is not an IN binding",
 			sql:     "CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
-			message: StorageIntegrityUnmodelledMessage,
+			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
 		},
 		{
 			name:    "window PARTITION source precedes ORDER source",

@@ -198,8 +198,10 @@ func TestAnnotateStorageIntegrityReject_LiveViewVerifierRegressions(t *testing.T
 			"CREATE LIVE VIEW other.v AS WITH RECURSIVE t AS (SELECT * FROM t) SELECT * FROM t", "original"},
 		{"output alias is not an IN table",
 			"CREATE LIVE VIEW other.v AS SELECT tuple(1,2) AS t, 1 IN t", "original"},
-		{"FROM alias is not an IN table",
-			"CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t", "original"},
+		// A FROM alias does not bind an IN operand, so `t` names db1.t.
+		{"FROM alias is not an IN binding",
+			"CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
+			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
 		{"window PARTITION source keeps precedence over ORDER source",
 			"CREATE LIVE VIEW other.v AS SELECT sum(x) OVER (PARTITION BY (SELECT 1 FROM hg_unsafe.db1__x) ORDER BY (SELECT 1 FROM db1.t))",
 			"storage-integrity physical table hg_unsafe.db1__x is not directly addressable"},

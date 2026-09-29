@@ -952,9 +952,11 @@ func TestNameRefs_LiveViewVerifierRegressions(t *testing.T) {
 			tableRef("other", "v"),
 		},
 		{
-			"FROM alias is known before projection IN",
+			// A FROM alias does not bind an IN operand (ClickHouse 26.2 reads
+			// the table t under enable_analyzer=0), so `t` is a table.
+			"FROM alias is not an IN binding",
 			"CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
-			append(tableRef("other", "v"), tableRef("other", "u")...),
+			append(append(tableRef("other", "v"), tableRef("", "t")...), tableRef("other", "u")...),
 		},
 		{
 			"window PARTITION sources precede ORDER sources",
