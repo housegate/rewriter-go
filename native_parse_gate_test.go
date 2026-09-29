@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,7 +17,7 @@ func TestWholeStatementParseGate(t *testing.T) {
 	var cases []tablerefCase
 	for _, si := range []bool{false, true} {
 		refused := func(sql string) tablerefCase {
-			return tablerefCase{name: sql, sql: sql, si: si,
+			return tablerefCase{name: fmt.Sprintf("si=%v/%q", si, sql), sql: sql, si: si,
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql}
 		}
 		for _, sql := range []string{
@@ -24,6 +25,9 @@ func TestWholeStatementParseGate(t *testing.T) {
 			"CREATE TABLE db1.n ENGINE = Memory XYZ AS SELECT * FROM phys.x",
 			"CREATE TABLE db1.n (a Int32) ENGINE = MergeTree ORDER BY a XYZ SETTINGS storage_policy = 'x'",
 			"CREATE TABLE db1.n AS db1.src ENGINE = Memory EMPTY AS SELECT * FROM phys.x",
+			// The EMPTY keyword is found and stripped, the gate refuses the
+			// stripped text, and the caller's own SQL is echoed.
+			"CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p AS a XYZ",
 			// Every statement family truncates the same way.
 			"CREATE VIEW db1.v AS SELECT * FROM db1.o AS a XYZ",
 			"CREATE MATERIALIZED VIEW db1.mv TO db1.o XYZ AS SELECT * FROM db1.p",
@@ -44,9 +48,9 @@ func TestWholeStatementParseGate(t *testing.T) {
 			"SELECT * FROM db1.t WITH OFFSET AS off",
 			"SELECT * FROM db1.t WITH\nOFFSET AS off",
 			"SELECT * FROM db1.t WITH\tOFFSET AS off",
-			"SELECT * FROM db1.t AS s JOIN db1.o WITH OFFSET AS off ON 1",
-			"SELECT * FROM db1.o, db1.t WITH OFFSET AS off",
-			"SELECT * FROM db1.t, db1.o WITH OFFSET AS off",
+			// The other three removed cases, whose SQL joins other.u, are pinned
+			// with their exact corpus requests in
+			// TestWholeStatementParseGateGrandfatheredCorpusRequests.
 			// The gate precedes T2 and T3: no policy check sees a statement
 			// the engine did not parse in full.
 			"SELECT * FROM {p:Identifier} AS a XYZ",
@@ -56,7 +60,7 @@ func TestWholeStatementParseGate(t *testing.T) {
 		}
 		// With the surface active the final annotation still names an SI
 		// object the statement proves.
-		hgUnsafe := tablerefCase{name: "truncate all tables", sql: "TRUNCATE ALL TABLES FROM hg_unsafe", si: si,
+		hgUnsafe := tablerefCase{name: fmt.Sprintf("si=%v/truncate all tables", si), sql: "TRUNCATE ALL TABLES FROM hg_unsafe", si: si,
 			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: "TRUNCATE ALL TABLES FROM hg_unsafe"}
 		hgSafe := refused("SELECT * FROM hg_safe.db1__t AS a XYZ")
 		if si {
@@ -66,11 +70,61 @@ func TestWholeStatementParseGate(t *testing.T) {
 		cases = append(cases, hgUnsafe, hgSafe)
 		// CREATE TABLE … EMPTY AS SELECT is parsed without its EMPTY keyword,
 		// so it passes the gate.
-		cases = append(cases, tablerefCase{name: "empty form", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p", si: si,
+		cases = append(cases, tablerefCase{name: fmt.Sprintf("si=%v/empty form", si), sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p", si: si,
 			wantCode: pb.RewriteCode_Success,
 			wantSQL:  `CREATE TABLE phys."db1.n" ENGINE=Memory EMPTY AS (SELECT * FROM phys."db1.p" "db1.p")`})
 	}
 	runTablerefCases(t, cases)
+}
+
+// TestWholeStatementParseGateGrandfatheredCorpusRequests pins the six cases
+// that left the shared corpus with the gate (the `si_with_offset*`,
+// `si_mixed_ordinary_with_offset_allowed` and `si_comma_*_with_offset_*`
+// entries of storage_integrity_cases.json at 57a87ee) with their exact SQL and
+// their exact V1 dynamic arguments, so the native engine answers each one as
+// the gate does, not merely an analogue of it.
+func TestWholeStatementParseGateGrandfatheredCorpusRequests(t *testing.T) {
+	dynamic := func(databaseMap map[string]string) []*pb.RewriteOption {
+		return []*pb.RewriteOption{tableRewriteDynamic(&pb.RewriteTableDynamicArgs{
+			DatabaseMap:            databaseMap,
+			KnownPhysicalDatabases: []string{"phys"},
+			Delim:                  "_",
+			StorageIntegrity: &pb.StorageIntegrityArgs{
+				Tables: map[string]*pb.StorageIntegrityArgs_Table{
+					"db1.t": {SafeTable: "hg_safe.db1__t", UnsafeTable: "hg_unsafe.db1__t"},
+				},
+				ReadMode:            pb.StorageIntegrityArgs_READ_MODE_SAFE,
+				ReservedRowIdColumn: "_hg_row_id",
+				ContractVersion:     pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1,
+			},
+		})}
+	}
+	single := map[string]string{"db1": "phys"}
+	pair := map[string]string{"db1": "phys", "other": "phys"}
+	e := newEngine(t)
+	for _, c := range []struct {
+		name string
+		sql  string
+		opts []*pb.RewriteOption
+	}{
+		{"si_with_offset_rejected", "SELECT * FROM db1.t WITH OFFSET AS off", dynamic(single)},
+		{"si_with_offset_newline_rejected", "SELECT * FROM db1.t WITH\nOFFSET AS off", dynamic(single)},
+		{"si_with_offset_tab_rejected", "SELECT * FROM db1.t WITH\tOFFSET AS off", dynamic(single)},
+		{"si_mixed_ordinary_with_offset_allowed", "SELECT * FROM db1.t AS s JOIN other.u WITH OFFSET AS off ON 1", dynamic(pair)},
+		{"si_comma_si_with_offset_rejected", "SELECT * FROM other.u, db1.t WITH OFFSET AS off", dynamic(pair)},
+		{"si_comma_ordinary_with_offset_allowed", "SELECT * FROM db1.t, other.u WITH OFFSET AS off", dynamic(pair)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			resp, err := doRewrite(e, c.sql, c.opts)
+			if err != nil {
+				t.Fatalf("doRewrite: %v", err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "statement is not supported" ||
+				resp.GetSqlAfterRewrite() != c.sql {
+				t.Fatalf("resp = %+v", resp)
+			}
+		})
+	}
 }
 
 // The gate refuses in every mode, through the response, never the Go error.
