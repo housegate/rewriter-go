@@ -49,7 +49,16 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 		// Spec 2026-09-26 R7: DESCRIBE (SELECT …) is not run through the
 		// SELECT pipeline, so its subquery is refused rather than forwarded
 		// unrewritten; so is a DESCRIBE with no target at all.
-		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		msg := engine.UnsupportedStatementMessage
+		if nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
+			msg = nameresolve.StorageIntegrityUnmodelledMessage
+			if t.Shape == engine.ObjectTargetSubquery {
+				if tt, ok := describeSubqueryStorageIntegrityTable(e, sql[t.SubqueryStart:], sel); ok {
+					msg = nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table))
+				}
+			}
+		}
+		rejectUnsupported(resp, msg)
 		return resp, true, nil
 	}
 	if sel.Mode == nameresolve.ModeDynamic {
@@ -111,4 +120,24 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 	}
 	resp.SqlAfterRewrite = sql // a table-function target (T5-classified by the preflight) or static mode
 	return resp, true, nil
+}
+
+// describeSubqueryStorageIntegrityTable reports the first table of a
+// DESCRIBE (SELECT …) body that lives in a storage-integrity physical
+// database, so the SI-surface refusal names the object (spec 2026-09-26 §5).
+func describeSubqueryStorageIntegrityTable(e engine.Engine, body string, sel nameresolve.Selection) (engine.TableTarget, bool) {
+	ast, err := e.ParseOne(body)
+	if err != nil {
+		return engine.TableTarget{}, false
+	}
+	tables, err := engine.CollectSelectTables(ast)
+	if err != nil {
+		return engine.TableTarget{}, false
+	}
+	for _, tt := range tables {
+		if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
+			return tt, true
+		}
+	}
+	return engine.TableTarget{}, false
 }

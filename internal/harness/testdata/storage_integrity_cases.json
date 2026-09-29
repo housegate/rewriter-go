@@ -14507,16 +14507,40 @@
     "contract_version": "V2",
     "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory",
     "dynamic": {
-      "database_map": {"db1": "phys"},
-      "known_physical_databases": ["phys"],
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
       "upstream_logical_database_in_context": "db1",
       "delim": "_",
-      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
-      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
     },
     "reject": true,
-    "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_promote.x is not directly addressable"
   },
   {
     "name": "si_tr_create_default_hg_safe_subquery_rejected",
@@ -14541,16 +14565,40 @@
     "contract_version": "V2",
     "sql": "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory",
     "dynamic": {
-      "database_map": {"db1": "phys"},
-      "known_physical_databases": ["phys"],
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
       "upstream_logical_database_in_context": "db1",
       "delim": "_",
-      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
-      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
     },
     "reject": true,
-    "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable"
   },
   {
     "name": "si_tr_create_default_phys_subquery_rejected",
@@ -15757,16 +15805,40 @@
     "contract_version": "V2",
     "sql": "DESCRIBE (SELECT * FROM phys.`db2.x`)",
     "dynamic": {
-      "database_map": {"db1": "phys"},
-      "known_physical_databases": ["phys"],
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
       "upstream_logical_database_in_context": "db1",
       "delim": "_",
-      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
-      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
     },
     "reject": true,
-    "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
   },
   {
     "name": "si_tr_describe_subquery_hg_safe_rejected",
@@ -15790,16 +15862,40 @@
     "contract_version": "V2",
     "sql": "DESCRIBE (SELECT * FROM hg_safe.db1__t)",
     "dynamic": {
-      "database_map": {"db1": "phys"},
-      "known_physical_databases": ["phys"],
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
       "upstream_logical_database_in_context": "db1",
       "delim": "_",
-      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
-      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
     },
     "reject": true,
-    "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable"
   },
   {
     "name": "si_tr_describe_table_subquery_rejected",
@@ -15823,16 +15919,40 @@
     "contract_version": "V2",
     "sql": "DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
     "dynamic": {
-      "database_map": {"db1": "phys"},
-      "known_physical_databases": ["phys"],
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
       "upstream_logical_database_in_context": "db1",
       "delim": "_",
-      "protected_databases": ["phys", "hg_safe", "hg_unsafe", "hg_promote"],
-      "storage_integrity": {"tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}}, "read_mode": "SAFE", "reserved_row_id_column": "_hg_row_id", "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]}
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
     },
     "reject": true,
-    "want_code": "UnsupportedStatement", "want_stmt": "",
-    "want_message_contains": "statement is not supported"
+    "want_code": "UnsupportedStatement",
+    "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
   },
   {
     "name": "si_tr_describe_dotted_rewritten",

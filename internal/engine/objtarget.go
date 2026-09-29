@@ -26,6 +26,10 @@ type ObjectTarget struct {
 	// R7): a plain [db.]name, a table-function call, a parenthesized
 	// subquery, or nothing at all.
 	Shape ObjectTargetShape
+	// SubqueryStart is the byte offset of the opening parenthesis when
+	// Shape == ObjectTargetSubquery, so sql[SubqueryStart:] is the
+	// parenthesized body (spec 2026-09-26 R7).
+	SubqueryStart int
 }
 
 // ObjectTargetShape is ObjectTarget.Shape.
@@ -99,6 +103,7 @@ func ParseObjectTarget(e Engine, sql string) (ObjectTarget, error) {
 		}
 	} else if i < len(toks) && toks[i].TokenType == "L_PAREN" {
 		out.Shape = ObjectTargetSubquery
+		out.SubqueryStart = toks[i].Span.Start
 	}
 	return out, nil
 }

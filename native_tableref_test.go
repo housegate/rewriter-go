@@ -1041,9 +1041,9 @@ func TestTableRef_MutationAndColumnExpressionReads(t *testing.T) {
 		{sql: "UPDATE db1.o SET b = (SELECT max(a) FROM db1.p) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "INSERT INTO db1.o VALUES ((SELECT max(a) FROM db1.p))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_promote"),
-			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_promote.x is not directly addressable"},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_safe"),
-			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM phys.`db2.x`)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier})) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
 		{sql: "CREATE TABLE db1.n (a UInt64 MATERIALIZED a IN `db2.x`) ENGINE = Memory", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
@@ -1232,16 +1232,23 @@ func TestTableRef_DescribeAndShowTargets(t *testing.T) {
 	const unsupported = "statement is not supported"
 	var cases []tablerefCase
 	for _, si := range []bool{false, true} {
-		for _, sql := range []string{
-			"DESCRIBE (SELECT * FROM phys.`db2.x`)",
-			"DESCRIBE (SELECT * FROM hg_safe.db1__t)",
-			"DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
-			"DESC (SELECT a FROM db1.o)",
-			"EXISTS",
-			"SHOW CREATE",
+		// DESCRIBE (SELECT …) is an unmodelled shape refused before T3; with
+		// the SI surface active it answers with the SI catch-all, upgraded to
+		// the SI object its body names (spec 2026-09-26 §5 precedence).
+		for _, c := range []struct{ sql, siMsg string }{
+			{"DESCRIBE (SELECT * FROM phys.`db2.x`)", StorageIntegrityUnmodelledMessage},
+			{"DESCRIBE (SELECT * FROM hg_safe.db1__t)", "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
+			{"DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)", StorageIntegrityUnmodelledMessage},
+			{"DESC (SELECT a FROM db1.o)", StorageIntegrityUnmodelledMessage},
+			{"EXISTS", unsupported},
+			{"SHOW CREATE", unsupported},
 		} {
-			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
-				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+			msg := unsupported
+			if si {
+				msg = c.siMsg
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
 		}
 		for _, c := range []struct{ sql, want string }{
 			{"DESCRIBE TABLE `db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`"},
