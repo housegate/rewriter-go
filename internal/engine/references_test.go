@@ -55,8 +55,8 @@ func TestCollectDatabaseReferenceSets_Blind(t *testing.T) {
 	e := newTestEngine(t)
 	for sql, want := range map[string][]string{
 		"SELECT * FROM db1.o WHERE a IN hg_safe.x":        nil,
-		"SELECT * FROM db1.o WHERE a IN (hg_safe.x)":      {"hg_safe"},
-		"SELECT * FROM db1.o WHERE a IN ((hg_safe.x))":    {"hg_safe"},
+		"SELECT * FROM db1.o WHERE a IN (hg_safe.x)":      nil,
+		"SELECT * FROM db1.o WHERE a IN ((hg_safe.x))":    nil,
 		"SELECT joinGet('hg_safe.x', 'v', 1)":             {"hg_safe"},
 		"SELECT hasColumnInTable('hg_safe', 'x', 'c')":    {"hg_safe"},
 		"SELECT * FROM hg_safe.x":                         nil,

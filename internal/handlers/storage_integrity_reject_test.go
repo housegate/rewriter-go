@@ -95,6 +95,10 @@ func TestAnnotateStorageIntegrityReject_ProvenD2Targets(t *testing.T) {
 			"storage-integrity physical table hg_unsafe.x is not directly addressable"},
 		{"reserved row id has no Task2 precedence", "CREATE LIVE VIEW other.v AS SELECT _hg_row_id FROM db1.t",
 			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+		{"column default subquery physical table", "CREATE TABLE other.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory",
+			"storage-integrity physical table hg_safe.db1__t is not directly addressable"},
+		{"materialized column IN physical table", "CREATE TABLE other.n (a UInt64 MATERIALIZED a IN hg_unsafe.db1__t) ENGINE = Memory",
+			"storage-integrity physical table hg_unsafe.db1__t is not directly addressable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &pb.RewriteSQLResponse{Code: pb.RewriteCode_UnsupportedStatement, Message: "original"}
@@ -116,6 +120,8 @@ func TestAnnotateStorageIntegrityReject_UnprovenNamesKeepCallerMessage(t *testin
 		{"output alias", "CREATE LIVE VIEW other.v AS SELECT x AS hg_safe FROM other.u"},
 		{"table alias", "CREATE LIVE VIEW other.v AS SELECT x FROM other.u AS hg_safe"},
 		{"alias qualified column", "CREATE LIVE VIEW other.v AS SELECT hg_safe.x FROM other.u AS hg_safe"},
+		{"alias qualified column in a plain statement", "SELECT hg_safe.x FROM other.u AS hg_safe"},
+		{"alias qualified column in a column default", "CREATE TABLE other.n (a UInt64 DEFAULT hg_safe.x) ENGINE = Memory"},
 		{"settings key", "OPTIMIZE TABLE other.u FINAL SETTINGS hg_safe=1"},
 		{"cluster name", "SYSTEM RELOAD CONFIG ON CLUSTER hg_safe"},
 		{"invalid SYSTEM cluster parameter", "SYSTEM START MERGES ON CLUSTER {cluster:Identifier} hg_safe.db1__t"},

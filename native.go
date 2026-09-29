@@ -145,7 +145,63 @@ const StorageIntegrityContractMessage = "storage-integrity contract version V1 o
 // a static or no-rewrite request; a dynamic-mode request never returns one
 // (sealStorageIntegrityHandlerError turns it into an UnsupportedStatement
 // response). Rewrite rejections travel inside the response Code.
+//
+// CREATE TABLE … EMPTY AS SELECT is rewritten without its EMPTY keyword,
+// which polyglot cannot parse, and the keyword is put back into the result;
+// a rejection echoes the caller's SQL (spec 2026-09-26 §5).
 func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
+	stripped, empty, stripErr := engine.StripCreateTableEmpty(e, sql)
+	if stripErr == nil && !empty {
+		return rewriteStatement(e, sql, opts)
+	}
+	text := sql
+	if empty {
+		text = stripped
+	}
+	resp, err := rewriteStatement(e, text, opts)
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		resp.SqlAfterRewrite = sql // a rejection echoes the caller's SQL
+		return resp, nil
+	}
+	if stripErr == nil {
+		out, insertErr := engine.InsertCreateTableEmpty(e, resp.GetSqlAfterRewrite())
+		if insertErr == nil {
+			resp.SqlAfterRewrite = out
+			return resp, nil
+		}
+		stripErr = insertErr
+	}
+	return sealCreateTableEmpty(resp, sql, opts, stripErr)
+}
+
+// sealCreateTableEmpty refuses a CREATE TABLE … EMPTY AS SELECT whose EMPTY
+// keyword could not be located or put back, instead of forwarding a statement
+// without its body (spec 2026-09-26 §5: an engine-internal limit is a coded
+// UnsupportedStatement in dynamic mode). Static and no-rewrite requests keep
+// the legacy Go-error channel.
+func sealCreateTableEmpty(resp *pb.RewriteSQLResponse, sql string, opts []*pb.RewriteOption, cause error) (*pb.RewriteSQLResponse, error) {
+	if nameresolve.FindActive(opts).Mode != nameresolve.ModeDynamic {
+		return nil, cause
+	}
+	msg := engine.UnsupportedStatementMessage
+	if resp.GetStorageIntegrityContractVersion() != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
+		msg = StorageIntegrityUnmodelledMessage
+	}
+	return &pb.RewriteSQLResponse{
+		SqlAfterRewrite:                 sql,
+		Code:                            pb.RewriteCode_UnsupportedStatement,
+		Message:                         msg,
+		ExistenceClause:                 resp.GetExistenceClause(),
+		StorageIntegrityContractVersion: resp.GetStorageIntegrityContractVersion(),
+	}, nil
+}
+
+// rewriteStatement is the single-statement pipeline doRewrite runs once the
+// CREATE TABLE … EMPTY form has been normalised.
+func rewriteStatement(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
 	resp := &pb.RewriteSQLResponse{SqlAfterRewrite: sql} // SQL always set; echoes input
 	siVersion := pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
 	selection := nameresolve.FindActive(opts)
@@ -301,6 +357,7 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
+	resp.Message = "success"
 	finalize(resp, ast, sql, ec, siVersion, e, selection)
 	return resp, nil
 }

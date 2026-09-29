@@ -200,11 +200,8 @@ func TestStorageIntegrityGolden(t *testing.T) {
 				}
 				got := pbFromResult(res)
 				cmpEq := semEq
-				if c.Reject || c.AllowSQLDivergence {
-					got.SqlAfterRewrite = want.GetSqlAfterRewrite()
-					if got.SqlAfterRewrite == "" {
-						cmpEq = nil
-					}
+				if !alignUnpinnedOracleFields(*c, got, want) {
+					cmpEq = nil
 				}
 				if d := Compare(got, want, cmpEq); !d.Equal() {
 					t.Errorf("oracle divergence: %v", d.Mismatches)
@@ -218,6 +215,31 @@ func TestStorageIntegrityGolden(t *testing.T) {
 		}
 		writeSICorpus(t, cases)
 	}
+}
+
+// alignUnpinnedOracleFields copies into got the oracle's value of every field
+// the shared corpus deliberately leaves engine-specific, so the differential
+// diffs exactly what the corpus pins:
+//   - the SQL of a rejection (both runners check that it echoes the input)
+//     and of a declared allow_sql_divergence case (pinned per engine);
+//   - the AccessedTables of a rejection whose case pins no want_accessed:
+//     spec 2026-09-26 §5 lets a rejection report a partial list, so only a
+//     pinned list is a cross-engine contract.
+//
+// It reports whether the SQL is still compared semantically; false means the
+// SQL was aligned to an empty oracle string and must be compared exactly.
+func alignUnpinnedOracleFields(c SICase, got, want *pb.RewriteSQLResponse) (semantic bool) {
+	semantic = true
+	if c.Reject || c.AllowSQLDivergence {
+		got.SqlAfterRewrite = want.GetSqlAfterRewrite()
+		if got.SqlAfterRewrite == "" {
+			semantic = false
+		}
+	}
+	if c.Reject && c.WantAccessed == nil {
+		got.OriginalAccessedTables = want.GetOriginalAccessedTables()
+	}
+	return semantic
 }
 
 // writeSICorpus rewrites the corpus file deterministically.
@@ -380,5 +402,39 @@ func TestWriteSICorpusPreservesNonMutableFields(t *testing.T) {
 	}
 	if !bytes.Equal(first, second) {
 		t.Fatal("writer output is not deterministic")
+	}
+}
+
+func TestAlignUnpinnedOracleFields(t *testing.T) {
+	native := func() *pb.RewriteSQLResponse {
+		return &pb.RewriteSQLResponse{
+			Code: pb.RewriteCode_UnsupportedStatement, SqlAfterRewrite: "TRUNCATE DATABASE hg_safe",
+			OriginalAccessedTables: []*pb.AccessedTable{},
+		}
+	}
+	oracle := &pb.RewriteSQLResponse{
+		Code: pb.RewriteCode_UnsupportedStatement, SqlAfterRewrite: "TRUNCATE DATABASE hg_safe",
+		OriginalAccessedTables: []*pb.AccessedTable{{OriginalDatabase: "hg_safe", PhysicalDatabase: "hg_safe", IsStorageIntegrity: true}},
+	}
+
+	got := native()
+	alignUnpinnedOracleFields(SICase{Reject: true}, got, oracle)
+	if d := Compare(got, oracle, nil); !d.Equal() {
+		t.Fatalf("unpinned rejection accessed list is not a contract: %v", d.Mismatches)
+	}
+
+	got = native()
+	alignUnpinnedOracleFields(SICase{Reject: true, WantAccessed: []accessedJSON{}}, got, oracle)
+	if d := Compare(got, oracle, nil); d.Equal() {
+		t.Fatal("a pinned rejection accessed list must still be diffed")
+	}
+
+	got = native()
+	got.Code = pb.RewriteCode_Success
+	success := &pb.RewriteSQLResponse{Code: pb.RewriteCode_Success, SqlAfterRewrite: got.SqlAfterRewrite,
+		OriginalAccessedTables: oracle.OriginalAccessedTables}
+	alignUnpinnedOracleFields(SICase{}, got, success)
+	if d := Compare(got, success, nil); d.Equal() {
+		t.Fatal("a success accessed list must always be diffed")
 	}
 }

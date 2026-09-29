@@ -110,6 +110,11 @@ func TestTableRef_ParametersInTablePositionsAreRefused(t *testing.T) {
 			"DROP DATABASE {d:Identifier}",
 			"SHOW COLUMNS FROM {p:Identifier}",
 			"SHOW INDEX FROM db1.{p:Identifier}",
+			// T2 precedes T3 (spec 2026-09-26 §5): an SI physical table
+			// beside an identifier parameter keeps the T2 message.
+			"SELECT * FROM {p:Identifier} JOIN hg_safe.db1__t USING (a)",
+			"CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier} JOIN hg_safe.db1__t USING (a))) ENGINE = Memory",
+			"CHECK TABLE hg_safe.db1__t PARTITION {p:Identifier}",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: msg, wantSQL: sql})
@@ -212,10 +217,11 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			// changed" / self-review for the full writeup):
 			//
 			//  1. siHandlerBlindShapes: the joinGet shape's database
-			//     qualifier is a string-lookup argument, and the parenthesized
-			//     IN shape is not is_field-tagged -- no existing SI handler in
-			//     this repo classifies either position as a table reference,
-			//     so nothing downstream would otherwise reject them.
+			//     qualifier is a string-lookup argument -- no existing SI
+			//     handler classifies that position as a table reference (a
+			//     parenthesized IN operand is decoded for the SI handlers by
+			//     decodeInOperand and gets their message, spec T3), so
+			//     nothing downstream would otherwise reject it.
 			//     PreflightTableReferences now rejects a protected hit there
 			//     unconditionally too (engine.CollectDatabaseReferenceSets' blind set),
 			//     with the preflight's own generic message/code rather than an
@@ -231,7 +237,7 @@ func TestTableRef_ProtectedDatabasesAreRefusedEverywhere(t *testing.T) {
 			//     touch. A plain SELECT read (including CREATE VIEW's body)
 			//     keeps rejectCodeFor's RewriteError default.
 			isSIHandlerBlind := strings.Contains(shape, "joinGet") || strings.Contains(shape, "dictGet") ||
-				strings.Contains(shape, "hasColumnInTable") || strings.Contains(shape, "IN (%s.")
+				strings.Contains(shape, "hasColumnInTable")
 			isWriteSide := siWriteSideShapes[shape]
 			for _, si := range []bool{false, true} {
 				want := msg
@@ -451,8 +457,29 @@ func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
 			wantAcc: []string{"db1.t", "db1.o"}},
 		{name: "ctas own", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
 			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory AS (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.n", "db1.p"}},
-		{name: "ctas empty drops the body", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
-			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory`, wantAcc: []string{"db1.n"}},
+		{name: "ctas empty keeps and rewrites the body", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory EMPTY AS (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas empty table named empty", sql: "CREATE TABLE db1.empty ENGINE = Memory EMPTY AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.empty" ENGINE=Memory EMPTY AS (SELECT * FROM phys."db1.p" "db1.p")`, wantAcc: []string{"db1.empty", "db1.p"}},
+		{name: "ctas empty comment before empty", sql: "CREATE TABLE db1.n ENGINE = Memory COMMENT 'c' EMPTY AS SELECT * FROM db1.p", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory EMPTY AS (SELECT * FROM phys."db1.p" "db1.p") COMMENT 'c'`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas empty comment after body", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p COMMENT 'c'", wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory EMPTY AS (SELECT * FROM phys."db1.p" "db1.p") COMMENT 'c'`, wantAcc: []string{"db1.n", "db1.p"}},
+		{name: "ctas empty protected source refused", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM phys.`db2.x`",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable",
+			wantSQL: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM phys.`db2.x`"},
+		{name: "ctas empty active source", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
+			wantSQL: `CREATE TABLE phys."db1.n" ENGINE=Memory EMPTY AS (SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS "db1.t")`, wantAcc: []string{"db1.n", "db1.t"}},
+		// The EMPTY-stripped form parses and is rewritten, but InsertCreateTableEmpty
+		// cannot locate the body in the generated SQL (FINAL SAMPLE), so
+		// sealCreateTableEmpty refuses instead of forwarding a CTAS without EMPTY
+		// (a data copy).
+		{name: "ctas empty unreparseable is sealed", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported",
+			wantSQL: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1"},
+		{name: "ctas empty unreparseable is sealed with the SI catch-all", sql: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage,
+			wantSQL: "CREATE TABLE db1.n ENGINE = Memory EMPTY AS SELECT * FROM db1.p FINAL SAMPLE 0.1"},
 		{name: "ctas active source", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
 			wantAcc: []string{"db1.n", "db1.t"}},
 		{name: "ctas into active target still refused", sql: "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o", si: true,
@@ -880,7 +907,7 @@ func TestTableRef_UnmodelledClassesAreRefusedWithoutSI(t *testing.T) {
 		{name: "check", sql: "CHECK TABLE db1.o", wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "create user", sql: "CREATE USER u1", wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "create function", sql: "CREATE FUNCTION f AS x -> x + 1", wantCode: pb.RewriteCode_UnsupportedStatement},
-		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET max_threads = 1"},
+		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantMsg: "success", wantSQL: "SET max_threads = 1"},
 		{name: "set refused under V2", sql: "SET max_threads = 1", si: true, wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "select 1", sql: "SELECT 1", wantCode: pb.RewriteCode_Success},
 		// Task 7 fix round 1 finding 4: the SET carve-out must admit only a
@@ -909,9 +936,14 @@ func TestTableRef_InOperandsDecodeOnce(t *testing.T) {
 			{"SELECT * FROM db1.o WHERE a IN ((hg_safe.db1__t))", "hg_safe"},
 			{"SELECT * FROM db1.o WHERE in(a, ((phys.`db2.x`)))", "phys"},
 		} {
+			code, msg := pb.RewriteCode_InvalidRewriteRequest, "protected database "+c.db+" is not addressable"
+			if si && c.db == "hg_safe" {
+				// A parenthesized IN operand is an ordinary SI-handler position:
+				// the SI message keeps precedence (spec 2026-09-26 T3).
+				code, msg = pb.RewriteCode_RewriteError, "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+			}
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
-				wantCode: pb.RewriteCode_InvalidRewriteRequest,
-				wantMsg:  "protected database " + c.db + " is not addressable", wantSQL: c.sql})
+				wantCode: code, wantMsg: msg, wantSQL: c.sql})
 		}
 		for _, sql := range []string{
 			"SELECT * FROM db1.o WHERE a IN ({p:Identifier})",
@@ -1024,9 +1056,9 @@ func TestTableRef_MutationAndColumnExpressionReads(t *testing.T) {
 		{sql: "UPDATE db1.o SET b = (SELECT max(a) FROM db1.p) WHERE 1", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "INSERT INTO db1.o VALUES ((SELECT max(a) FROM db1.p))", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_promote.x)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_promote"),
-			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_promote.x is not directly addressable"},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("hg_safe"),
-			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: unsupported},
+			setCode: true, codeOn: pb.RewriteCode_UnsupportedStatement, msgOn: "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM phys.`db2.x`)) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: protected("phys")},
 		{sql: "CREATE TABLE db1.n (a UInt64 DEFAULT (SELECT max(a) FROM {p:Identifier})) ENGINE = Memory", code: pb.RewriteCode_InvalidRewriteRequest, msgOff: paramMsg},
 		{sql: "CREATE TABLE db1.n (a UInt64 MATERIALIZED a IN `db2.x`) ENGINE = Memory", code: pb.RewriteCode_UnsupportedStatement, msgOff: unsupported},
@@ -1215,16 +1247,23 @@ func TestTableRef_DescribeAndShowTargets(t *testing.T) {
 	const unsupported = "statement is not supported"
 	var cases []tablerefCase
 	for _, si := range []bool{false, true} {
-		for _, sql := range []string{
-			"DESCRIBE (SELECT * FROM phys.`db2.x`)",
-			"DESCRIBE (SELECT * FROM hg_safe.db1__t)",
-			"DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)",
-			"DESC (SELECT a FROM db1.o)",
-			"EXISTS",
-			"SHOW CREATE",
+		// DESCRIBE (SELECT …) is an unmodelled shape refused before T3; with
+		// the SI surface active it answers with the SI catch-all, upgraded to
+		// the SI object its body names (spec 2026-09-26 §5 precedence).
+		for _, c := range []struct{ sql, siMsg string }{
+			{"DESCRIBE (SELECT * FROM phys.`db2.x`)", StorageIntegrityUnmodelledMessage},
+			{"DESCRIBE (SELECT * FROM hg_safe.db1__t)", "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
+			{"DESCRIBE TABLE (SELECT * FROM phys.`db2.x`)", StorageIntegrityUnmodelledMessage},
+			{"DESC (SELECT a FROM db1.o)", StorageIntegrityUnmodelledMessage},
+			{"EXISTS", unsupported},
+			{"SHOW CREATE", unsupported},
 		} {
-			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
-				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+			msg := unsupported
+			if si {
+				msg = c.siMsg
+			}
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: c.sql})
 		}
 		for _, c := range []struct{ sql, want string }{
 			{"DESCRIBE TABLE `db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`"},
@@ -1803,6 +1842,63 @@ func TestTableRef_Residual5SignsAndSplitBrackets(t *testing.T) {
 				cases = append(cases, tablerefCase{name: "bracket/" + sql, sql: sql, si: si,
 					wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o"}})
 			}
+		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_ParenthesizedInOperandUnderActiveSurface pins that dropping
+// the parenthesized IN operand from the SI-handler-blind set opens nothing:
+// with the SI surface active, every position that can hold `x IN ((hg_*.t))`
+// is still refused, now with the SI handlers' own message (spec 2026-09-26 T3).
+func TestTableRef_ParenthesizedInOperandUnderActiveSurface(t *testing.T) {
+	const safe = "storage-integrity physical table hg_safe.db1__t is not directly addressable"
+	var cases []tablerefCase
+	for _, c := range []struct {
+		sql  string
+		code pb.RewriteCode
+		msg  string
+	}{
+		{"SELECT * FROM db1.o WHERE a IN (hg_safe.db1__t)", pb.RewriteCode_RewriteError, safe},
+		{"SELECT * FROM db1.o WHERE in(a, (hg_safe.db1__t))", pb.RewriteCode_RewriteError, safe},
+		{"SELECT * FROM db1.o WHERE a GLOBAL IN ((hg_unsafe.db1__t))", pb.RewriteCode_RewriteError,
+			"storage-integrity physical table hg_unsafe.db1__t is not directly addressable"},
+		{"SELECT * FROM db1.o WHERE a NOT IN ((hg_promote.x))", pb.RewriteCode_RewriteError,
+			"storage-integrity physical table hg_promote.x is not directly addressable"},
+		{"ALTER TABLE db1.o DELETE WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"DELETE FROM db1.o WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"UPDATE db1.o SET b = 1 WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"INSERT INTO db1.o SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE VIEW db1.v AS SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS SELECT * FROM db1.p WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"CREATE TABLE db1.n (a UInt64, b UInt8 DEFAULT a IN ((hg_safe.db1__t))) ENGINE = Memory", pb.RewriteCode_UnsupportedStatement, safe},
+		{"ALTER TABLE db1.o MODIFY COLUMN b UInt8 DEFAULT a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+		{"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE a IN ((hg_safe.db1__t))", pb.RewriteCode_UnsupportedStatement, safe},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: true, wantCode: c.code, wantMsg: c.msg, wantSQL: c.sql})
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_EngineLocalShapes pins native-engine behaviour the shared
+// storage-integrity corpus deliberately does not: shapes the native engine
+// does not model and refuses (spec 2026-09-26 §5: "where the engine models
+// the position"), which rewriter-grpc parses into an ordinary AST.
+func TestTableRef_EngineLocalShapes(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		msg := "statement is not supported"
+		if si {
+			msg = StorageIntegrityUnmodelledMessage
+		}
+		for _, sql := range []string{
+			"(SELECT * FROM db1.o)",
+			"((SELECT * FROM db1.o))",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: sql})
 		}
 	}
 	runTablerefCases(t, cases)

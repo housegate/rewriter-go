@@ -33,6 +33,11 @@ func AnnotateStorageIntegrityRejectAST(e engine.Engine, resp *pb.RewriteSQLRespo
 	if resp.GetCode() == pb.RewriteCode_Success {
 		return
 	}
+	// T2 (an Identifier parameter in a table position) precedes T3 (spec
+	// 2026-09-26 §5), so no path below may upgrade its message.
+	if resp.GetMessage() == engine.IdentifierParameterMessage {
+		return
+	}
 	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		return
 	}
@@ -63,6 +68,26 @@ func AnnotateStorageIntegrityRejectAST(e engine.Engine, resp *pb.RewriteSQLRespo
 				resp.Message = nameresolve.StorageIntegrityWriteRejectMessage(key)
 				return
 			}
+		}
+	}
+	// A table the statement reads in a position no SI handler classifies
+	// (a column DEFAULT / MATERIALIZED subquery, spec 2026-09-26 R2) is still
+	// a proven table reference: spec 2026-09-26 §5 puts the SI message (T3)
+	// ahead of the ordinary-stage refusal.
+	if kind, kerr := engine.NodeKind(ast); kerr != nil || kind == engine.NodeCommand {
+		return
+	}
+	tables, terr := engine.CollectSelectTables(ast)
+	if terr != nil {
+		return
+	}
+	for _, tt := range tables {
+		if tt.DB == "" {
+			continue
+		}
+		if nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
+			resp.Message = nameresolve.StorageIntegrityPhysicalRejectMessage(qualify(tt.DB, tt.Table))
+			return
 		}
 	}
 }

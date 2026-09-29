@@ -21,11 +21,12 @@ func CollectDatabaseReferences(e Engine, ast AST, sql string) ([]string, error) 
 // the SI-handler-blind subset (blind): the databases named only through a
 // position no storage-integrity handler classifies as a table reference — a
 // joinGet/dictGet/hasColumnInTable-family argument (an ordinary scalar
-// function call whose argument embeds a namespace) and a parenthesized
-// single-operand IN (`x IN (db.table)`, at any paren depth; the SI handlers
-// classify only the bare form). PreflightTableReferences refuses a protected
-// blind hit even while the storage-integrity surface is active. Unqualified
-// names contribute nothing: the logical context is checked by the caller.
+// function call whose argument embeds a namespace). A parenthesized IN
+// operand is not blind: the shared IN-operand decoder unwraps it for the SI
+// handlers too, so they answer it with their own message (spec 2026-09-26
+// T3). PreflightTableReferences refuses a protected blind hit even while the
+// storage-integrity surface is active. Unqualified names contribute nothing:
+// the logical context is checked by the caller.
 //
 // Write targets (the statement's own CREATE/DROP/INSERT/ALTER/RENAME/TO
 // target(s), CREATE/DROP DATABASE, table-function clone sources, ...) are
@@ -103,7 +104,6 @@ func CollectDatabaseReferenceSets(e Engine, ast AST, sql string) (all, blind []s
 	// source-role table functions, so the read-source visitor never emits
 	// them (spec 2026-09-26 T3).
 	collectStringLookupDatabases(root, addBlind)
-	collectParenthesizedInDatabases(root, addBlind)
 	return all, blind, nil
 }
 
@@ -216,32 +216,6 @@ func stringLookupArgDatabase(name string, args []any) (string, bool) {
 		return stringLookupDatabase(name, value)
 	}
 	return "", false
-}
-
-// collectParenthesizedInDatabases reports the database of every
-// parenthesized single-operand IN (`x IN (db.table)`, at any paren depth),
-// decoded by the shared IN-operand decoder. The storage-integrity handlers
-// classify only the bare, is_field-tagged operand, so this parenthesized form
-// is "SI-handler-blind": PreflightTableReferences must refuse a protected hit
-// here even while the storage-integrity surface is active.
-func collectParenthesizedInDatabases(node any, add func(string)) {
-	switch n := node.(type) {
-	case map[string]any:
-		if in, ok := n["in"].(map[string]any); ok {
-			if isField, _ := in["is_field"].(bool); !isField {
-				if kind, detail := decodeInNodeOperand(in); kind == inOperandTable {
-					add(detail.ref.Target.DB)
-				}
-			}
-		}
-		for _, v := range n {
-			collectParenthesizedInDatabases(v, add)
-		}
-	case []any:
-		for _, v := range n {
-			collectParenthesizedInDatabases(v, add)
-		}
-	}
 }
 
 // stringLookupDatabase extracts the database qualifier from a string-lookup

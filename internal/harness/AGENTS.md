@@ -69,6 +69,24 @@ published corpus.
   `StorageIntegrityArgs.reserved_databases` (read by the engines under V2
   only).
 - Every case whose name starts with `si_tr_` (table-reference hardening) must set a non-empty `dynamic.protected_databases` string array (rule R9), sent as `RewriteTableDynamicArgs.protected_databases`.
+- Every input is ClickHouse SQL: it parses under ClickHouse 26.3 with `implicit_select = 0`. An input ClickHouse refuses proves nothing about the table-reference invariant, and rewriter-grpc, which uses ClickHouse's parser, can only answer `SyntaxError` for it. Check new inputs with `clickhouse local` (any 26.3.x; `clickhouse local` enables `implicit_select` by default, hence the `SET`):
+
+  ```bash
+  python3 - <<'EOF'
+  import json
+  out = ["SET implicit_select = 0;"]
+  for c in json.load(open('internal/harness/testdata/storage_integrity_cases.json')):
+      tag = 'hgq'
+      while f'${tag}$' in c['sql']: tag += 'x'
+      out.append(f"SELECT '{c['name']}', formatQuerySingleLineOrNull(${tag}${c['sql']}${tag}$) FORMAT TSV;")
+  open('tmp/chparse.sql', 'w').write('\n'.join(out) + '\n')
+  EOF
+  clickhouse local --queries-file tmp/chparse.sql | grep '\\N$'
+  ```
+
+  The only rows allowed to end in `\N` are the twelve pre-Spec-2026-09-26 cases whose inputs predate this rule and agree across engines: `si_reserved_column_star_rename{,_source}_rejected`, `si_with_offset{,_newline,_tab}_rejected`, `si_attach_grant_{physical,logical}_table_rejected`, `si_attach_safe_database_rejected`, `si_mixed_ordinary_with_offset_allowed`, `si_comma_si_with_offset_rejected`, `si_comma_ordinary_with_offset_allowed`, `si_create_live_view_over_si_rejected`.
+- A shape only one engine models (a Polyglot walk or generator limit, a top-level parenthesised `SELECT`) is engine-local. Pin it in that engine's own tests (`native_tableref_test.go` at the repository root), never in this corpus: spec 2026-09-26 §5 makes its outcome depend on "where the engine models the position".
+- The differential (`TestStorageIntegrityGolden` with `REWRITER_ORACLE_ADDR`) compares a rejection's `original_accessed_tables` only when the case pins `want_accessed` (spec §5: a rejection may report a partial list), the same rule the C++ runner applies. A success's list is always compared, in order.
 
 Regenerate SQL pins only with both engines available. `UPDATE_GOLDEN` is
 enabled only by the exact value `1`, and the scoped command must provide the
