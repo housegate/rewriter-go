@@ -897,7 +897,7 @@ func TestTableRef_UnmodelledClassesAreRefusedWithoutSI(t *testing.T) {
 		{name: "check", sql: "CHECK TABLE db1.o", wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "create user", sql: "CREATE USER u1", wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "create function", sql: "CREATE FUNCTION f AS x -> x + 1", wantCode: pb.RewriteCode_UnsupportedStatement},
-		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantSQL: "SET max_threads = 1"},
+		{name: "set passes when inactive", sql: "SET max_threads = 1", wantCode: pb.RewriteCode_Success, wantMsg: "success", wantSQL: "SET max_threads = 1"},
 		{name: "set refused under V2", sql: "SET max_threads = 1", si: true, wantCode: pb.RewriteCode_UnsupportedStatement},
 		{name: "select 1", sql: "SELECT 1", wantCode: pb.RewriteCode_Success},
 		// Task 7 fix round 1 finding 4: the SET carve-out must admit only a

@@ -357,6 +357,7 @@ func rewriteStatement(e engine.Engine, sql string, opts []*pb.RewriteOption) (*p
 		resp.SqlAfterRewrite = gen
 	}
 	resp.Code = pb.RewriteCode_Success
+	resp.Message = "success"
 	finalize(resp, ast, sql, ec, siVersion, e, selection)
 	return resp, nil
 }
