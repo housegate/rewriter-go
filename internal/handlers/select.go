@@ -335,25 +335,44 @@ func recordRewrite(rewrites map[string]string, tt engine.TableTarget, newDB, new
 	}
 }
 
-// buildAccessed produces deduped, key-sorted AccessedTable entries (matches the
-// C++ std::map iteration order).
+// tableIdentity is a table reference's resolved (database, table) identity.
+// Deduplication must key on it, never on the written "db.table" string: the
+// quoted single identifier `db1.t` (a table named "db1.t" in the session's
+// database) and the qualified db1.t both write "db1.t", yet they are two
+// tables, and keying on the string dropped one of them from the report.
+type tableIdentity struct{ db, table string }
+
+func identityOf(tt engine.TableTarget) tableIdentity {
+	return tableIdentity{db: tt.DB, table: tt.Table}
+}
+
+// buildAccessed produces AccessedTable entries deduped by (database, table)
+// identity and sorted by the written name (the C++ std::map order); two
+// distinct tables that share a written name are ordered by database, then
+// table, so the unqualified twin precedes the qualified name.
 func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*pb.AccessedTable {
-	seen := map[string]bool{}
-	keys := make([]string, 0, len(targets))
-	byKey := map[string]engine.TableTarget{}
+	seen := map[tableIdentity]bool{}
+	unique := make([]engine.TableTarget, 0, len(targets))
 	for _, tt := range targets {
-		k := qualify(tt.DB, tt.Table)
-		if seen[k] {
+		id := identityOf(tt)
+		if seen[id] {
 			continue
 		}
-		seen[k] = true
-		keys = append(keys, k)
-		byKey[k] = tt
+		seen[id] = true
+		unique = append(unique, tt)
 	}
-	sort.Strings(keys)
-	out := make([]*pb.AccessedTable, 0, len(keys))
-	for _, k := range keys {
-		tt := byKey[k]
+	sort.SliceStable(unique, func(i, j int) bool {
+		ki, kj := qualify(unique[i].DB, unique[i].Table), qualify(unique[j].DB, unique[j].Table)
+		if ki != kj {
+			return ki < kj
+		}
+		if unique[i].DB != unique[j].DB {
+			return unique[i].DB < unique[j].DB
+		}
+		return unique[i].Table < unique[j].Table
+	})
+	out := make([]*pb.AccessedTable, 0, len(unique))
+	for _, tt := range unique {
 		a := nameresolve.ResolveAccessed(tt.DB, tt.Table, sel)
 		out = append(out, &pb.AccessedTable{
 			OriginalDatabase: tt.DB, OriginalTable: tt.Table,

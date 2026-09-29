@@ -139,13 +139,13 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	if err != nil {
 		return nil, false, err
 	}
-	seen := map[string]bool{}
+	seen := map[tableIdentity]bool{}
 	for _, tt := range targets {
-		key := qualify(tt.DB, tt.Table)
-		if seen[key] {
+		id := identityOf(tt)
+		if seen[id] {
 			continue
 		}
-		seen[key] = true
+		seen[id] = true
 		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert || siDrop); rejected {
 			return resp, true, nil
 		}
@@ -724,15 +724,18 @@ func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.
 	}
 	// Strict-decide each target IN ORDER (records accessed + table_rewrites, short-
 	// circuits on the first reject — mirrors C++ rewriteRenameSide→rewriteOneTarget).
-	// Build the splice map of qualify(orig) → QUOTED new qualified name.
-	rewrites := map[string]string{}
+	// Build the splice map of the original (database, table) identity →
+	// QUOTED new qualified name. It is keyed by identity, not by the written
+	// "db.table", so a quoted `db1.o` and a qualified db1.o each keep their own
+	// physical name.
+	rewrites := map[engine.TableTarget]string{}
 	for _, tt := range targets {
 		d, ok := decideWriteTarget(tt, kind, sel, resp)
 		if !ok {
 			return resp, true, nil // reject populated
 		}
 		if d.Action == engine.ActionRename {
-			rewrites[qualify(tt.DB, tt.Table)] = engine.QuoteQualified(d.NewDB, d.NewTable)
+			rewrites[engine.TableTarget{DB: tt.DB, Table: tt.Table}] = engine.QuoteQualified(d.NewDB, d.NewTable)
 		}
 	}
 	out, err := engine.SpliceRawTables(e, sql, rewrites)

@@ -1212,11 +1212,13 @@ func RawTableRefs(e Engine, ast AST) ([]TableTarget, CommandSub, error) {
 }
 
 // SpliceRawTables rewrites table-name spans of a tier-C raw command. rewrites
-// maps qualify(origDB,origTable) → new qualified name (the caller is expected to
-// pre-quote dotted/dynamic names via QuoteQualified). Spans are replaced
+// maps the original (DB, Table) identity (Alias unset) → new qualified name
+// (the caller is expected to pre-quote dotted/dynamic names via
+// QuoteQualified). It is keyed by identity rather than the written "db.table"
+// so a quoted `db1.o` and a qualified db1.o are spliced independently. Spans are replaced
 // right-to-left so earlier byte offsets stay valid. A ref absent from the map is
 // left untouched.
-func SpliceRawTables(e Engine, originalSQL string, rewrites map[string]string) (string, error) {
+func SpliceRawTables(e Engine, originalSQL string, rewrites map[TableTarget]string) (string, error) {
 	sub := classifyWriteCommand(originalSQL)
 	// Only the tier-C table-bearing commands have a table-name grammar to splice.
 	// Guard symmetric with RawTableRefs so a misuse on a non-rewriteable command
@@ -1232,23 +1234,13 @@ func SpliceRawTables(e Engine, originalSQL string, rewrites map[string]string) (
 	out := originalSQL
 	for i := len(spans) - 1; i >= 0; i-- {
 		s := spans[i]
-		nv, ok := rewrites[qualifyTT(s.Target)]
+		nv, ok := rewrites[TableTarget{DB: s.Target.DB, Table: s.Target.Table}]
 		if !ok {
 			continue
 		}
 		out = out[:s.Start] + nv + out[s.End:]
 	}
 	return out, nil
-}
-
-// qualifyTT builds "db.table" (or bare "table") — the rewrites map key used by
-// SpliceRawTables. Mirrors qualify() in the handler layer; both build the key
-// from UNQUOTED identifier text.
-func qualifyTT(tt TableTarget) string {
-	if tt.DB == "" {
-		return tt.Table
-	}
-	return tt.DB + "." + tt.Table
 }
 
 // QuoteQualified renders "db.table" with each segment backtick-quoted only when
