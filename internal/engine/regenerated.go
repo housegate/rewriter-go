@@ -86,42 +86,213 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 			in = withoutIgnoredData(sql, in)
 		}
 	}
-	lost, added := spellingDiff(fidelitySpellings(sql, in, true, operatorsKept(out)), fidelitySpellings(gen, out, false, nil))
+	// A command or raw node's text is not re-quoted by a generator: Polyglot
+	// prints it from the tokens, dropping a quoted identifier's quotes, so
+	// there a quoted identifier is spelled apart from a bare word.
+	quoted := kind == NodeCommand || kind == NodeRaw
+	lost, added := spellingDiff(fidelitySpellings(sql, in, true, operatorsKept(out), quoted), fidelitySpellings(gen, out, false, nil, quoted))
 	if len(lost) != 0 || len(added) != 0 {
 		return fmt.Errorf("%w: lost %s, added %s", ErrNotRegeneratedFaithfully, spellingList(lost), spellingList(added))
 	}
 	if a, b := columnModifierOrder(sql, in), columnModifierOrder(gen, out); !slices.Equal(a, b) {
-		return fmt.Errorf("%w: column modifiers reordered from [%s] to [%s]", ErrNotRegeneratedFaithfully, strings.Join(a, " "), strings.Join(b, " "))
+		return fmt.Errorf("%w: column modifiers reordered from [%s] to [%s]", ErrNotRegeneratedFaithfully, strings.Join(a, "; "), strings.Join(b, "; "))
 	}
 	return nil
 }
 
-// columnModifierOrder lists, in order, the column-declaration modifier
-// keywords of a statement: DEFAULT, MATERIALIZED, ALIAS, EPHEMERAL, COMMENT,
-// CODEC, TTL and PRIMARY KEY. ClickHouse accepts them only in that order
-// within a column (measured on 26.2), and Polyglot prints a column's
+// columnModifierOrder lists the modifier keywords of each column declaration
+// in a statement, in their order: DEFAULT, MATERIALIZED, ALIAS, EPHEMERAL,
+// COMMENT, CODEC, TTL and PRIMARY KEY. ClickHouse accepts them only in that
+// order within a column (measured on 26.2), and Polyglot prints a column's
 // modifiers in an order of its own (CODEC(ZSTD) COMMENT 'x' as COMMENT 'x'
 // CODEC(ZSTD), MATERIALIZED 1 COMMENT 'x' as COMMENT 'x' MATERIALIZED 1): a
 // reordering turns a statement ClickHouse rejects into one it accepts, or the
 // reverse. The multiset comparison cannot see order, so CheckRegenerated
-// compares these lists too. A quoted word is an identifier, not a modifier.
+// compares these lists too.
+//
+// Only column declarations are read (columnDeclarations): the column list of
+// CREATE TABLE / VIEW / DICTIONARY and each ALTER … ADD / MODIFY COLUMN. A
+// table-level COMMENT or TTL, which Polyglot prints after a CTAS SELECT, and a
+// column named like a modifier outside a declaration are not modifiers. Each
+// declaration's list is one entry, without its column name; the entries are
+// sorted, since Polyglot also moves an INDEX after the columns. Only the
+// words at the declaration's own nesting level count, so a word inside
+// CODEC(…) or DEFAULT (…) does not. A quoted word is an identifier.
 func columnModifierOrder(src string, toks []rawToken) []string {
 	var out []string
-	for i, tk := range toks {
-		raw := src[tk.Span.Start:tk.Span.End]
-		if raw == "" || !isWordStart(raw) {
-			continue
+	for _, d := range columnDeclarations(src, toks) {
+		var mods []string
+		depth := 0
+		for i := d[0]; i < d[1]; i++ {
+			switch toks[i].TokenType {
+			case "L_PAREN":
+				depth++
+				continue
+			case "R_PAREN":
+				depth--
+				continue
+			}
+			if depth != 0 {
+				continue
+			}
+			switch w := bareWord(src, toks[i]); w {
+			case "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL", "COMMENT", "CODEC", "TTL":
+				mods = append(mods, w)
+			case "PRIMARY":
+				if i+1 < d[1] && bareWord(src, toks[i+1]) == "KEY" {
+					mods = append(mods, "PRIMARY KEY")
+				}
+			}
 		}
-		switch w := strings.ToUpper(raw); w {
-		case "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL", "COMMENT", "CODEC", "TTL":
-			out = append(out, w)
-		case "PRIMARY":
-			if i+1 < len(toks) && strings.EqualFold(toks[i+1].Text, "KEY") {
-				out = append(out, "PRIMARY KEY")
+		if len(mods) > 0 {
+			out = append(out, strings.Join(mods, " "))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// columnDeclarations returns the token range of each column declaration in a
+// statement, after its column name: the entries of the column list of a
+// CREATE / ATTACH TABLE, VIEW or DICTIONARY (an INDEX, PROJECTION or
+// CONSTRAINT entry and a PRIMARY KEY (…) entry are not columns), and the
+// text of each ALTER … ADD / MODIFY COLUMN up to the next top-level comma. A
+// CREATE header it cannot follow to a column list has no declarations.
+func columnDeclarations(src string, toks []rawToken) [][2]int {
+	if len(toks) == 0 {
+		return nil
+	}
+	var decls [][2]int
+	// skipName steps over a possibly dotted name starting at i.
+	skipName := func(i int) int {
+		i++
+		for i+1 < len(toks) && toks[i].TokenType == "DOT" {
+			i += 2
+		}
+		return i
+	}
+	skipIfExists := func(i int) int {
+		if bareWord(src, toks[min(i, len(toks)-1)]) == "IF" {
+			for i < len(toks) && (bareWord(src, toks[i]) == "IF" || bareWord(src, toks[i]) == "NOT" || bareWord(src, toks[i]) == "EXISTS") {
+				i++
+			}
+		}
+		return i
+	}
+	switch bareWord(src, toks[0]) {
+	case "CREATE", "ATTACH":
+		i := 1
+		for i < len(toks) && toks[i].TokenType != "L_PAREN" {
+			if w := bareWord(src, toks[i]); w == "TABLE" || w == "VIEW" || w == "DICTIONARY" {
+				break
+			}
+			i++
+		}
+		if i >= len(toks) || toks[i].TokenType == "L_PAREN" {
+			return nil
+		}
+		i = skipIfExists(i + 1)
+		if i >= len(toks) {
+			return nil
+		}
+		i = skipName(i)
+		for i < len(toks) {
+			switch bareWord(src, toks[i]) {
+			case "UUID":
+				i += 2
+				continue
+			case "ON":
+				i += 3 // ON CLUSTER c
+				continue
+			case "TO":
+				i = skipName(i + 1)
+				continue
+			}
+			break
+		}
+		if i >= len(toks) || toks[i].TokenType != "L_PAREN" {
+			return nil
+		}
+		depth, start := 0, i+1
+		for j := i + 1; j < len(toks); j++ {
+			switch toks[j].TokenType {
+			case "L_PAREN":
+				depth++
+			case "R_PAREN":
+				if depth == 0 {
+					return appendColumnEntry(src, toks, decls, start, j)
+				}
+				depth--
+			case "COMMA":
+				if depth == 0 {
+					decls = appendColumnEntry(src, toks, decls, start, j)
+					start = j + 1
+				}
+			}
+		}
+		return decls
+	case "ALTER":
+		depth := 0
+		for i := 0; i < len(toks); i++ {
+			switch toks[i].TokenType {
+			case "L_PAREN":
+				depth++
+				continue
+			case "R_PAREN":
+				depth--
+				continue
+			}
+			if depth != 0 || i+1 >= len(toks) {
+				continue
+			}
+			if w := bareWord(src, toks[i]); (w == "ADD" || w == "MODIFY") && bareWord(src, toks[i+1]) == "COLUMN" {
+				j := skipIfExists(i + 2)
+				if j >= len(toks) {
+					break
+				}
+				start := skipName(j)
+				end, d := start, 0
+				for ; end < len(toks); end++ {
+					if toks[end].TokenType == "L_PAREN" {
+						d++
+					} else if toks[end].TokenType == "R_PAREN" {
+						d--
+					} else if toks[end].TokenType == "COMMA" && d == 0 {
+						break
+					}
+				}
+				decls = append(decls, [2]int{start, end})
+				i = end - 1
 			}
 		}
 	}
-	return out
+	return decls
+}
+
+// appendColumnEntry adds the column-list entry toks[start:end] to decls,
+// without its column name, when it declares a column.
+func appendColumnEntry(src string, toks []rawToken, decls [][2]int, start, end int) [][2]int {
+	if start >= end {
+		return decls
+	}
+	switch bareWord(src, toks[start]) {
+	case "INDEX", "PROJECTION", "CONSTRAINT", "PRIMARY":
+		return decls
+	}
+	i := start + 1
+	for i+1 < end && toks[i].TokenType == "DOT" {
+		i += 2
+	}
+	return append(decls, [2]int{i, end})
+}
+
+// bareWord is the upper-cased text of an unquoted word token, or "".
+func bareWord(src string, tk rawToken) string {
+	raw := src[tk.Span.Start:tk.Span.End]
+	if raw == "" || !isWordStart(raw) {
+		return ""
+	}
+	return strings.ToUpper(raw)
 }
 
 // regeneratedText is the SQL Polyglot prints for ast: a command or raw node's
@@ -334,7 +505,7 @@ var negatedOperators = map[string]bool{"W:LIKE": true, "W:ILIKE": true, "W:IN": 
 // statement is refused. None of these respellings applies to an operator in
 // kept, which the regeneration still spells the input's way (operatorsKept):
 // Polyglot keeps the expressions of ALTER … DELETE / UPDATE verbatim.
-func fidelitySpellings(src string, toks []rawToken, input bool, kept map[string]bool) []spelling {
+func fidelitySpellings(src string, toks []rawToken, input bool, kept map[string]bool, quoted bool) []spelling {
 	var out []spelling
 	last := func() string {
 		if len(out) == 0 {
@@ -343,7 +514,7 @@ func fidelitySpellings(src string, toks []rawToken, input bool, kept map[string]
 		return out[len(out)-1].key
 	}
 	spell := func(i int, prev string) spelling {
-		return spellingOf(src, toks[i], prev, input)
+		return spellingOf(src, toks[i], prev, input, quoted)
 	}
 	skip := map[int]bool{} // the IN of POSITION(x IN y) and the : of a ternary
 	for i := 0; i < len(toks); i++ {
@@ -437,8 +608,11 @@ func operatorsKept(toks []rawToken) map[string]bool {
 // ClickHouse reads), O: for any other token with its text (= / == and
 // <> / != are the same ClickHouse operator, so EQ and NEQ drop it). A literal
 // ClickHouse would not read as one lexeme of the same extent is spelled by
-// side (U: in the input, V: in the regeneration), so it never matches.
-func spellingOf(src string, tk rawToken, prev string, input bool) spelling {
+// side (U: in the input, V: in the regeneration), so it never matches. With
+// quoted set (a command or raw node's text), a quoted identifier is spelled
+// Q: instead of W:, so it never matches the same name written bare: Polyglot
+// prints such a text without the quotes, and `null` bare is the NULL literal.
+func spellingOf(src string, tk rawToken, prev string, input, quoted bool) spelling {
 	raw := src[tk.Span.Start:tk.Span.End]
 	switch tk.TokenType {
 	case "COMMA", "L_PAREN", "R_PAREN", "DOT", "SEMICOLON":
@@ -454,7 +628,11 @@ func spellingOf(src string, tk rawToken, prev string, input bool) spelling {
 		return spelling{"O:" + tk.TokenType, tk.TokenType}
 	}
 	if isQuotedLexeme(tk.TokenType) {
-		return literalSpelling(raw, prev, input)
+		sp := literalSpelling(raw, prev, input)
+		if quoted && strings.HasPrefix(sp.key, "W:") && isQuotedIdentifier(raw) {
+			return spelling{"Q:" + sp.key[2:], raw}
+		}
+		return sp
 	}
 	if tk.Text == "" {
 		return spelling{}
@@ -463,6 +641,12 @@ func spellingOf(src string, tk rawToken, prev string, input bool) spelling {
 		return word(foldClass(strings.ToUpper(tk.Text)))
 	}
 	return spelling{"O:" + tk.TokenType + ":" + tk.Text, tk.TokenType}
+}
+
+// isQuotedIdentifier reports whether a quoted lexeme is an identifier:
+// "…", `…` or “…”.
+func isQuotedIdentifier(raw string) bool {
+	return strings.HasPrefix(raw, `"`) || strings.HasPrefix(raw, "`") || strings.HasPrefix(raw, "“")
 }
 
 func foldClass(w string) string {

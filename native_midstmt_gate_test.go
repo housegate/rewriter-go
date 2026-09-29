@@ -69,6 +69,7 @@ func TestMidStatementDropGate(t *testing.T) {
 		}
 		// Cosmetic respellings pass.
 		for _, sql := range []string{
+			"CREATE TABLE db1.n ENGINE = MergeTree ORDER BY a COMMENT 'h' AS SELECT a, ttl FROM db1.o",
 			"SELECT a FROM db1.o ORDER BY a DESC NULLS LAST",
 			"SELECT TOP 5 a FROM db1.o",
 			"SELECT a FROM db1.o LIMIT 5, 10",
@@ -199,6 +200,47 @@ func TestMidStatementDropGateResponseShape(t *testing.T) {
 				t.Fatalf("resp = %s\nwant %s", b, tc.want)
 			}
 		})
+	}
+}
+
+// TestRawNodeQuotedIdentifierGate pins that a raw access-entity statement
+// whose text lost the quotes of an identifier spelled like a literal is
+// refused in the modes that would otherwise answer Success (re-review N1):
+// CREATE ROW POLICY … USING `null` = 1 regenerated as USING null = 1 filters
+// on the NULL literal, not on the column. Dynamic requests refuse these
+// statements before the gate.
+func TestRawNodeQuotedIdentifierGate(t *testing.T) {
+	e := newEngine(t)
+	for _, w := range []string{"null", "true", "false", "inf", "nan"} {
+		for _, sql := range []string{
+			"CREATE ROW POLICY p1 ON db1.o FOR SELECT USING `" + w + "` = 1 TO u1",
+			"CREATE SETTINGS PROFILE `" + w + "`",
+			"CREATE ROLE `" + w + "`",
+			"CREATE QUOTA `" + w + "`",
+		} {
+			for name, opts := range map[string][]*pb.RewriteOption{
+				"no rewrite": nil,
+				"static":     {tableRewriteStatic()},
+			} {
+				t.Run(name+"/"+sql, func(t *testing.T) {
+					resp, err := doRewrite(e, sql, opts)
+					if err != nil {
+						t.Fatalf("doRewrite: %v", err)
+					}
+					if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "statement is not supported" ||
+						resp.GetSqlAfterRewrite() != sql {
+						t.Fatalf("resp = %+v", resp)
+					}
+				})
+			}
+		}
+	}
+	// A bare name has no quotes to lose.
+	for _, sql := range []string{"CREATE ROLE r1", "CREATE QUOTA q1"} {
+		resp, err := doRewrite(e, sql, nil)
+		if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+			t.Fatalf("%s: resp = %+v, err = %v; want Success", sql, resp, err)
+		}
 	}
 }
 

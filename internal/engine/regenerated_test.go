@@ -69,6 +69,27 @@ func TestCheckRegenerated(t *testing.T) {
 			differs + "column modifiers reordered from [MATERIALIZED COMMENT] to [COMMENT MATERIALIZED]"},
 		{"codec before primary key", "CREATE TABLE db1.n (a Int32 CODEC(ZSTD) PRIMARY KEY) ENGINE = MergeTree",
 			differs + "column modifiers reordered from [CODEC PRIMARY KEY] to [PRIMARY KEY CODEC]"},
+		{"two added columns, one reordered", "ALTER TABLE db1.o ADD COLUMN a Int32 CODEC(ZSTD) COMMENT 'x', ADD COLUMN b Int32 DEFAULT 1",
+			differs + "column modifiers reordered from [CODEC COMMENT; DEFAULT] to [COMMENT CODEC; DEFAULT]"},
+		{"reordered column beside an index", "CREATE TABLE db1.n (a Int32 TTL d + INTERVAL 1 DAY DEFAULT 1, d Date, INDEX i a TYPE minmax GRANULARITY 1) ENGINE = MergeTree ORDER BY d",
+			differs + "column modifiers reordered from [TTL DEFAULT] to [DEFAULT TTL]"},
+		// Only column declarations are scanned (re-review N2): a CTAS table
+		// COMMENT that Polyglot prints after the SELECT, a column named like a
+		// modifier, and an INDEX moved after the columns pass.
+		{"ctas comment and a column named ttl", "CREATE TABLE db1.n ENGINE = MergeTree ORDER BY a COMMENT 'h' AS SELECT a, ttl FROM db1.o", ""},
+		{"ctas ttl and an alias named default", "CREATE TABLE db1.n ENGINE = MergeTree ORDER BY a TTL d + INTERVAL 1 DAY COMMENT 'h' AS SELECT a AS default FROM db1.o", ""},
+		{"ctas order by codec", "CREATE TABLE db1.n ENGINE = MergeTree ORDER BY codec COMMENT 'h' AS SELECT a, codec FROM db1.o", ""},
+		{"index moved after a column named alias", "CREATE TABLE db1.n (a Int32, INDEX i alias TYPE minmax GRANULARITY 1, alias Int32 DEFAULT 1) ENGINE = MergeTree ORDER BY a", ""},
+
+		// A command or raw node spells a quoted identifier apart from a bare
+		// word (re-review N1): a raw node that drops the quotes from `null`
+		// names another statement.
+		{"raw row policy drops the quotes from null", "CREATE ROW POLICY p1 ON db1.o FOR SELECT USING `null` = 1 TO u1",
+			differs + "lost [`null`], added [NULL]"},
+		{"raw role drops the quotes from true", `CREATE ROLE "true"`, differs + `lost ["true"], added [TRUE]`},
+		{"raw role with a bare name", "CREATE ROLE r1", ""},
+		{"grant keeps a quoted grantee", "GRANT SELECT ON db1.o TO `null`", ""},
+		{"structured node keeps a quoted null", "SELECT `null` FROM db1.o WHERE `true` = 1", ""},
 
 		// Fix round 1: shapes the stricter rules must keep passing.
 		{"clickhouse escapes kept", `SELECT 'it''s', 'a\'b', '\\', '\n', '\x41', $$a\_b$$, '''q''' FROM db1.o`, ""},
