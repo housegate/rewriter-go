@@ -165,7 +165,7 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 		e := &fakeEngine{
 			parseAST:    engine.AST(`{"select":{}}`),
 			tokenizeErr: tokenErr,
-			tokenizeOK:  1, // the whole-statement parse gate
+			tokenizeOK:  3, // the whole-statement parse gate and the regeneration check
 		}
 		resp, err := doRewrite(e, "SELECT 1", opts)
 		if err != nil {
@@ -187,6 +187,22 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 		}
 		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage {
 			t.Fatalf("resp = %+v, a statement the gate cannot check must be refused", resp)
+		}
+	})
+
+	t.Run("regeneration check cannot tokenize", func(t *testing.T) {
+		e := &fakeEngine{
+			parseAST:    engine.AST(`{"select":{}}`),
+			tokenizeErr: tokenErr,
+			tokenizeOK:  1, // the whole-statement parse gate
+		}
+		resp, err := doRewrite(e, "SELECT 1", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage ||
+			resp.GetSqlAfterRewrite() != "SELECT 1" {
+			t.Fatalf("resp = %+v, a Success the regeneration check cannot confirm must be refused", resp)
 		}
 	})
 
@@ -1304,9 +1320,13 @@ func TestStorageIntegrityContract_EmptySILiveViewKeepsLegacyDispatch(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Code != pb.RewriteCode_Success ||
+	// Legacy dispatch, not the SI classifier: the contract stays unspecified
+	// and the message is T7. Polyglot regenerates the statement as
+	// `CREATE DEFINER=aliceLIVE VIEW …`, an ordinary view, so the
+	// mid-statement drop gate refuses it instead of answering Success.
+	if res.Code != pb.RewriteCode_UnsupportedStatement || res.Message != engine.UnsupportedStatementMessage ||
 		res.StorageIntegrityContractVersion != pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED {
-		t.Fatalf("res = %+v, want legacy Success/unspecified contract", res)
+		t.Fatalf("res = %+v, want legacy T7 refusal/unspecified contract", res)
 	}
 }
 

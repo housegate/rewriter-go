@@ -16,21 +16,32 @@ const (
 
 // DBLevelInfo is the extracted structure of a USE/SHOW statement.
 type DBLevelInfo struct {
-	Kind                DBLevelKind
-	ShowWhat            string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
-	ShowExtended        bool   // SHOW carries the optional EXTENDED prefix (SHOW [EXTENDED] [FULL] COLUMNS ...)
-	ShowFull            bool   // SHOW carries the optional FULL prefix
-	ShowTemporary       bool   // SHOW carries the optional TEMPORARY prefix
-	ShowTable           string // COLUMNS/INDEX family: the table named by the FIRST FROM/IN clause; "" otherwise
-	ShowTableResolved   bool   // the COLUMNS/INDEX family table target reduced to a static identifier
-	HasTableClause      bool   // the COLUMNS/INDEX family carries an explicit table clause, resolvable or not
-	DB                  string // semantic USE db, or SHOW's FROM/IN db; "" when absent
-	HasDBClause         bool   // SHOW carries an explicit FROM/IN clause, even when its target is not a static name
-	DBResolved          bool   // the explicit SHOW FROM/IN target was resolved to DB
-	HasLike             bool
-	Like                string // LIKE pattern (logical/unescaped: 'O''Brien%' → O'Brien%)
-	LikeNot             bool   // NOT (I)LIKE
-	LikeCaseInsensitive bool   // ILIKE
+	Kind              DBLevelKind
+	ShowWhat          string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
+	ShowExtended      bool   // SHOW carries the optional EXTENDED prefix (SHOW [EXTENDED] [FULL] COLUMNS ...)
+	ShowFull          bool   // SHOW carries the optional FULL prefix
+	ShowTemporary     bool   // SHOW carries the optional TEMPORARY prefix
+	ShowTable         string // COLUMNS/INDEX family: the table named by the FIRST FROM/IN clause; "" otherwise
+	ShowTableResolved bool   // the COLUMNS/INDEX family table target reduced to a static identifier
+	HasTableClause    bool   // the COLUMNS/INDEX family carries an explicit table clause, resolvable or not
+	DB                string // semantic USE db, or SHOW's FROM/IN db; "" when absent
+	HasDBClause       bool   // SHOW carries an explicit FROM/IN clause, even when its target is not a static name
+	DBResolved        bool   // the explicit SHOW FROM/IN target was resolved to DB
+	HasLike           bool
+	Like              string // LIKE pattern (logical/unescaped: 'O''Brien%' → O'Brien%)
+	// LikeRaw is the pattern's source lexeme, quotes and escapes verbatim
+	// (`'d\_%'`, `'O''Brien%'`). The decoded Like loses `\_` and `\%`, which
+	// ClickHouse reads as a literal underscore / percent, so a handler that
+	// re-emits the pattern must carry LikeRaw. "" when no string follows.
+	LikeRaw             string
+	LikeNot             bool // NOT (I)LIKE
+	LikeCaseInsensitive bool // ILIKE
+	// Trailing reports a token after the modelled head — `USE <db>`, or
+	// `SHOW [EXTENDED] [FULL] [TEMPORARY] <kind> [{FROM|IN} <db>]` followed at
+	// most by one `[NOT] (I)LIKE '<pattern>'` — other than a closing
+	// semicolon: WHERE, LIMIT, FORMAT, SETTINGS, INTO OUTFILE or junk. A
+	// handler that synthesizes SQL from these fields would drop it.
+	Trailing bool
 }
 
 // ParseDBLevel extracts USE/SHOW structure from the clickhouse Tokenize stream.
@@ -59,6 +70,7 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 		if len(toks) >= 2 && isNameToken(toks[1].TokenType) {
 			info.DB = toks[1].Text
 		}
+		info.Trailing = tokensRemain(toks, 2)
 		return info, nil
 	case "SHOW":
 		info := DBLevelInfo{Kind: DBShow}
@@ -118,6 +130,7 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 				}
 			}
 		}
+		info.Trailing = tokensRemain(toks, afterLikeClause(toks, i))
 		for i < len(toks) {
 			tt := toks[i].TokenType
 			switch {
@@ -128,6 +141,9 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 				info.LikeCaseInsensitive = tt == "I_LIKE"
 				if i+1 < len(toks) && toks[i+1].TokenType == "STRING" {
 					info.Like = toks[i+1].Text
+					if s, en := toks[i+1].Span.Start, toks[i+1].Span.End; 0 <= s && s < en && en <= len(sql) {
+						info.LikeRaw = sql[s:en]
+					}
 				}
 				return info, nil
 			case tt == "WHERE" || tt == "LIMIT" || tt == "SETTINGS" || tt == "FORMAT" ||
@@ -380,4 +396,27 @@ func ShowBodyDatabases(e Engine, info DBLevelInfo, sql string) []string {
 		dbs = append(dbs, tt.DB)
 	}
 	return dbs
+}
+
+// tokensRemain reports a token other than a semicolon at or after toks[from].
+func tokensRemain(toks []rawToken, from int) bool {
+	for i := from; i < len(toks); i++ {
+		if toks[i].TokenType != "SEMICOLON" {
+			return true
+		}
+	}
+	return false
+}
+
+// afterLikeClause returns the index after one `[NOT] (I)LIKE '<pattern>'`
+// clause starting at toks[i], or i when none starts there.
+func afterLikeClause(toks []rawToken, i int) int {
+	j := i
+	if j < len(toks) && toks[j].TokenType == "NOT" {
+		j++
+	}
+	if j+1 < len(toks) && (toks[j].TokenType == "LIKE" || toks[j].TokenType == "I_LIKE") && toks[j+1].TokenType == "STRING" {
+		return j + 2
+	}
+	return i
 }

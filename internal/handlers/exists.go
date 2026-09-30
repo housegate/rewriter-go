@@ -40,6 +40,13 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	}
 	resp := newWriteResp(stmt)
 	sel := nameresolve.FindActive(opts)
+	if t.AccessEntity {
+		// SHOW CREATE USER / QUOTA / ROLE / PROFILE / POLICY … is not a table
+		// statement; re-rendering it as SHOW CREATE TABLE <word> would answer a
+		// different statement (mid-statement drop gate). Refused in every mode.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	if sel.Mode == nameresolve.ModeDynamic && t.Table == "" {
 		// Spec 2026-09-26 R7: EXISTS / SHOW CREATE with no target names
 		// nothing to resolve; refuse rather than emit an empty identifier.
@@ -69,6 +76,14 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 		return resp, true, nil
 	}
 
+	if t.Table == "" {
+		// No target, or one the parser could not reduce to a [db.]name (a
+		// keyword-lexed first token such as `system` / `default`): there is
+		// nothing to re-render, and an empty identifier is invalid SQL. Refused
+		// in every mode, not only under dynamic args.
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	tt := engine.TableTarget{DB: t.DB, Table: t.Table}
 	if sel.Mode == nameresolve.ModeDynamic {
 		if _, ok := nameresolve.LookupStorageIntegrityPhysical(tt.DB, tt.Table, sel.Dynamic); ok {
@@ -88,6 +103,10 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 				rejectUnsupported(resp, "SHOW CREATE TABLE on storage-integrity table "+key+" is not supported")
 				return resp, true, nil
 			}
+			if t.Trailing || t.Temporary {
+				rejectUnsupported(resp, engine.UnsupportedStatementMessage) // see rejectsRerender
+				return resp, true, nil
+			}
 			db, table := splitPhysicalName(tbl.GetSafeTable())
 			recordRewrite(resp.TableRewrites, tt, db, table)
 			resp.SqlAfterRewrite = buildObjectSQL(keyword, t.Temporary, db, table)
@@ -98,12 +117,25 @@ func RewriteExistsShowCreate(e engine.Engine, ast engine.AST, sql string, opts [
 	if !ok {
 		return resp, true, nil // reject populated (accessed recorded first, like C++)
 	}
+	if rejectsRerender(t, d) {
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	db, table := t.DB, t.Table
 	if d.Action == engine.ActionRename {
 		db, table = d.NewDB, d.NewTable
 	}
 	resp.SqlAfterRewrite = buildObjectSQL(keyword, t.Temporary, db, table)
 	return resp, true, nil
+}
+
+// rejectsRerender reports an EXISTS / SHOW CREATE / DESCRIBE target that
+// buildObjectSQL cannot re-render faithfully (mid-statement drop gate): any
+// token after the name (a FORMAT / SETTINGS / INTO OUTFILE clause, a call's
+// arguments, junk) would be dropped, and a TEMPORARY table, which lives in no
+// database, would be qualified into a different, ordinary table.
+func rejectsRerender(t engine.ObjectTarget, d engine.TableDecision) bool {
+	return t.Trailing || (t.Temporary && d.Action == engine.ActionRename)
 }
 
 // buildObjectSQL renders the canonical EXISTS / SHOW CREATE output: the verb, an

@@ -244,6 +244,11 @@ func dispatchUse(e engine.Engine, ast engine.AST, sql string, info engine.DBLeve
 		return resp, true, nil
 	}
 	if physical != origin {
+		if info.Trailing {
+			// `USE <physical>` would drop the rest (mid-statement drop gate).
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
+		}
 		resp.SqlAfterRewrite = "USE " + physical
 		recordDatabaseRewrite(resp, origin, physical)
 		return resp, true, nil
@@ -391,6 +396,13 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		rejectDBInvalid(resp, "SHOW TABLES target logical database '"+logical+"' is not in database_map and not a known physical database; user does not have this database")
 		return resp, true, nil
 	}
+	if info.Trailing || info.HasLike || info.ShowExtended || info.ShowFull || info.ShowTemporary {
+		// The synthetic enumeration models only SHOW TABLES [{FROM|IN} <db>]:
+		// it would drop a LIKE / LIMIT / FORMAT / SETTINGS clause and the
+		// EXTENDED / FULL / TEMPORARY variants (mid-statement drop gate).
+		rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	source := "system.tables"
 	if key, ok := dyn.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]; ok {
 		up, ok := dyn.GetRemoteUpstreams()[key]
@@ -510,6 +522,15 @@ func dispatchShowDatabases(e engine.Engine, ast engine.AST, sql string, info eng
 	if dyn == nil {
 		return passthroughDB(e, ast, sql, resp)
 	}
+	if info.Trailing || info.HasDBClause || info.ShowExtended || info.ShowFull || info.ShowTemporary ||
+		(info.HasLike && !strings.HasPrefix(info.LikeRaw, "'")) {
+		// The synthetic list models only an optional LIKE clause over a
+		// single-quoted pattern (mid-statement drop gate): LIMIT / FORMAT /
+		// SETTINGS / WHERE would be dropped, and ClickHouse rejects FROM / IN
+		// for SHOW DATABASES, so the rewrite must not make it valid.
+		rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+		return resp, true, nil
+	}
 	// Sort database_map by logical (protobuf map order is unspecified).
 	type ent struct{ logical, physical string }
 	var entries []ent
@@ -551,7 +572,11 @@ func buildLikeClause(info engine.DBLevelInfo) string {
 	if info.LikeNot {
 		op = "NOT " + op
 	}
-	return " WHERE name " + op + " '" + escapeSQLLiteral(info.Like) + "'"
+	// The raw lexeme, not the decoded value: ClickHouse reads `\_` and `\%` in a
+	// LIKE pattern as a literal underscore / percent, and re-escaping the
+	// decoded text would turn them into wildcards. The caller guarantees the
+	// lexeme is a single-quoted string literal.
+	return " WHERE name " + op + " " + info.LikeRaw
 }
 
 // escapeSQLLiteral makes s safe to embed inside a single-quoted ClickHouse

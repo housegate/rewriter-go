@@ -40,3 +40,44 @@ func TestParseObjectTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestParseObjectTarget_trailingAndAccessEntity(t *testing.T) {
+	e := newTestEngine(t)
+	cases := []struct {
+		sql      string
+		table    string
+		trailing bool
+		entity   bool
+	}{
+		{"EXISTS TABLE db.t", "t", false, false},
+		{"EXISTS TABLE db.t;", "t", false, false},
+		{"EXISTS TABLE db.t FORMAT JSON", "t", true, false},
+		{"EXISTS TABLE db.t XYZ", "t", true, false},
+		{"EXISTS TABLE system.one", "", false, false},
+		{"EXISTS", "", false, false},
+		{"SHOW CREATE TABLE user", "user", false, false},
+		{"SHOW CREATE `user`", "user", false, false},
+		{"SHOW CREATE TABLE db.user", "user", false, false},
+		{"SHOW CREATE USER", "USER", false, true},
+		{"SHOW CREATE USER u1", "USER", true, true},
+		{"SHOW CREATE QUOTAS", "QUOTAS", false, true},
+		{"SHOW CREATE ROLE r", "ROLE", true, true},
+		{"SHOW CREATE PROFILES", "PROFILES", false, true},
+		{"SHOW CREATE ROW POLICY p ON db.t", "", false, true},
+		{"SHOW CREATE SETTINGS PROFILE p", "", false, true},
+		{"SHOW CREATE POLICIES", "POLICIES", false, true},
+		{"SHOW CREATE MASKING POLICY p ON db.t", "MASKING", true, true},
+		{"SHOW CREATE t", "t", false, false},
+		// EXISTS has no access-entity form.
+		{"EXISTS USER", "USER", false, false},
+	}
+	for _, c := range cases {
+		got, err := ParseObjectTarget(e, c.sql)
+		if err != nil {
+			t.Fatalf("%q: %v", c.sql, err)
+		}
+		if got.Table != c.table || got.Trailing != c.trailing || got.AccessEntity != c.entity {
+			t.Errorf("%q: Table=%q Trailing=%v AccessEntity=%v, want %q %v %v", c.sql, got.Table, got.Trailing, got.AccessEntity, c.table, c.trailing, c.entity)
+		}
+	}
+}

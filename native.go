@@ -61,11 +61,21 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 // annotation point: every non-Success response is checked for an SI object so
 // opaque and otherwise unmodelled statement classes still name what they
 // addressed (Spec I D2).
+//
+// It is also the mid-statement drop gate: a response about to answer Success
+// is refused as T7 when Polyglot's regeneration of the statement does not
+// spell the input (engine.CheckRegenerated). Every Success leaves through
+// here, whatever handler built it, in every mode.
 func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.ExistenceClause, siVersion pb.StorageIntegrityContractVersion, e engine.Engine, sel nameresolve.Selection) {
 	resp.ExistenceClause = ec
 	resp.StorageIntegrityContractVersion = siVersion
 	if resp.GetCode() == pb.RewriteCode_Success {
-		return
+		if engine.CheckRegenerated(e, sql, ast) == nil {
+			return
+		}
+		resp.Code = pb.RewriteCode_UnsupportedStatement
+		resp.Message = engine.UnsupportedStatementMessage
+		resp.SqlAfterRewrite = sql
 	}
 	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	if resp.GetSqlAfterRewrite() == "" {

@@ -30,6 +30,7 @@
 - Preserve the GRANT/REVOKE asymmetry in `grant.go`: `GRANT TO ALL` is mirrored as a normal grantee, while `REVOKE FROM ALL/ANY` rejects per C++ oracle behavior.
 - `native.go` stamps `existence_clause`, clears `statement_type` on rejects, and echoes rejected SQL when empty. Handler responses should carry statement-family fields and let `finalize` normalize shared parity behavior.
 - `EXISTS` / `SHOW CREATE` / GRANT handling runs after DB-level dispatch and before SELECT. Do not reorder without checking command-node overlap and oracle parity.
+- A handler that re-renders a command from parsed fields (EXISTS / SHOW CREATE / DESCRIBE via `ObjectTarget`, USE / SHOW TABLES / SHOW DATABASES via `DBLevelInfo`) must refuse, with T7, any token it does not model: `ObjectTarget.Trailing`, `ObjectTarget.AccessEntity`, `DBLevelInfo.Trailing` and `rejectsRerender` exist for that, an empty or unrecognised target is refused in every mode, and a SHOW DATABASES LIKE pattern is carried as the raw lexeme (`DBLevelInfo.LikeRaw`), never re-escaped from its decoded value. The general mid-statement drop gate cannot see a `command` node's re-rendering.
 
 ## ANTI-PATTERNS
 

@@ -15,6 +15,7 @@
 | DB/global/grant/object helpers | `dblevel.go`, `global.go`, `grant.go`, `objtarget.go` | Statement-family AST handling; GRANT/REVOKE uses generic-dialect recovery |
 | Parser guard | `guard.go` | Bracket nesting limit before polyglot parse |
 | Whole-statement parse gate | `wholestmt.go` | `CheckParsedInFull`: refuse a statement Polyglot did not consume in full |
+| Mid-statement drop gate | `regenerated.go`, `regenerated_lexeme.go`, `regenerated_precedence.go` | `CheckRegenerated`: refuse a statement whose regeneration does not spell the input |
 | AST shape fixtures | `testdata/ast-shapes`, `characterize_test.go` | Snapshot corpus and its regeneration path |
 
 ## CONVENTIONS
@@ -37,6 +38,7 @@
 - Do not replace generic-dialect GRANT recovery with string parsing unless the harness and oracle prove the same privilege-delta semantics.
 - Do not bypass `exceedsNestingDepth` on new parse entrypoints.
 - Do not generate SQL from a user statement's AST without `CheckParsedInFull`: the ClickHouse dialect silently skips what it cannot parse.
+- Do not answer `Success` with SQL generated from a user statement's AST without `CheckRegenerated` (`finalize` does it for the rewrite pipeline, `doMaterializeSQL` for materialization): Polyglot drops or respells clauses it did consume.
 
 ## LOCAL VERIFICATION
 
