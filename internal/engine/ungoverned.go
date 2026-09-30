@@ -76,7 +76,8 @@ func ExpressionPositionHasReads(ast AST) (bool, error) {
 		parameter:      func(map[string]any) { found = true },
 		sourceFunction: func(string) { found = true },
 	}
-	scope := readSourceScope{}
+	// Every position below is an R2 position, where ClickHouse binds no CTE.
+	scope := unboundScope()
 	var err error
 	switch {
 	case statementMap(root, NodeUpdate) != nil:

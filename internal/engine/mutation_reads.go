@@ -147,7 +147,8 @@ func collectStructuredMutationSurface(kind string, body map[string]any) (Mutatio
 
 func collectMutationExpression(node any) (MutationReadSet, error) {
 	var reads MutationReadSet
-	err := walkExpression(node, readSourceScope{}, readSourceVisitor{
+	// A mutation expression is an R2 position: ClickHouse binds no CTE there.
+	err := walkExpression(node, unboundScope(), readSourceVisitor{
 		table: func(_, _ map[string]any, target TableTarget) {
 			reads.Ordered = append(reads.Ordered, MutationRead{Kind: MutationReadTable, Table: target})
 			reads.Tables = append(reads.Tables, target)
