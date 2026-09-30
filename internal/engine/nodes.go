@@ -2147,9 +2147,13 @@ func QueryBodiedTableFunction(name string) bool {
 // bind the outer CTE (a CREATE VIEW / MATERIALIZED VIEW body, the legacy
 // analyzer) the rewrite is fail-safe: it reaches only the caller's own
 // governed table.
+//
+// The empty scope keeps storedView: a view() body inside a stored view body is
+// stored with it, and ClickHouse 26.2 / 25.8 apply the stored-view binding
+// rule there (a function-valued WITH alias reads the table named after it).
 func tableFunctionArgScope(function map[string]any, scope readSourceScope) readSourceScope {
 	if QueryBodiedTableFunction(nameOf(function)) {
-		return readSourceScope{}
+		return readSourceScope{storedView: scope.storedView}
 	}
 	return scope
 }
