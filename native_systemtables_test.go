@@ -481,3 +481,27 @@ func TestSystemTables_DeferredPrecedenceUnderSI(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestSystemTables_ShowSettingsProfilesIsAShowForm pins that SHOW SETTINGS
+// PROFILES reaches the SHOW handler's system-table refusal instead of the
+// settings scanner's generic one, while the scanner still reads every
+// SETTINGS word that could start an assignment list: the singular PROFILE
+// (a ClickHouse syntax error), `PROFILES = …`, and a list that carries an
+// escaped refused setting stay refused.
+func TestSystemTables_ShowSettingsProfilesIsAShowForm(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, msg string }{
+			{"SHOW SETTINGS PROFILES", "system table system.settings_profiles is not accessible"},
+			{"SHOW SETTINGS PROFILE", "statement is not supported"},
+			{"SHOW CHANGED SETTINGS PROFILES", ""},
+			{"SHOW SETTINGS PROFILES = 1", "system table system.settings_profiles is not accessible"},
+			{"SHOW SETTINGS profiles = 1, `\\Nimplicit_table_at_top_level` = 'hg_unsafe.db1__t'", "table setting implicit_table_at_top_level is not accepted"},
+			{"SHOW SETTINGS PROFILES SETTINGS `\\Nimplicit_table_at_top_level` = 'x'", "table setting implicit_table_at_top_level is not accepted"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: c.msg})
+		}
+		cases = append(cases, tablerefCase{name: "SHOW SETTINGS LIKE 'max%'", sql: "SHOW SETTINGS LIKE 'max%'", si: si, wantCode: pb.RewriteCode_Success})
+	}
+	runTablerefCases(t, cases)
+}
