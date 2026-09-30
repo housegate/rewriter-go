@@ -570,11 +570,38 @@ func ExtractViewBody(ast AST) (AST, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
+	// The body is stored by ClickHouse, which binds IN operands more narrowly
+	// there; mark its SELECT nodes so the walker applies that rule when the
+	// body is rewritten on its own (see readSourceScope).
+	markStoredViewBody(q, true)
 	b, err := json.Marshal(q)
+	markStoredViewBody(q, false)
 	if err != nil {
 		return nil, false, fmt.Errorf("engine: encode view body: %w", err)
 	}
 	return AST(b), true, nil
+}
+
+// markStoredViewBody sets (on) or removes (off) storedViewBodyKey on every
+// SELECT node under node.
+func markStoredViewBody(node any, on bool) {
+	switch n := node.(type) {
+	case map[string]any:
+		if sel, ok := n[NodeSelect].(map[string]any); ok {
+			if on {
+				sel[storedViewBodyKey] = true
+			} else {
+				delete(sel, storedViewBodyKey)
+			}
+		}
+		for _, child := range n {
+			markStoredViewBody(child, on)
+		}
+	case []any:
+		for _, child := range n {
+			markStoredViewBody(child, on)
+		}
+	}
 }
 
 // SetViewBody replaces create_view.query with the given {"select":…} body AST and
@@ -592,6 +619,7 @@ func SetViewBody(ast AST, body AST) (AST, error) {
 	if err := json.Unmarshal(body, &bodyNode); err != nil {
 		return nil, fmt.Errorf("engine: decode view body: %w", err)
 	}
+	markStoredViewBody(bodyNode, false)
 	b["query"] = bodyNode
 	out, err := json.Marshal(root)
 	if err != nil {

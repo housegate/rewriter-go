@@ -1164,10 +1164,19 @@ type readSourceVisitor struct {
 // name, and in the IN's own SELECT the old analyzer does. Treating it as a
 // binding forwarded the operand verbatim, so ClickHouse read that table in
 // the session's physical database, unreported.
+//
+// Inside a stored view body (CREATE VIEW, CREATE MATERIALIZED VIEW with TO,
+// ENGINE, POPULATE or REFRESH; measured on ClickHouse 26.2 and 25.8 under
+// both analyzers) the binding is narrower, so storedView is set there and
+// inherited by every nested query: a WITH alias binds only when its value is
+// a single folded literal (withValueIsStoredViewLiteral), and no projection
+// alias binds. A read-query CTE name binds as elsewhere. The `view()` table
+// function, INSERT … SELECT and CTAS bodies follow the plain-SELECT rule.
 type readSourceScope struct {
 	ctes       map[string]bool
 	aliases    map[string]bool
 	projection map[string]bool
+	storedView bool
 	// unbound marks an expression position ClickHouse stores or executes
 	// outside a SELECT scope: a structured UPDATE / DELETE, an INSERT's VALUES
 	// rows, and a CREATE TABLE / CREATE VIEW / ALTER column, constraint
@@ -1193,6 +1202,12 @@ type readSourceScope struct {
 func unboundScope() readSourceScope {
 	return readSourceScope{unbound: true}
 }
+
+// storedViewBodyKey marks every SELECT node of a view body that
+// ExtractViewBody hands to the SELECT pipeline on its own, so the walker
+// applies the stored-view binding rule there too. It is internal JSON
+// metadata (polyglot ignores unknown AST fields); SetViewBody strips it.
+const storedViewBodyKey = "_rewriter_go_stored_view_body"
 
 // walkStatementObjects is the sole statement-level dispatcher behind the
 // ordered table, read-source, namespace, and rewrite projections.
@@ -1220,7 +1235,9 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			return walkCreateTableObjects(statementMap(n, NodeCreateTable), scope, visitor)
 		case statementMap(n, NodeCreateView) != nil:
 			body := statementMap(n, NodeCreateView)
-			if err := walkExpression(body["query"], scope, visitor); err != nil {
+			bodyScope := scope
+			bodyScope.storedView = true
+			if err := walkExpression(body["query"], bodyScope, visitor); err != nil {
 				return err
 			}
 			if err := walkExpression(body["options"], scope, visitor); err != nil {
@@ -1546,6 +1563,9 @@ func walkReadQuery(node any, parent readSourceScope, visitor readSourceVisitor) 
 }
 
 func walkSelectObjects(selectNode map[string]any, parent readSourceScope, visitor readSourceVisitor) error {
+	if stored, _ := selectNode[storedViewBodyKey].(bool); stored {
+		parent.storedView = true
+	}
 	scope, err := walkWithObjects(selectNode["with"], parent, visitor)
 	if err != nil {
 		return err
@@ -1652,9 +1672,10 @@ func walkWithObjects(withNode any, parent readSourceScope, visitor readSourceVis
 		return parent, walkExpression(with["search"], parent, visitor)
 	}
 	scope := readSourceScope{
-		ctes:    cloneReadSourceNames(parent.ctes, len(ctes)),
-		aliases: cloneReadSourceNames(parent.aliases, len(ctes)),
-		unbound: parent.unbound,
+		ctes:       cloneReadSourceNames(parent.ctes, len(ctes)),
+		aliases:    cloneReadSourceNames(parent.aliases, len(ctes)),
+		storedView: parent.storedView,
+		unbound:    parent.unbound,
 	}
 	recursive, _ := with["recursive"].(bool)
 	if recursive {
@@ -1699,7 +1720,11 @@ func declareCTEBinding(scope readSourceScope, cte map[string]any) {
 		scope.ctes[name] = true
 		return
 	}
-	if withValueIsNotTableReference(cte["this"]) {
+	binds := withValueIsNotTableReference(cte["this"])
+	if scope.storedView {
+		binds = withValueIsStoredViewLiteral(cte["this"])
+	}
+	if binds {
 		scope.aliases[name] = true
 		return
 	}
@@ -1745,6 +1770,89 @@ func withValueIsNotTableReference(node any) bool {
 		}
 	}
 	return !containsNameReference(m)
+}
+
+// withValueIsStoredViewLiteral reports whether a WITH alias's value binds an
+// IN operand inside a stored view body. Measured on ClickHouse 26.2 and 25.8,
+// both analyzers: only a value the ClickHouse parser folds into one literal
+// binds there — a number (negated or not), a string, NULL or a boolean,
+// optionally parenthesised, or a flat tuple / bracket array of those. A
+// function call, cast, operator, scalar subquery, `tuple(…)` / `array(…)`, a
+// parenthesised or nested tuple and an array of tuples make ClickHouse read
+// the table named after the alias.
+func withValueIsStoredViewLiteral(node any) bool {
+	m, ok := node.(map[string]any)
+	if !ok || len(m) != 1 {
+		return false
+	}
+	if storedViewScalarLiteral(unwrapParenNodes(m)) {
+		return true
+	}
+	if tuple, ok := m["tuple"].(map[string]any); ok {
+		return allStoredViewScalarLiterals(tuple["expressions"])
+	}
+	if array, ok := m["array_func"].(map[string]any); ok {
+		if bracket, _ := array["bracket_notation"].(bool); bracket {
+			return allStoredViewScalarLiterals(array["expressions"])
+		}
+	}
+	return false
+}
+
+func unwrapParenNodes(m map[string]any) map[string]any {
+	for len(m) == 1 {
+		paren, ok := m["paren"].(map[string]any)
+		if !ok {
+			break
+		}
+		inner, ok := paren["this"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		m = inner
+	}
+	return m
+}
+
+func allStoredViewScalarLiterals(node any) bool {
+	items, ok := node.([]any)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if !storedViewScalarLiteral(m) {
+			return false
+		}
+	}
+	return true
+}
+
+// storedViewScalarLiteral: a number or string literal, NULL, a boolean, or a
+// negated number literal, with no parentheses of its own.
+func storedViewScalarLiteral(m map[string]any) bool {
+	if len(m) != 1 {
+		return false
+	}
+	if lit, ok := m["literal"].(map[string]any); ok {
+		switch lit["literal_type"] {
+		case "number", "string":
+			return true
+		}
+		return false
+	}
+	if _, ok := m["null"]; ok {
+		return true
+	}
+	if _, ok := m["boolean"]; ok {
+		return true
+	}
+	if neg, ok := m["neg"].(map[string]any); ok {
+		inner, _ := neg["this"].(map[string]any)
+		lit, _ := inner["literal"].(map[string]any)
+		return len(inner) == 1 && lit["literal_type"] == "number"
+	}
+	return false
 }
 
 // nameReferenceKeys are the AST node kinds that can carry a name ClickHouse
@@ -1837,7 +1945,10 @@ func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSou
 		return parent
 	}
 	projection := make(map[string]bool)
-	collectProjectionAliases(selectNode["expressions"], projection)
+	if !parent.storedView {
+		// In a stored view body no projection alias binds an IN operand.
+		collectProjectionAliases(selectNode["expressions"], projection)
+	}
 	parent.projection = projection
 	return parent
 }

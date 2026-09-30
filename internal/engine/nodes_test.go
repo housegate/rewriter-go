@@ -1302,6 +1302,31 @@ func TestCollectEmbeddedReadSources_InTableOperandsRespectOutputAndTableAliases(
 			},
 		},
 		{
+			// Review round 4: in a stored view body a function-valued WITH
+			// alias and a projection alias bind nothing (whole-statement walk).
+			name: "stored view body: function WITH alias is not an IN binding",
+			sql:  `CREATE VIEW other.v AS WITH toUInt64(1) AS t SELECT id FROM other.u WHERE id IN t`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "stored view body: projection alias is not an IN binding",
+			sql:  `CREATE MATERIALIZED VIEW other.v TO other.w AS SELECT id, 1 AS t FROM other.u WHERE in(id, t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "stored view body: literal WITH alias stays an IN binding",
+			sql:  `CREATE VIEW other.v AS WITH (1, 2) AS t SELECT id FROM other.u WHERE id IN t`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+			},
+		},
+		{
 			name: "enclosing WITH expression alias stays an IN binding",
 			sql:  `WITH 1 AS t SELECT * FROM other.u AS t WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
 			want: []readSourceView{

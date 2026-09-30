@@ -478,3 +478,123 @@ func TestTableRef_KeywordPins(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// Stored view bodies (review round 4). ClickHouse 26.2 and 25.8, under both
+// analyzers, bind an unqualified IN operand in a CREATE VIEW / MATERIALIZED
+// VIEW (TO, ENGINE, POPULATE, REFRESH) body differently from a plain SELECT:
+// only a read-query CTE name and a WITH alias whose value is a single folded
+// literal (a number, a string, NULL, a boolean, a negated number, a
+// parenthesised one of those, or a flat tuple / bracket array of them) bind
+// it. A WITH alias whose value is a function call, a cast, an operator, a
+// scalar subquery, `tuple(…)` / `array(…)`, a nested tuple or a parenthesised
+// tuple, and every projection alias (whatever its value), leave the operand a
+// table: ClickHouse reads the table of that name, at the body's own level and
+// in nested subqueries. The `view()` table function, INSERT … SELECT and CTAS
+// bodies follow the plain-SELECT rule.
+
+var storedViewNonBindingValues = []string{
+	"toUInt64(1)", "(toUInt64(1))", "(SELECT 1)", "1 + 1", "CAST(1 AS UInt64)",
+	"((1, 2))", "[(1, 2)]", "tuple(1)",
+}
+
+var storedViewDecls = []struct{ name, sql string }{
+	{"view same scope", "CREATE VIEW db1.v AS WITH {V} AS {N} SELECT a FROM db1.o WHERE {P}"},
+	{"view nested", "CREATE VIEW db1.v AS WITH {V} AS {N} SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE {P})"},
+	{"view with on the subquery", "CREATE OR REPLACE VIEW db1.v AS SELECT a FROM db1.o WHERE a IN (WITH {V} AS {N} SELECT a FROM db1.p WHERE {P})"},
+	{"view over view()", "CREATE VIEW db1.v AS SELECT a FROM view(WITH {V} AS {N} SELECT a FROM db1.o WHERE {P})"},
+	{"mv to", "CREATE MATERIALIZED VIEW db1.mv TO db1.q AS WITH {V} AS {N} SELECT a FROM db1.o WHERE {P}"},
+	{"mv engine", "CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory AS WITH {V} AS {N} SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE {P})"},
+	{"view projection alias", "CREATE VIEW db1.v AS SELECT a, {V} AS {N} FROM db1.o WHERE {P}"},
+}
+
+// TestTableRef_StoredViewAliasIsNotAnInBinding checks that, in a stored view
+// body, a WITH alias with a non-literal value and a projection alias do not
+// bind an IN operand: the answer equals the renamed-alias control.
+func TestTableRef_StoredViewAliasIsNotAnInBinding(t *testing.T) {
+	e := newEngine(t)
+	contexts := aliasInContexts()
+	preds := []string{"a IN {R}", "a NOT IN ({R})", "in(a, {R})"}
+	for _, ctxName := range []string{"mapped", "empty"} {
+		opts := contexts[ctxName]
+		for _, si := range []bool{false, true} {
+			for _, decl := range storedViewDecls {
+				values := storedViewNonBindingValues
+				if decl.name == "view projection alias" {
+					// No bare tuple here: Polyglot drops the quotes of an alias on
+					// a parenthesised tuple (review N5, handled by the mid-drop gate).
+					values = []string{"1", "'x'", "toUInt64(1)", "(SELECT 1)"}
+				}
+				for _, v := range values {
+					for _, name := range aliasInNames {
+						for _, pred := range preds {
+							sql := strings.ReplaceAll(decl.sql, "{V}", v)
+							runAliasInMetamorphic(t, e, ctxName, opts(si), si, decl.name, sql, name, pred)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestTableRef_StoredViewAliasPins pins the finding's example and the names
+// that still bind in a stored view body, plus the plain-SELECT-rule positions
+// (view(), INSERT … SELECT, CTAS) where a function-valued alias still binds.
+func TestTableRef_StoredViewAliasPins(t *testing.T) {
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		cases = append(cases,
+			tablerefCase{name: "finding example", si: si,
+				sql:      "CREATE VIEW db1.vv AS WITH (SELECT 1) AS `db2.my-t` SELECT a FROM db1.o WHERE a IN `db2.my-t`",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE VIEW phys."db1.vv" AS WITH (SELECT 1) AS "db2.my-t" SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.db2.my-t"`,
+				wantAcc:  []string{"db1.vv", "db1.o", ".db2.my-t"}},
+			tablerefCase{name: "mv to function alias", si: si,
+				sql:      "CREATE MATERIALIZED VIEW db1.mv TO db1.q AS WITH toUInt64(1) AS x SELECT a FROM db1.o WHERE a IN x",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.q" AS WITH toUInt64(1) AS x SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.x"`,
+				wantAcc:  []string{"db1.mv", "db1.q", "db1.o", ".x"}},
+			tablerefCase{name: "view projection literal alias", si: si,
+				sql:      "CREATE VIEW db1.v AS SELECT a, 1 AS c FROM db1.o WHERE a IN c",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE VIEW phys."db1.v" AS SELECT a, 1 AS c FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.c"`,
+				wantAcc:  []string{"db1.v", ".c", "db1.o"}},
+		)
+		// Names that still bind in a stored view body: folded literals and a
+		// read-query CTE.
+		for _, c := range []struct{ sql, want string }{
+			{"CREATE VIEW db1.v AS WITH 1 AS s SELECT a FROM db1.o WHERE a IN s",
+				`CREATE VIEW phys."db1.v" AS WITH 1 AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN s`},
+			{"CREATE VIEW db1.v AS WITH (1, 2) AS s SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN s)",
+				`CREATE VIEW phys."db1.v" AS WITH (1, 2) AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE a IN s)`},
+			{"CREATE VIEW db1.v AS WITH [-1, 2] AS s SELECT a FROM db1.o WHERE in(a, s)",
+				`CREATE VIEW phys."db1.v" AS WITH [-1, 2] AS s SELECT a FROM phys."db1.o" "db1.o" WHERE in(a, s)`},
+			{"CREATE VIEW db1.v AS WITH (-1) AS s SELECT a FROM db1.o WHERE a IN s",
+				`CREATE VIEW phys."db1.v" AS WITH (-1) AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN s`},
+			{"CREATE MATERIALIZED VIEW db1.mv TO db1.q AS WITH 'x' AS s SELECT a FROM db1.o WHERE a IN s",
+				`CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.q" AS WITH 'x' AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN s`},
+			{"CREATE VIEW db1.v AS WITH NULL AS s SELECT a FROM db1.o AS s WHERE a IN s",
+				`CREATE VIEW phys."db1.v" AS WITH NULL AS s SELECT a FROM phys."db1.o" AS s WHERE a IN s`},
+			{"CREATE VIEW db1.v AS WITH c AS (SELECT 1 AS a) SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN c)",
+				`CREATE VIEW phys."db1.v" AS WITH c AS (SELECT 1 AS a) SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE a IN c)`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+		// Plain-SELECT-rule positions: a function-valued WITH alias and an own
+		// projection alias still bind (measured in view(), INSERT … SELECT and
+		// CTAS bodies as in a plain SELECT).
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT a FROM view(WITH toUInt64(1) AS s SELECT a FROM db1.o WHERE a IN s)",
+				`SELECT a FROM view(WITH toUInt64(1) AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN s)`},
+			{"INSERT INTO db1.q WITH (SELECT 1) AS s SELECT a FROM db1.o WHERE a IN s",
+				`INSERT INTO phys."db1.q" WITH (SELECT 1) AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN s`},
+			{"CREATE TABLE db1.n ENGINE = Memory AS SELECT a, 1 AS s FROM db1.o WHERE a IN s",
+				`CREATE TABLE phys."db1.n" ENGINE=Memory AS (SELECT a, 1 AS s FROM phys."db1.o" "db1.o" WHERE a IN s)`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}
