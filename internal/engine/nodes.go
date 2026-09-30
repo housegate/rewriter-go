@@ -1090,6 +1090,28 @@ type readSourceVisitor struct {
 type readSourceScope struct {
 	ctes    map[string]bool
 	aliases map[string]bool
+	// unbound marks an expression position ClickHouse stores or executes
+	// outside a SELECT scope: a structured UPDATE / DELETE, an INSERT's VALUES
+	// rows, and a CREATE TABLE / CREATE VIEW / ALTER column, constraint
+	// (CHECK / ASSUME), index, TTL or other non-engine storage expression —
+	// the spec 2026-09-26 R2 positions. ClickHouse qualifies every table name
+	// there with the current database before any WITH clause is consulted,
+	// so a CTE declared inside the position (in a subquery, recursively, or
+	// nested deeper) binds nothing: `a IN (WITH x AS (…) SELECT a FROM x)`
+	// reads the physical table x (measured on ClickHouse 26.2 and 25.8 under
+	// both analyzers). The same holds for a WITH expression alias, whatever
+	// its value, and for a projection alias, in every such position except a
+	// lightweight UPDATE and a table TTL … WHERE, which bind them; treating
+	// them as tables there too only refuses a statement that names no table
+	// (fail-safe). In an unbound scope no WITH clause or SELECT declares a
+	// binding, so each such name is a table reference like any other.
+	unbound bool
+}
+
+// unboundScope is the scope of an R2 expression position: no binding of an
+// enclosing statement reaches it, and no WITH inside it declares one.
+func unboundScope() readSourceScope {
+	return readSourceScope{unbound: true}
 }
 
 // walkStatementObjects is the sole statement-level dispatcher behind the
@@ -1124,7 +1146,9 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			if err := walkExpression(body["options"], scope, visitor); err != nil {
 				return err
 			}
-			if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
+			// The column list and the inner table's storage properties are
+			// R2 expression positions: no CTE binds there (unboundScope).
+			if err := walkGenericExpression(body["columns"], unboundScope(), visitor); err != nil {
 				return err
 			}
 			// A view's typed column list (`(a UInt8 DEFAULT …, INDEX …)`)
@@ -1132,25 +1156,26 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			// / ALIAS / EPHEMERAL / TTL expressions are expression positions
 			// exactly like a CREATE TABLE column list's (spec 2026-09-26 R2).
 			// Its INDEX / PROJECTION / PRIMARY KEY items are opaque raw
-			// nodes, governed through ViewColumnListRawTexts.
-			if err := walkGenericExpression(body["schema"], scope, visitor); err != nil {
+			// nodes, governed through ViewColumnListRawTexts. Like the CREATE TABLE
+			// column list, no CTE binds there (unboundScope).
+			if err := walkGenericExpression(body["schema"], unboundScope(), visitor); err != nil {
 				return err
 			}
-			return walkCreateProperties(body["table_properties"], scope, visitor)
+			return walkCreateProperties(body["table_properties"], unboundScope(), visitor)
 		case statementMap(n, NodeAlterTable) != nil:
 			// Structured ALTER actions (ADD COLUMN … DEFAULT, REPLACE PARTITION
 			// … FROM, …) have no per-field model; walkGenericExpression hands
 			// every read-bearing node to the ordinary walker (spec 2026-09-26
 			// R2). Raw actions are opaque text, governed by OpaqueAlterTexts.
 			body := statementMap(n, NodeAlterTable)
-			if err := walkGenericExpression(body["actions"], scope, visitor); err != nil {
+			if err := walkGenericExpression(body["actions"], unboundScope(), visitor); err != nil {
 				return err
 			}
-			return walkGenericExpression(body["partition"], scope, visitor)
+			return walkGenericExpression(body["partition"], unboundScope(), visitor)
 		case statementMap(n, NodeDelete) != nil:
-			return walkDeleteObjects(statementMap(n, NodeDelete), scope, visitor)
+			return walkDeleteObjects(statementMap(n, NodeDelete), unboundScope(), visitor)
 		case statementMap(n, NodeUpdate) != nil:
-			return walkUpdateObjects(statementMap(n, NodeUpdate), scope, visitor)
+			return walkUpdateObjects(statementMap(n, NodeUpdate), unboundScope(), visitor)
 		case statementMap(n, NodeCopy) != nil:
 			body := statementMap(n, NodeCopy)
 			if err := walkExpression(body["this"], scope, visitor); err != nil {
@@ -1203,8 +1228,13 @@ func walkInsertObjects(body map[string]any, parent readSourceScope, visitor read
 			return err
 		}
 	}
+	// VALUES rows are an R2 expression position: no CTE binds there, not
+	// even one the INSERT's own WITH declares (unboundScope).
+	if err := walkExpression(body["values"], unboundScope(), visitor); err != nil {
+		return err
+	}
 	for _, key := range []string{
-		"values", "query", "partition", "returning", "output", "on_conflict",
+		"query", "partition", "returning", "output", "on_conflict",
 		"replace_where", "source", "partition_by", "settings", "hint",
 	} {
 		if err := walkExpression(body[key], scope, visitor); err != nil {
@@ -1234,19 +1264,20 @@ func walkCreateTableObjects(body map[string]any, scope readSourceScope, visitor 
 			return err
 		}
 	}
-	// Column definitions (DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL / TTL)
-	// and constraints (CHECK, INDEX … TYPE) are expression positions the
-	// walker sees like any other (spec 2026-09-26 R2).
-	if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
+	// Column definitions (DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL / TTL),
+	// constraints (CHECK / ASSUME, INDEX … TYPE) and storage properties are
+	// expression positions the walker sees like any other (spec 2026-09-26
+	// R2), in an unbound scope: ClickHouse binds no CTE there.
+	if err := walkGenericExpression(body["columns"], unboundScope(), visitor); err != nil {
 		return err
 	}
-	if err := walkGenericExpression(body["constraints"], scope, visitor); err != nil {
+	if err := walkGenericExpression(body["constraints"], unboundScope(), visitor); err != nil {
 		return err
 	}
-	if err := walkCreateProperties(body["properties"], scope, visitor); err != nil {
+	if err := walkCreateProperties(body["properties"], unboundScope(), visitor); err != nil {
 		return err
 	}
-	return walkCreateProperties(body["post_table_properties"], scope, visitor)
+	return walkCreateProperties(body["post_table_properties"], unboundScope(), visitor)
 }
 
 // Polyglot stores CREATE TABLE target AS table_function(...) in the otherwise
@@ -1540,6 +1571,7 @@ func walkWithObjects(withNode any, parent readSourceScope, visitor readSourceVis
 	scope := readSourceScope{
 		ctes:    cloneReadSourceNames(parent.ctes, len(ctes)),
 		aliases: cloneReadSourceNames(parent.aliases, len(ctes)),
+		unbound: parent.unbound,
 	}
 	recursive, _ := with["recursive"].(bool)
 	if recursive {
@@ -1573,7 +1605,10 @@ func walkWithObjects(withNode any, parent readSourceScope, visitor readSourceVis
 
 func declareCTEBinding(scope readSourceScope, cte map[string]any) {
 	name := concreteIdentifierName(cte["alias"])
-	if name == "" {
+	if name == "" || scope.unbound {
+		// Neither a CTE nor a WITH expression alias binds in an R2
+		// expression position: ClickHouse has already qualified the name
+		// with the current database there.
 		return
 	}
 	aliasFirst, _ := cte["alias_first"].(bool)
@@ -1627,6 +1662,12 @@ func isScopedCurrentDatabaseRef(ref NamespaceRef, scope readSourceScope) bool {
 }
 
 func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSourceScope {
+	if parent.unbound {
+		// No projection alias binds an IN operand in an R2 expression
+		// position (measured, see readSourceScope.unbound), and a
+		// table-source alias never binds one under enable_analyzer=0.
+		return parent
+	}
 	aliases := cloneReadSourceNames(parent.aliases, 4)
 	collectProjectionAliases(selectNode["expressions"], aliases)
 	collectTableSourceAliases(selectNode["from"], aliases)
