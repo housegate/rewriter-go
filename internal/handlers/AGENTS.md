@@ -21,7 +21,7 @@
 ## CONVENTIONS
 
 - Handlers return protobuf response objects, not public `RewriteResult`; root code converts at the boundary.
-- SELECT is lenient for invalid table rewrites: skip unresolved/invalid targets rather than rejecting the statement.
+- SELECT is lenient for invalid qualified table rewrites: skip an unmapped `db2.x` rather than rejecting the statement. In dynamic mode an unqualified name (including the one-part dotted quoted `` `db1.t` ``) that does not resolve through the logical context is refused with `nameresolve.UnresolvedUnqualifiedTableMessage`, because ClickHouse would read it from the physical database.
 - Writes are strict: record access before the first reject, short-circuit at the first failing slot, and do not record later slots.
 - `table_rewrites`, `original_accessed_tables`, `failed_cte_aliases`, `database_rewrites`, and `privileges_deltas` are parity fields. Preserve ordering and nil/empty semantics tested by harnesses.
 - CTE parse failures are recorded deterministically. Sort `failed_cte_aliases` before returning.

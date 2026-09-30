@@ -91,3 +91,26 @@ func TestProtectedDatabaseRejectMessage(t *testing.T) {
 		t.Fatalf("message = %q", got)
 	}
 }
+
+func TestUnresolvedUnqualifiedTableMessage(t *testing.T) {
+	for table, want := range map[string]string{
+		"t":     `unqualified table "t" does not resolve through the session's logical database`,
+		"db1.t": `unqualified table "db1.t" does not resolve through the session's logical database`,
+		// No escaping, like the T6 string-lookup message.
+		`a"b`: `unqualified table "a"b" does not resolve through the session's logical database`,
+	} {
+		got := UnresolvedUnqualifiedTableMessage(table)
+		if got != want {
+			t.Errorf("message(%q) = %q, want %q", table, got, want)
+		}
+		if !IsUnresolvedUnqualifiedTableMessage(got) {
+			t.Errorf("IsUnresolvedUnqualifiedTableMessage(%q) = false", got)
+		}
+	}
+	for _, other := range []string{"", `unqualified table "`, "protected database phys is not addressable",
+		`joinGet target "db1.j" does not resolve through the caller's databases`} {
+		if IsUnresolvedUnqualifiedTableMessage(other) {
+			t.Errorf("IsUnresolvedUnqualifiedTableMessage(%q) = true", other)
+		}
+	}
+}

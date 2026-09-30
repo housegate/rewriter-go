@@ -26,6 +26,7 @@ type selectCase struct {
 	Offset               *int32            `json:"offset"`
 	Settings             map[string]int32  `json:"settings"`
 	WantCode             string            `json:"want_code"`
+	WantMessage          string            `json:"want_message"`
 	WantTableRewrites    map[string]string `json:"want_table_rewrites"`
 	WantFailedCteAliases []string          `json:"want_failed_cte_aliases"`
 	WantAccessed         []accessedJSON    `json:"want_accessed"`
@@ -163,6 +164,9 @@ func TestSelectGolden(t *testing.T) {
 			}
 			if c.WantCode != "" && resp.GetCode() != codeByName[c.WantCode] {
 				t.Errorf("code = %v, want %s", resp.GetCode(), c.WantCode)
+			}
+			if c.WantMessage != "" && resp.GetMessage() != c.WantMessage {
+				t.Errorf("message = %q, want %q", resp.GetMessage(), c.WantMessage)
 			}
 			if c.WantTableRewrites != nil && !eqStrMap(resp.GetTableRewrites(), c.WantTableRewrites) {
 				t.Errorf("table_rewrites = %v, want %v", resp.GetTableRewrites(), c.WantTableRewrites)

@@ -22,6 +22,7 @@ func RewriteSelect(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption, so
 		return nil, err
 	}
 	if resp.Code != pb.RewriteCode_Success {
+		clearOnUnresolved(resp)
 		return resp, nil // reject: leave SqlAfterRewrite empty; native.finalize echoes the input
 	}
 	sql, err := e.Generate(rewritten)
@@ -266,6 +267,18 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	}
 
 	var siErr error
+	// unresolved is the first unqualified table (DB == "", which includes the
+	// one-part dotted quoted form `db1.t`) that does not resolve through the
+	// session's logical database in dynamic mode: the logical context is
+	// empty, unmapped, or maps to a missing remote upstream. ClickHouse would
+	// resolve the verbatim name in the session's current database — the
+	// physical database, where `db1.t` is an Active SI table's ordinary
+	// physical table — so it is refused, not skipped (spec 2026-09-26 §5).
+	// CTE names never reach this callback, and a qualified unmapped name
+	// (db2.x) stays a lenient skip: ClickHouse has no physical db2, and the
+	// host's permission check owns it.
+	var unresolved string
+	var haveUnresolved bool
 	rewritten, err := engine.RewriteSelectTables(ast, func(tt engine.TableTarget) engine.TableDecision {
 		if storageIntegrityActive {
 			semantic, ok := engine.SemanticTableTarget(e, tt)
@@ -285,13 +298,29 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 				return d
 			}
 		}
-		return decideTable(tt, sel, resp.TableRewrites)
+		o := nameresolve.Resolve(tt.DB, tt.Table, sel)
+		if sel.Mode == nameresolve.ModeDynamic && tt.DB == "" && o.Status == nameresolve.StatusInvalid {
+			if !haveUnresolved {
+				unresolved, haveUnresolved = tt.Table, true
+			}
+			return engine.TableDecision{Action: engine.ActionSkip}
+		}
+		return decideTable(tt, o, resp.TableRewrites)
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 	if siErr != nil {
 		return nil, nil, siErr
+	}
+	if haveUnresolved {
+		// The partial table_rewrites map is kept here: each caller empties the
+		// map only when this refusal is its FINAL answer (clearOnUnresolved),
+		// so a different refusal that outranks it (the SI write refusal of a
+		// view body) keeps the map it would have without the unresolved name.
+		resp.Code = pb.RewriteCode_InvalidRewriteRequest
+		resp.Message = nameresolve.UnresolvedUnqualifiedTableMessage(unresolved)
+		return ast, resp, nil
 	}
 
 	rewritten, err = applyOptions(rewritten, opts)
@@ -307,10 +336,12 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	return rewritten, resp, nil
 }
 
-// decideTable maps a nameresolve.Outcome to an engine.TableDecision and records the
-// table_rewrites entry. SELECT is lenient: StatusInvalid → skip (no error).
-func decideTable(tt engine.TableTarget, sel nameresolve.Selection, rewrites map[string]string) engine.TableDecision {
-	o := nameresolve.Resolve(tt.DB, tt.Table, sel)
+// decideTable maps the nameresolve.Outcome already resolved for tt to an
+// engine.TableDecision and records the table_rewrites entry. SELECT is lenient:
+// StatusInvalid → skip (no error). The caller refuses an unqualified
+// dynamic-mode StatusInvalid before reaching it, so the lenient skip covers
+// qualified unmapped names only.
+func decideTable(tt engine.TableTarget, o nameresolve.Outcome, rewrites map[string]string) engine.TableDecision {
 	switch o.Status {
 	case nameresolve.StatusRewrite:
 		recordRewrite(rewrites, tt, o.PhysicalDB, o.NewTable)
@@ -372,6 +403,19 @@ func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*p
 		})
 	}
 	return out
+}
+
+// clearOnUnresolved empties resp's table_rewrites when its FINAL message is
+// the unresolved-unqualified refusal (whatever code the caller gave it: an
+// embedded INSERT … SELECT / CTAS body answers UnsupportedStatement), so that
+// rejection carries no partial map — neither the tables the walk rewrote
+// before the refusal nor a write statement's own targets. Every caller of
+// rewriteSelectCore calls it after settling its final code and message.
+func clearOnUnresolved(resp *pb.RewriteSQLResponse) {
+	if resp.GetCode() != pb.RewriteCode_Success &&
+		nameresolve.IsUnresolvedUnqualifiedTableMessage(resp.GetMessage()) {
+		resp.TableRewrites = map[string]string{}
+	}
 }
 
 // qualify mirrors nameresolve.qualify (kept local to avoid exporting it).
