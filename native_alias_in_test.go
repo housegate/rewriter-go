@@ -489,7 +489,7 @@ func TestTableRef_KeywordPins(t *testing.T) {
 // scalar subquery, `tuple(…)` / `array(…)`, a nested tuple or a parenthesised
 // tuple, and every projection alias (whatever its value), leave the operand a
 // table: ClickHouse reads the table of that name, at the body's own level and
-// in nested subqueries. The `view()` table function, INSERT … SELECT and CTAS
+// in nested subqueries and set operations. A top-level `view()`, INSERT … SELECT and CTAS
 // bodies follow the plain-SELECT rule.
 
 var storedViewNonBindingValues = []string{
@@ -505,6 +505,18 @@ var storedViewDecls = []struct{ name, sql string }{
 	{"mv to", "CREATE MATERIALIZED VIEW db1.mv TO db1.q AS WITH {V} AS {N} SELECT a FROM db1.o WHERE {P}"},
 	{"mv engine", "CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory AS WITH {V} AS {N} SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE {P})"},
 	{"view projection alias", "CREATE VIEW db1.v AS SELECT a, {V} AS {N} FROM db1.o WHERE {P}"},
+	// Set-operation bodies (review round 5, N7): Polyglot attaches the
+	// leading WITH to the set node; the operand sits in either branch, and
+	// the set node may be parenthesised or nested under another one.
+	{"view union all left", "CREATE VIEW db1.v AS WITH {V} AS {N} SELECT a FROM db1.o WHERE {P} UNION ALL SELECT a FROM db1.o WHERE 0"},
+	{"view union distinct right", "CREATE VIEW db1.v AS WITH {V} AS {N} SELECT a FROM db1.o WHERE 0 UNION DISTINCT SELECT a FROM db1.o WHERE {P}"},
+	{"view intersect", "CREATE VIEW db1.v AS WITH {V} AS {N} SELECT a FROM db1.o WHERE {P} INTERSECT SELECT a FROM db1.o"},
+	{"view except right", "CREATE VIEW db1.v AS WITH {V} AS {N} SELECT a FROM db1.o EXCEPT SELECT a FROM db1.o WHERE {P}"},
+	{"view parenthesised union", "CREATE VIEW db1.v AS (WITH {V} AS {N} SELECT a FROM db1.o WHERE {P} UNION ALL SELECT a FROM db1.o WHERE 0)"},
+	{"view nested set node", "CREATE VIEW db1.v AS SELECT a FROM db1.o WHERE 0 UNION ALL (WITH {V} AS {N} SELECT a FROM db1.o WHERE {P} UNION ALL SELECT a FROM db1.o WHERE 0)"},
+	{"view union in nested subquery", "CREATE VIEW db1.v AS SELECT a FROM db1.o WHERE a IN (WITH {V} AS {N} SELECT a FROM db1.p WHERE {P} UNION ALL SELECT 1)"},
+	{"mv populate union", "CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory POPULATE AS WITH {V} AS {N} SELECT a FROM db1.o WHERE {P} UNION ALL SELECT a FROM db1.o WHERE 0"},
+	{"mv to union right", "CREATE MATERIALIZED VIEW db1.mv TO db1.q AS WITH {V} AS {N} SELECT a FROM db1.o WHERE 0 UNION ALL SELECT a FROM db1.o WHERE {P}"},
 }
 
 // TestTableRef_StoredViewAliasIsNotAnInBinding checks that, in a stored view
@@ -560,6 +572,33 @@ func TestTableRef_StoredViewAliasPins(t *testing.T) {
 				wantSQL:  `CREATE VIEW phys."db1.v" AS SELECT a, 1 AS c FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.c"`,
 				wantAcc:  []string{"db1.v", ".c", "db1.o"}},
 		)
+		// N7: the finding's example with a set-operation body, and its SI twin.
+		cases = append(cases,
+			tablerefCase{name: "set-operation body cross-tenant", si: si,
+				sql:      "CREATE VIEW db1.vv AS WITH (SELECT 1) AS `db2.my-t` SELECT a FROM db1.o WHERE a IN `db2.my-t` UNION ALL SELECT a FROM db1.o WHERE 0",
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE VIEW phys."db1.vv" AS WITH (SELECT 1) AS "db2.my-t" SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.db2.my-t" UNION ALL SELECT a FROM phys."db1.o" "db1.o" WHERE 0`,
+				wantAcc:  []string{"db1.vv", "db1.o", ".db2.my-t"}},
+			tablerefCase{name: "set-operation body SI twin", si: si,
+				sql:      `CREATE VIEW db1.vv AS WITH toUInt64(1) AS "db1.t" SELECT a FROM db1.o WHERE a IN "db1.t" UNION ALL SELECT a FROM db1.o WHERE 0`,
+				wantCode: pb.RewriteCode_Success,
+				wantSQL:  `CREATE VIEW phys."db1.vv" AS WITH toUInt64(1) AS "db1.t" SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.db1.t" UNION ALL SELECT a FROM phys."db1.o" "db1.o" WHERE 0`,
+				wantAcc:  []string{"db1.vv", "db1.o", ".db1.t"}},
+		)
+		// N8: literals ClickHouse folds that Polyglot types differently —
+		// hex (`hex_number`), binary and inf / nan (a bare `column` to
+		// Polyglot), hex strings and heredocs — bind in a stored view body.
+		for _, v := range []string{"0x10", "-0x10", "0b101", "inf", "-INF", "NaN", "x'41'", "$$abc$$", "(0x10, inf)"} {
+			sql := "CREATE VIEW db1.v AS WITH " + v + " AS s SELECT a FROM db1.o WHERE a IN s UNION ALL SELECT 1"
+			cases = append(cases, tablerefCase{name: "stored literal " + v, si: si, sql: sql,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.v", "db1.o"}})
+		}
+		// inf / nan / binary are literals in a plain SELECT too.
+		for _, v := range []string{"inf", "-nan", "0b101"} {
+			sql := "SELECT a FROM db1.o WHERE a IN (WITH " + v + " AS s SELECT a FROM db1.p WHERE a IN s)"
+			cases = append(cases, tablerefCase{name: "plain literal " + v, si: si, sql: sql,
+				wantCode: pb.RewriteCode_Success, wantAcc: []string{"db1.o", "db1.p"}})
+		}
 		// Names that still bind in a stored view body: folded literals and a
 		// read-query CTE.
 		for _, c := range []struct{ sql, want string }{

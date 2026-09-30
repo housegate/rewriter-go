@@ -1203,11 +1203,25 @@ func unboundScope() readSourceScope {
 	return readSourceScope{unbound: true}
 }
 
-// storedViewBodyKey marks every SELECT node of a view body that
-// ExtractViewBody hands to the SELECT pipeline on its own, so the walker
-// applies the stored-view binding rule there too. It is internal JSON
+// storedViewBodyKey marks the root read-query node of a view body that
+// ExtractViewBody hands to the SELECT pipeline on its own. walkReadQuery turns
+// it into readSourceScope.storedView, which the scope then carries to every
+// node below (SELECT arms, set operations, subqueries). It is internal JSON
 // metadata (polyglot ignores unknown AST fields); SetViewBody strips it.
 const storedViewBodyKey = "_rewriter_go_stored_view_body"
+
+// storedViewRootMarked reports whether the read-query node m (its single
+// kind's body) carries storedViewBodyKey.
+func storedViewRootMarked(m map[string]any) bool {
+	for _, body := range m {
+		if b, ok := body.(map[string]any); ok {
+			if marked, _ := b[storedViewBodyKey].(bool); marked {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // walkStatementObjects is the sole statement-level dispatcher behind the
 // ordered table, read-source, namespace, and rewrite projections.
@@ -1523,6 +1537,13 @@ func walkReadQuery(node any, parent readSourceScope, visitor readSourceVisitor) 
 	}
 	// A nested query never sees the enclosing SELECT's projection aliases.
 	parent.projection = nil
+	// A view body handed to the SELECT pipeline on its own carries the
+	// stored-view marker on its root read-query node (select, set operation,
+	// or subquery / parenthesis wrapper); from here the scope carries it to
+	// every node below, set operations included.
+	if storedViewRootMarked(m) {
+		parent.storedView = true
+	}
 	if selectNode, ok := m[NodeSelect].(map[string]any); ok {
 		return true, walkSelectObjects(selectNode, parent, visitor)
 	}
@@ -1563,9 +1584,6 @@ func walkReadQuery(node any, parent readSourceScope, visitor readSourceVisitor) 
 }
 
 func walkSelectObjects(selectNode map[string]any, parent readSourceScope, visitor readSourceVisitor) error {
-	if stored, _ := selectNode[storedViewBodyKey].(bool); stored {
-		parent.storedView = true
-	}
 	scope, err := walkWithObjects(selectNode["with"], parent, visitor)
 	if err != nil {
 		return err
@@ -1761,6 +1779,14 @@ func withValueIsNotTableReference(node any) bool {
 	if cteBodyIsReadQuery(m) {
 		return true
 	}
+	if lexedNumberColumn(m) {
+		return true
+	}
+	if neg, ok := m["neg"].(map[string]any); ok {
+		if inner, _ := neg["this"].(map[string]any); lexedNumberColumn(inner) {
+			return true
+		}
+	}
 	// A parenthesised call only: a no-parens keyword (`NOW`, `CURRENT_DATE`)
 	// is an identifier to ClickHouse, which reads a table through it.
 	for _, kind := range []string{"function", "aggregate_function"} {
@@ -1828,15 +1854,17 @@ func allStoredViewScalarLiterals(node any) bool {
 	return true
 }
 
-// storedViewScalarLiteral: a number or string literal, NULL, a boolean, or a
-// negated number literal, with no parentheses of its own.
+// storedViewScalarLiteral: a number (decimal, hex `0x…`, binary `0b…`,
+// inf / nan) or string (quoted, `x'…'`, heredoc) literal, NULL, a boolean, or
+// a negated number, with no parentheses of its own. Measured on ClickHouse
+// 26.2 and 25.8, both analyzers: each binds in a stored view body.
 func storedViewScalarLiteral(m map[string]any) bool {
 	if len(m) != 1 {
 		return false
 	}
 	if lit, ok := m["literal"].(map[string]any); ok {
 		switch lit["literal_type"] {
-		case "number", "string":
+		case "number", "hex_number", "string", "hex_string", "dollar_string":
 			return true
 		}
 		return false
@@ -1847,10 +1875,49 @@ func storedViewScalarLiteral(m map[string]any) bool {
 	if _, ok := m["boolean"]; ok {
 		return true
 	}
+	if lexedNumberColumn(m) {
+		return true
+	}
 	if neg, ok := m["neg"].(map[string]any); ok {
 		inner, _ := neg["this"].(map[string]any)
-		lit, _ := inner["literal"].(map[string]any)
-		return len(inner) == 1 && lit["literal_type"] == "number"
+		if len(inner) != 1 {
+			return false
+		}
+		if lit, ok := inner["literal"].(map[string]any); ok {
+			return lit["literal_type"] == "number" || lit["literal_type"] == "hex_number"
+		}
+		return lexedNumberColumn(inner)
+	}
+	return false
+}
+
+// lexedNumberColumn reports whether m is a `column` node Polyglot produced
+// for a word the ClickHouse lexer reads as a number literal: an unquoted,
+// unqualified `inf` / `nan` (any case) or `0b…` binary literal. Measured on
+// ClickHouse 26.2 and 25.8, both analyzers: `WITH inf AS s … a IN s` binds the
+// value, in a plain SELECT and in a stored view body. A quoted `inf` stays an
+// identifier.
+func lexedNumberColumn(m map[string]any) bool {
+	col, ok := m["column"].(map[string]any)
+	if !ok || len(m) != 1 || col["table"] != nil {
+		return false
+	}
+	name, _ := col["name"].(map[string]any)
+	if quoted, _ := name["quoted"].(bool); quoted {
+		return false
+	}
+	word, _ := name["name"].(string)
+	switch strings.ToLower(word) {
+	case "inf", "nan":
+		return true
+	}
+	if len(word) > 2 && strings.HasPrefix(word, "0b") {
+		for _, r := range word[2:] {
+			if r != '0' && r != '1' {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

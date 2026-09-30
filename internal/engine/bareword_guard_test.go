@@ -23,6 +23,13 @@ var noParensKeywords = map[string]bool{
 // table reference": ClickHouse reads them as literals.
 var bareWordLiterals = map[string]bool{"TRUE": true, "FALSE": true, "NULL": true}
 
+// lexedNumberWords are bare words the ClickHouse lexer reads as number
+// literals although Polyglot parses them as a column (review round 5, N8):
+// `WITH inf AS s … a IN s` binds the value on 26.2 and 25.8 under both
+// analyzers, so a WITH alias with this value binds (lexedNumberColumn). As a
+// direct IN operand they stay tables (fail-safe).
+var lexedNumberWords = map[string]bool{"INF": true, "NAN": true}
+
 // bareWordSweep is the set of bare words swept when the rule was written:
 // the keywords above, SQL niladic keywords and functions of other dialects,
 // ClickHouse spellings, literals and reserved words.
@@ -51,7 +58,8 @@ var bareWordSweep = strings.Fields(`
 //  1. exactly the noParensKeywords parse as a no-parens, argument-less
 //     function node (so noParensKeywordName and the no_parens checks see
 //     them), in upper and lower case and inside parentheses;
-//  2. no bare word except a literal parses into a node that
+//  2. no bare word except a literal (TRUE / FALSE / NULL, and the lexed
+//     numbers INF / NAN) parses into a node that
 //     withValueIsNotTableReference accepts as "not a table" — e.g. a typed
 //     node with no name key, the way `PI()` becomes {"pi": {}}. ClickHouse
 //     reads a bare word as an identifier, so such a node would re-open the
@@ -84,7 +92,7 @@ func TestBareWordShapesPinTheInBindingRule(t *testing.T) {
 				t.Errorf("%s: spelling %q is now a no-parens function node; add it to noParensKeywords after measuring it on ClickHouse: %s", word, spelling, compactJSON(inner))
 			}
 			notTable := withValueIsNotTableReference(value)
-			if bareWordLiterals[word] {
+			if bareWordLiterals[word] || lexedNumberWords[word] {
 				if !notTable {
 					t.Errorf("%s: literal spelling %q is no longer accepted as a value: %s", word, spelling, compactJSON(inner))
 				}

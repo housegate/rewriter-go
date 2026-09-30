@@ -571,35 +571,48 @@ func ExtractViewBody(ast AST) (AST, bool, error) {
 		return nil, false, nil
 	}
 	// The body is stored by ClickHouse, which binds IN operands more narrowly
-	// there; mark its SELECT nodes so the walker applies that rule when the
-	// body is rewritten on its own (see readSourceScope).
-	markStoredViewBody(q, true)
+	// there; mark its root read-query node so the walker starts the body's
+	// scope as a stored view and carries it to every node below when the body
+	// is rewritten on its own (see readSourceScope).
+	markStoredViewRoot(q, true)
 	b, err := json.Marshal(q)
-	markStoredViewBody(q, false)
+	markStoredViewRoot(q, false)
 	if err != nil {
 		return nil, false, fmt.Errorf("engine: encode view body: %w", err)
 	}
 	return AST(b), true, nil
 }
 
-// markStoredViewBody sets (on) or removes (off) storedViewBodyKey on every
-// SELECT node under node.
-func markStoredViewBody(node any, on bool) {
+// markStoredViewRoot sets (on) or removes (off) storedViewBodyKey on the root
+// read-query node of a view body: the body of its single kind (select, a set
+// operation, or a subquery / parenthesis wrapper). The walker turns the
+// marker into readSourceScope.storedView and carries that scope to every
+// node below it.
+func markStoredViewRoot(q map[string]any, on bool) {
+	for _, body := range q {
+		b, ok := body.(map[string]any)
+		if !ok {
+			continue
+		}
+		if on {
+			b[storedViewBodyKey] = true
+		} else {
+			delete(b, storedViewBodyKey)
+		}
+	}
+}
+
+// stripStoredViewMarkers removes storedViewBodyKey anywhere under node.
+func stripStoredViewMarkers(node any) {
 	switch n := node.(type) {
 	case map[string]any:
-		if sel, ok := n[NodeSelect].(map[string]any); ok {
-			if on {
-				sel[storedViewBodyKey] = true
-			} else {
-				delete(sel, storedViewBodyKey)
-			}
-		}
+		delete(n, storedViewBodyKey)
 		for _, child := range n {
-			markStoredViewBody(child, on)
+			stripStoredViewMarkers(child)
 		}
 	case []any:
 		for _, child := range n {
-			markStoredViewBody(child, on)
+			stripStoredViewMarkers(child)
 		}
 	}
 }
@@ -619,7 +632,7 @@ func SetViewBody(ast AST, body AST) (AST, error) {
 	if err := json.Unmarshal(body, &bodyNode); err != nil {
 		return nil, fmt.Errorf("engine: decode view body: %w", err)
 	}
-	markStoredViewBody(bodyNode, false)
+	stripStoredViewMarkers(bodyNode)
 	b["query"] = bodyNode
 	out, err := json.Marshal(root)
 	if err != nil {
