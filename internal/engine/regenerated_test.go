@@ -144,9 +144,14 @@ func TestCheckRegenerated(t *testing.T) {
 		{"like escape in alter delete", `ALTER TABLE db1.o DELETE WHERE s LIKE 'x\_%'`, differs + `lost [x\_%], added [x_%]`},
 		{"like percent escape", `SELECT a FROM db1.o WHERE s LIKE '100\%'`, differs + `lost [100\%], added [100%]`},
 		{"ilike escape", `SELECT a FROM db1.o WHERE s ILIKE '%\_%'`, differs + `lost [%\_%], added [%_%]`},
-		{"escaped quoted table", "SELECT * FROM db1.`a\\_b`", differs + `lost [A\_B], added [A_B]`},
-		{"escaped double-quoted table", `SELECT * FROM db1."a\_b"`, differs + `lost [A\_B], added [A_B]`},
-		{"escaped quoted column", "SELECT `a\\_b` FROM db1.o", differs + `lost [A\_B], added [A_B]`},
+		// A quoted identifier is decoded as ClickHouse decodes it when it is
+		// parsed (decodeASTIdentifiers keeps the backslash of \_), and the
+		// generator escapes that backslash, so the regenerated name is the
+		// one ClickHouse reads from the input: regenerated faithfully. (Before
+		// the ingestion decode, Polyglot's a_b was refused here.)
+		{"escaped quoted table", "SELECT * FROM db1.`a\\_b`", ""},
+		{"escaped double-quoted table", `SELECT * FROM db1."a\_b"`, ""},
+		{"escaped quoted column", "SELECT `a\\_b` FROM db1.o", ""},
 		{"escaped value", `INSERT INTO db1.o VALUES (1, 'a\_b')`, differs + `lost [a\_b], added [a_b]`},
 		{"null escape value", `INSERT INTO db1.o VALUES ('\N')`, differs + `lost [], added [\N]`},
 		{"escape z", `SELECT '\Z'`, differs + "lost [\\Z], added [\x1a]"},
@@ -283,7 +288,6 @@ func TestCheckRegenerated(t *testing.T) {
 		{"tuple alias with a hash inside", `SELECT (1, 2) AS "x#x" FROM db1.o`, differs + `the regenerated token "x#x"` + hash},
 		{"tuple alias with a hash between", `WITH (1, 2) AS "a#b" SELECT a FROM db1.o`, differs + `the regenerated token "a#b"` + hash},
 		{"tuple alias with a hash backtick", "SELECT (1, 2, 3) AS `x#` FROM db1.o", differs + `the regenerated token "x#"` + hash},
-		{"bare word with a hash", "SELECT a#b FROM db1.o", differs + `the regenerated token "a#b"` + hash},
 		{"quoted identifier with a hash keeps its quotes", `SELECT a AS "x#" FROM db1.o`, ""},
 		{"array alias with a hash keeps its quotes", `SELECT [1, 2] AS "x#" FROM db1.o`, ""},
 		{"string with a hash", "SELECT '#', 'x# y' FROM db1.o", ""},
@@ -313,6 +317,22 @@ func TestCheckRegenerated(t *testing.T) {
 			}
 		})
 	}
+	// A client's own bare word with a # is refused by the whole-statement
+	// parse gate first (the glued-'#' rule), and the drop gate still refuses
+	// it on its own (checkBareTokens), so the two gates agree.
+	t.Run("bare word with a hash", func(t *testing.T) {
+		const sql = "SELECT a#b FROM db1.o"
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("ParseOne: %v", err)
+		}
+		if err := CheckParsedInFull(e, sql, ast); err == nil || !strings.Contains(err.Error(), `"a#b" is not a token ClickHouse reads`) {
+			t.Fatalf("CheckParsedInFull = %v, want the glued-'#' refusal", err)
+		}
+		if err := CheckRegenerated(e, sql, ast); err == nil || err.Error() != differs+`the regenerated token "a#b"`+hash {
+			t.Fatalf("CheckRegenerated = %v, want the regenerated-token refusal", err)
+		}
+	})
 }
 
 // regeneratedAs is the real engine with Generate replaced, so a test can
@@ -652,6 +672,42 @@ func TestIsLogicalAnd(t *testing.T) {
 		}
 		if got := isLogicalAnd(toks, len(toks)-1); got != tc.want {
 			t.Errorf("isLogicalAnd(%s) = %v, want %v", tc.types, got, tc.want)
+		}
+	}
+}
+
+// TestPolyglotCommandSQLKeepsPolyglotText pins the rebase of #54 onto #50:
+// ParseOne stores the original statement in a command's "this" (every command
+// check and splice reads it), but the drop gate must compare Polyglot's own
+// text, or a streamed-VALUES INSERT that Polyglot kept as the command
+// INSERT INTO VALUES (table and columns gone) is compared with itself and
+// answered Success in the no-rewrite and static modes.
+func TestPolyglotCommandSQLKeepsPolyglotText(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct{ sql, polyglot string }{
+		{"INSERT INTO db1.o (a, b) VALUES", "INSERT INTO VALUES"},
+		{"/* c */ INSERT INTO db1.o VALUES ;", "INSERT INTO VALUES"},
+		{"SET max_threads = 1", "SET max_threads = 1"},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("ParseOne(%q): %v", tc.sql, err)
+		}
+		orig, err := CommandSQL(ast)
+		if err != nil {
+			t.Fatalf("CommandSQL(%q): %v", tc.sql, err)
+		}
+		if want, _ := commandSourceText(e, tc.sql); orig != want {
+			t.Fatalf("CommandSQL(%q) = %q, want the original %q", tc.sql, orig, want)
+		}
+		got, err := PolyglotCommandSQL(ast)
+		if err != nil || got != tc.polyglot {
+			t.Fatalf("PolyglotCommandSQL(%q) = %q, %v; want %q", tc.sql, got, err, tc.polyglot)
+		}
+		if tc.polyglot != orig {
+			if err := CheckRegenerated(e, tc.sql, ast); !errors.Is(err, ErrNotRegeneratedFaithfully) {
+				t.Fatalf("CheckRegenerated(%q) = %v, want ErrNotRegeneratedFaithfully", tc.sql, err)
+			}
 		}
 	}
 }

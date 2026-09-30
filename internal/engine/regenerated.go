@@ -39,6 +39,9 @@ var ErrNotRegeneratedFaithfully = errors.New("engine: generate: the regenerated 
 //
 // A command or raw node is compared by its own text (CommandSQL, RawSQL),
 // which is what Generate prints for it: that text is not always the input.
+// For a command that is the text Polyglot produced (PolyglotCommandSQL), not
+// the original statement ParseOne stores in "this": comparing the original
+// with itself would pass a command that lost its table.
 // Polyglot keeps a streamed-VALUES INSERT (INSERT INTO db1.o (a, b) VALUES,
 // with no rows) as the command INSERT INTO VALUES, table and columns gone, and
 // a raw CREATE … LIVE VIEW loses a DEFINER / SQL SECURITY prefix. The
@@ -324,12 +327,14 @@ func bareWord(src string, tk rawToken) string {
 	return strings.ToUpper(raw)
 }
 
-// regeneratedText is the SQL Polyglot prints for ast: a command or raw node's
-// own text, any other node's Generate output.
+// regeneratedText is the SQL Polyglot prints for ast: a command node's text
+// as Polyglot produced it (PolyglotCommandSQL, never the original statement
+// ParseOne stores in "this"), a raw node's own text, any other node's
+// Generate output.
 func regeneratedText(e Engine, kind string, ast AST) (string, error) {
 	switch kind {
 	case NodeCommand:
-		return CommandSQL(ast)
+		return PolyglotCommandSQL(ast)
 	case NodeRaw:
 		return RawSQL(ast)
 	}

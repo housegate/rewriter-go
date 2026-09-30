@@ -555,12 +555,17 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 }
 
 func decodeNamespaceFunctionRefDetail(fn map[string]any) (namespaceRefDetail, bool) {
-	name, _ := fn["name"].(string)
+	name := functionName(fn)
 	args, _ := fn["args"].([]any)
-	lower := strings.ToLower(name)
-	if canonical, ok := canonicalCallableInName(lower); ok {
+	if canonical, ok := canonicalCallableInName(name); ok {
 		return decodeCallableInNamespaceRefDetail(canonical, args)
 	}
+	// The carrier table functions below are matched case-insensitively (a
+	// deliberate over-match: ClickHouse resolves them case-sensitively, so a
+	// wrong-case spelling reads nothing); functionName has finished the
+	// ClickHouse escapes, so a quoted `\Nremote` is recognised as the carrier
+	// it runs.
+	lower := strings.ToLower(name)
 	switch lower {
 	case "remote", "remotesecure", "cluster", "clusterallreplicas":
 		return decodeNamespacePairDetail(NamespaceRefTableFunction, name, args, 1), true
@@ -649,17 +654,29 @@ func argAt(args []any, i int) any {
 	return args[i]
 }
 
+// inFamilyCanonical maps each exact ClickHouse-registered IN-family function
+// name to its lowercased canonical key (callableInDisplayNames' key and the
+// namespace-policy identity). The IgnoreSet implementations are callable
+// aliases of the same family. The keys are case-sensitive: ClickHouse resolves
+// these function names case-sensitively (measured on 26.2 — `in` runs, `IN`,
+// `In`, `NOTIN` and `GLOBALIN` are all unknown functions that read nothing), so
+// a wrong-case spelling must not be treated as an IN read.
+var inFamilyCanonical = map[string]string{
+	"in": "in", "notIn": "notin", "nullIn": "nullin", "notNullIn": "notnullin",
+	"globalIn": "globalin", "globalNotIn": "globalnotin", "globalNullIn": "globalnullin", "globalNotNullIn": "globalnotnullin",
+	"inIgnoreSet": "in", "notInIgnoreSet": "notin", "nullInIgnoreSet": "nullin", "notNullInIgnoreSet": "notnullin",
+	"globalInIgnoreSet": "globalin", "globalNotInIgnoreSet": "globalnotin", "globalNullInIgnoreSet": "globalnullin", "globalNotNullInIgnoreSet": "globalnotnullin",
+}
+
+// canonicalCallableInName reports whether name is a callable of the ClickHouse
+// IN family and returns its lowercased canonical key, matching the registered
+// spellings case-sensitively. name must already be the name ClickHouse
+// resolves: token text is decoded once by tokenizeRaw, and an AST function name
+// is read through functionName. It is never decoded here, so a name is decoded
+// exactly once (`\\x69n` names the unknown function \x69n, not in).
 func canonicalCallableInName(name string) (string, bool) {
-	// ClickHouse registers the IgnoreSet implementations as callable aliases of
-	// the same IN family. Normalize that implementation suffix before applying
-	// the namespace-target policy so every alias follows one recognition path.
-	canonical := strings.TrimSuffix(name, "ignoreset")
-	switch canonical {
-	case "in", "notin", "nullin", "notnullin", "globalin", "globalnotin", "globalnullin", "globalnotnullin":
-		return canonical, true
-	default:
-		return "", false
-	}
+	canonical, ok := inFamilyCanonical[name]
+	return canonical, ok
 }
 
 var callableInDisplayNames = map[string]string{
@@ -2474,7 +2491,7 @@ func walkFunctionExpression(function map[string]any, scope readSourceScope, visi
 	args, _ := function["args"].([]any)
 	// The callable IN family's second argument goes through the same shared
 	// decoder as the infix form; a parameter operand is a T2 hit.
-	if _, ok := canonicalCallableInName(strings.ToLower(nameOf(function))); ok && len(args) == 2 {
+	if _, ok := canonicalCallableInName(functionName(function)); ok && len(args) == 2 {
 		if kind, _ := decodeInOperand(args[1], false); kind == inOperandParameter && visitor.parameter != nil {
 			visitor.parameter(function)
 		}

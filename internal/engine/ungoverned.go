@@ -414,12 +414,14 @@ func opaqueKeyword(tok rawToken) bool {
 }
 
 func isCallableInName(tok rawToken) bool {
-	// A quoted name (`in`, "notIn") calls the same function as the bare
-	// spelling: ClickHouse resolves this family case-insensitively either way.
+	// A quoted name (`in`, "notIn", `\Nin`) calls the same function as the bare
+	// spelling once ClickHouse's identifier escapes are finished;
+	// canonicalCallableInName decodes tok.Text and matches the family
+	// case-sensitively, exactly like ClickHouse resolves the call.
 	if tok.TokenType != "VAR" && tok.TokenType != "QUOTED_IDENTIFIER" {
 		return false
 	}
-	_, ok := canonicalCallableInName(strings.ToLower(tok.Text))
+	_, ok := canonicalCallableInName(tok.Text)
 	return ok
 }
 

@@ -14,6 +14,20 @@ func nameOf(function map[string]any) string {
 	return name
 }
 
+// functionName returns the name ClickHouse resolves for an AST function node.
+// A function node has no source span, so the residual decode of Polyglot's
+// name (decodeIdentifierEscapes) is the best available; a name it cannot
+// decode is returned as Polyglot spelled it. Every security matcher over an
+// AST function name reads it through here, and never through token text,
+// which tokenizeRaw has already decoded exactly.
+func functionName(function map[string]any) string {
+	name := nameOf(function)
+	if decoded, ok := decodeIdentifierEscapes(name); ok {
+		return decoded
+	}
+	return name
+}
+
 // inOperandHoldsParameter reports whether an IN operand identifier (column or
 // dot node) has an Identifier parameter in its table or database part.
 func inOperandHoldsParameter(arg map[string]any) bool {

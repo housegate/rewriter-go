@@ -74,7 +74,7 @@ func (s GrantSecurable) Quoted() string {
 			return "*"
 		}
 		if needsQuoting(name) {
-			return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+			return quoteIdentifierSQL(name)
 		}
 		return name
 	}

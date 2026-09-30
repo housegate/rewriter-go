@@ -127,8 +127,12 @@ func TestOpaqueInRuleCoversEverySpelling(t *testing.T) {
 		{"not in %s", false}, {"global not in %s", false},
 		{"in(42, %s)", false}, {"IN(42, %s)", false}, {"In /* c */ (42, %s)", false}, {"in  (42, %s)", false},
 	}
+	// Only the exact ClickHouse-registered spellings are IN-family callables:
+	// ClickHouse resolves these names case-sensitively, so a wrong-case spelling
+	// (NOTIN / GlobalNotIn / NULLIN) is an unknown function that reads nothing
+	// and is covered by TestOpaqueQuotedNameDecode instead.
 	for _, name := range []string{"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn",
-		"globalNullIn", "globalNotNullIn", "inIgnoreSet", "notInIgnoreSet", "NOTIN", "GlobalNotIn", "NULLIN"} {
+		"globalNullIn", "globalNotNullIn", "inIgnoreSet", "notInIgnoreSet"} {
 		if name != "in" { // bare in( lexes as the IN keyword: the keyword-callable rows above
 			spellings = append(spellings, spelling{name + "(42, %s)", true}, spelling{name + " /* c */ (42, %s)", true})
 		}

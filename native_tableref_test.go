@@ -1452,7 +1452,7 @@ func TestTableRef_ResidualQuotedCallableIn(t *testing.T) {
 			"ALTER TABLE db1.o DELETE WHERE \"notIn\"(a, `db2.x`)",
 			"ALTER TABLE db1.o DELETE WHERE `globalNotIn`(a, `db2.x`)",
 			"ALTER TABLE db1.o DELETE WHERE `nullIn`(a, (`db2.x`))",
-			"ALTER TABLE db1.o DELETE WHERE `IN`(a, db1.p)",
+			"ALTER TABLE db1.o DELETE WHERE `\\Nin`(a, db1.p)",
 			"ALTER TABLE db1.o UPDATE b = 1 WHERE `in`(a, `db2.x`)",
 			"ALTER TABLE db1.o MODIFY TTL d + INTERVAL 1 DAY DELETE WHERE `in`(a, `db2.x`)",
 			"ALTER TABLE db1.o MODIFY COLUMN b UInt64 DEFAULT `in`(a, `db2.x`)",
@@ -1462,6 +1462,91 @@ func TestTableRef_ResidualQuotedCallableIn(t *testing.T) {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
 		}
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestTableRef_OpaqueNameDecode pins the cross-tenant-read fix (2026-09-30):
+// every opaque-text and structured matcher finishes ClickHouse's quoted-name
+// escape decode before it compares an IN-family or string-lookup name, so a
+// spelling ClickHouse resolves to a real read (`\Nin`, `i\Nn`, `in\N`,
+// `not\x49n`, `glob\x61lIn`, `\NjoinGet`) is refused exactly like its plain
+// spelling on the paths that forward the text verbatim (ALTER DELETE / UPDATE,
+// INSERT VALUES). Spellings ClickHouse treats as an unknown function that reads
+// nothing (a wrong-case `IN` / `NOTIN`, an unknown escape `\in` / `\\in` that
+// keeps its backslash) are not over-refused by the IN rule. Measured against
+// ClickHouse 26.2.
+func TestTableRef_OpaqueNameDecode(t *testing.T) {
+	var cases []tablerefCase
+	// Refused on both SI states: an escaped IN whose operand reads another table.
+	inRefuse := []string{
+		"ALTER TABLE db1.o DELETE WHERE `\\Nin`(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE `i\\Nn`(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE `in\\N`(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE \"i\\Nn\"(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE `not\\x49n`(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE `glob\\x61lIn`(a, `db2.x`)",
+		"ALTER TABLE db1.o UPDATE b = 1 WHERE `\\Nin`(a, `db2.x`)",
+		"ALTER TABLE db1.o UPDATE b = 1 WHERE `in\\N`(a, `db2.x`)",
+		"INSERT INTO db1.o VALUES (`\\Nin`(1, `db2.x`), 0, today())",
+		"INSERT INTO db1.o VALUES (`i\\Nn`(1, `db2.x`), 0, today())",
+		"INSERT INTO db1.o VALUES (`in\\N`(1, `db2.x`), 0, today())",
+	}
+	// Refused on both SI states: an escaped string-lookup whose literal target
+	// resolves through no caller database (InvalidRewriteRequest, like `joinGet`).
+	lookupRefuse := []string{
+		"ALTER TABLE db1.o DELETE WHERE `\\NjoinGet`('db2.x', 'v', 1) = 1",
+		"INSERT INTO db1.o VALUES (`\\NjoinGet`('db2.x', 'v', 1), 0, today())",
+	}
+	for _, si := range []bool{false, true} {
+		for _, sql := range inRefuse {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, sql := range lookupRefuse {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `does not resolve through the caller's databases`, wantSQL: sql})
+		}
+		// An escaped SQL-bearing / dialect setting name resolves to the real
+		// setting and is refused wherever it appears.
+		q := "SELECT * FROM db1.o SETTINGS `\\Ndialect` = 1"
+		cases = append(cases, tablerefCase{name: q, sql: q, si: si,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantSQL: q})
+		// An escaped carrier name resolves to the real table function; phys is a
+		// protected database, so it is refused (like the plain `remote`).
+		r := "SELECT count() FROM `\\Nremote`('127.0.0.1', 'phys', 'db2.x')"
+		cases = append(cases, tablerefCase{name: r, sql: r, si: si,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "protected database phys is not addressable", wantSQL: r})
+	}
+	// Unknown functions ClickHouse reads nothing from: not over-refused by the
+	// IN rule. A wrong-case or unknown-escape spelling in a SELECT is forwarded
+	// (the operand is rewritten into the caller's own namespace, never another
+	// tenant's), and in an INSERT VALUES row it is a plain unknown call.
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"SELECT * FROM db1.o WHERE `IN`(a, `db2.x`)",
+			"SELECT * FROM db1.o WHERE `NOTIN`(a, `db2.x`)",
+			"INSERT INTO db1.o VALUES (`IN`(1, db1.p), 0, today())",
+		} {
+			cases = append(cases, tablerefCase{name: "ok/" + sql, sql: sql, si: si, wantCode: pb.RewriteCode_Success})
+		}
+		// An unknown-escape spelling in a SELECT is refused by the
+		// mid-statement drop gate (#50), as on main: Polyglot regenerates the
+		// function name unquoted (\in(a, …)), which is not a token.
+		sql := "SELECT * FROM db1.o WHERE `\\in`(a, `db2.x`)"
+		cases = append(cases, tablerefCase{name: "gate/" + sql, sql: sql, si: si,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"})
+	}
+	// On the verbatim-forwarding ALTER DELETE path, an unknown spelling is a
+	// Success (no read) with storage integrity inactive; with it active the SI
+	// surface refuses the mutation for its own reasons, so this pin is SI-off.
+	for _, sql := range []string{
+		"ALTER TABLE db1.o DELETE WHERE `IN`(a, db1.p)",
+		"ALTER TABLE db1.o DELETE WHERE `NOTIN`(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE `\\in`(a, `db2.x`)",
+		"ALTER TABLE db1.o DELETE WHERE `\\\\in`(a, `db2.x`)",
+	} {
+		cases = append(cases, tablerefCase{name: "ok-alter/" + sql, sql: sql, wantCode: pb.RewriteCode_Success})
 	}
 	runTablerefCases(t, cases)
 }

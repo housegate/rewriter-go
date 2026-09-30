@@ -50,9 +50,12 @@ var sqlBearingSettings = map[string]bool{
 }
 
 // SQLBearingSetting reports whether name is one of sqlBearingSettings or any
-// other setting whose name ends in "_dialect" (case-insensitively, so a
-// spelling ClickHouse might accept is never let through). A quoted name
-// arrives already decoded.
+// other setting whose name ends in "_dialect" (case-insensitively, a deliberate
+// over-match: ClickHouse setting names are case-sensitive, so a wrong-case
+// spelling is simply an unknown setting). name must already be the name
+// ClickHouse resolves — a token text or an AST identifier, both decoded once
+// from source (so a quoted `\Ndialect` arrives as dialect) — and is not
+// decoded again here.
 func SQLBearingSetting(name string) bool {
 	lower := strings.ToLower(name)
 	return sqlBearingSettings[lower] || strings.HasSuffix(lower, "_dialect")
