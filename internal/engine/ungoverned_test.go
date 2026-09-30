@@ -45,6 +45,15 @@ func TestOpaqueTextIsUngoverned(t *testing.T) {
 		"ADD PROJECTION p(SELECT a WHERE a IN (SELECT 1))":                          true,
 		"ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN db1.p":           true,
 		"ALTER TABLE db1.o UPDATE b = 1 WHERE 1, FETCH PARTITION tuple() FROM '/x'": true,
+		// MODIFY REFRESH … DEPENDS ON names tables (amendment 2026-10-01).
+		"MODIFY REFRESH EVERY 1 HOUR":                                                      false,
+		"MODIFY REFRESH EVERY 1 HOUR APPEND":                                               false,
+		"MODIFY COMMENT 'refresh depends on'":                                              false,
+		"MODIFY REFRESH EVERY 1 HOUR DEPENDS ON db2.x":                                     true,
+		"MODIFY REFRESH AFTER 1 HOUR depends on `db2.x`":                                   true,
+		"MODIFY REFRESH EVERY 1 HOUR DEPENDS /* c */ ON db2.x":                             true,
+		"MODIFY REFRESH EVERY 1 HOUR DEPENDS ON db2.x, db1.o":                              true,
+		"ALTER TABLE db1.o UPDATE b = 1 WHERE 1, MODIFY REFRESH EVERY 1 HOUR DEPENDS ON x": true,
 	} {
 		if got := OpaqueTextIsUngoverned(e, text); got != want {
 			t.Errorf("OpaqueTextIsUngoverned(%q) = %v, want %v", text, got, want)
@@ -91,6 +100,14 @@ func TestExpressionPositionHasReads(t *testing.T) {
 		"CREATE MATERIALIZED VIEW db1.mv (a UInt8 ALIAS 1 IN db1.p) ENGINE = Memory AS SELECT 1":            true,
 		"CREATE MATERIALIZED VIEW db1.mv TO db1.o (a UInt8 MATERIALIZED (SELECT 1 FROM db1.p)) AS SELECT 1": true,
 		"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT 1 IN (1, 2)) ENGINE = Memory AS SELECT 1":         false,
+		// ENGINE arguments are an expression position (amendment 2026-10-01).
+		"CREATE TABLE db1.n (d Date, n UInt8) ENGINE = MergeTree(d, n, 8192)":                               false,
+		"CREATE TABLE db1.n (d Date, n UInt8) ENGINE = MergeTree(d, n IN (1, 2), 8192)":                     false,
+		"CREATE TABLE db1.n (k UInt8) ENGINE = Join(ANY, LEFT, k)":                                          false,
+		"CREATE TABLE db1.n (d Date, n UInt8) ENGINE = MergeTree(d, (SELECT 1 FROM db1.p), 8192)":           true,
+		"CREATE TABLE db1.n (d Date, n UInt8) ENGINE = MergeTree(d, n IN db1.p, 8192)":                      true,
+		"CREATE TABLE db1.n (n UInt8) ENGINE = ReplacingMergeTree((SELECT 1 FROM numbers(1))) ORDER BY n":   true,
+		"CREATE MATERIALIZED VIEW db1.mv ENGINE = SummingMergeTree(n IN db1.p) ORDER BY n AS SELECT 1 AS n": true,
 	} {
 		ast, err := e.ParseOne(sql)
 		if err != nil {

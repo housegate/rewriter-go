@@ -1470,7 +1470,18 @@ func walkCreateProperties(node any, scope readSourceScope, visitor readSourceVis
 			if ref, ok := decodeTableEngineNamespaceRef(property); ok && visitor.namespace != nil {
 				visitor.namespace(property, namespaceRefDetail{ref: ref})
 			}
-			return rejectUnknownReadFields(n, fields("engine_property"), "CREATE engine property")
+			if err := rejectUnknownReadFields(n, fields("engine_property"), "CREATE engine property"); err != nil {
+				return err
+			}
+			// The engine's arguments are an expression position like
+			// PARTITION BY (spec 2026-09-26 §5, amendment 2026-10-01):
+			// ClickHouse evaluates them — 25.8 runs a subquery in a deprecated
+			// *MergeTree signature at CREATE time, and 26.2 still accepts an
+			// IN-table key — so every collector must see a read there. The
+			// whole property is walked, not only the argument list, so an
+			// engine shape the decoder does not know is still seen; the
+			// engine name is an identifier and reads nothing.
+			return walkGenericExpression(property, scope, visitor)
 		}
 		if property, ok := n["dict_property"].(map[string]any); ok {
 			if ref, ok := decodeDictionarySourceNamespaceRef(property); ok && visitor.namespace != nil {

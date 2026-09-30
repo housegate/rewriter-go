@@ -57,8 +57,8 @@ func walkGenericExpression(node any, scope readSourceScope, visitor readSourceVi
 // position no rewrite pipeline reaches (spec 2026-09-26 R2): a structured
 // UPDATE / DELETE statement's assignments, predicate and other clauses, an
 // INSERT's VALUES expressions, a CREATE TABLE / CREATE VIEW column (a view's
-// typed column list is create_view.schema), constraint or non-engine storage
-// property, and a structured ALTER action.
+// typed column list is create_view.schema), constraint or storage property
+// (the ENGINE arguments included), and a structured ALTER action.
 // Only an INSERT … SELECT / CTAS / CREATE VIEW body is rewritten, so a read
 // anywhere else would be forwarded unrewritten and unreported; the caller
 // refuses the statement instead.
@@ -89,10 +89,10 @@ func ExpressionPositionHasReads(ast AST) (bool, error) {
 	case statementMap(root, NodeCreateTable) != nil:
 		body := statementMap(root, NodeCreateTable)
 		err = walkGenericExpression([]any{body["columns"], body["constraints"],
-			nonEngineProperties(body["properties"]), nonEngineProperties(body["post_table_properties"])}, scope, visitor)
+			storageExpressionProperties(body["properties"]), storageExpressionProperties(body["post_table_properties"])}, scope, visitor)
 	case statementMap(root, NodeCreateView) != nil:
 		body := statementMap(root, NodeCreateView)
-		err = walkGenericExpression([]any{body["columns"], body["schema"], nonEngineProperties(body["table_properties"])}, scope, visitor)
+		err = walkGenericExpression([]any{body["columns"], body["schema"], storageExpressionProperties(body["table_properties"])}, scope, visitor)
 	case statementMap(root, NodeAlterTable) != nil:
 		body := statementMap(root, NodeAlterTable)
 		err = walkGenericExpression([]any{body["actions"], body["partition"]}, scope, visitor)
@@ -100,18 +100,21 @@ func ExpressionPositionHasReads(ast AST) (bool, error) {
 	return found, err
 }
 
-// nonEngineProperties drops the engine and dictionary-source properties (their
-// arguments are governed by the T5 allowlist and the namespace policy) and
-// keeps every other storage property for walkGenericExpression.
-func nonEngineProperties(node any) []any {
+// storageExpressionProperties drops the dictionary-source properties (CREATE
+// DICTIONARY is refused as a class; its SOURCE carrier is the namespace
+// policy's) and keeps every other storage property for walkGenericExpression.
+// An ENGINE clause is kept: the T5 allowlist judges the engine's name, but its
+// arguments are expressions ClickHouse evaluates — on 25.8 with
+// allow_deprecated_syntax_for_merge_tree a subquery in a *MergeTree argument
+// runs at CREATE time — so a read there is refused like one in PARTITION BY
+// (spec 2026-09-26 §5, amendment 2026-10-01). A refused engine is still
+// answered by T5, which runs first.
+func storageExpressionProperties(node any) []any {
 	props, _ := node.([]any)
 	var out []any
 	for _, p := range props {
 		pm, _ := p.(map[string]any)
 		if pm == nil {
-			continue
-		}
-		if _, ok := pm["engine_property"]; ok {
 			continue
 		}
 		if _, ok := pm["dict_property"]; ok {
@@ -549,7 +552,12 @@ func opaqueActionSegments(toks []rawToken) [][]rawToken {
 }
 
 // opaqueCrossTableAction matches the partition actions that copy or move data
-// between tables or from a Keeper path.
+// between tables or from a Keeper path, and a `MODIFY REFRESH … DEPENDS ON`
+// clause (spec 2026-09-26 §5, amendment 2026-10-01): its names are tables
+// ClickHouse resolves against the view's own database — the physical one —
+// without checking that they exist (measured on 25.8 and 26.2), and the
+// opaque action text is forwarded verbatim, so a dependency on another
+// tenant's refreshable view could not be rewritten or reported.
 func opaqueCrossTableAction(segment []rawToken) bool {
 	word := func(i int, want ...string) bool {
 		if i >= len(segment) || !opaqueKeyword(segment[i]) {
@@ -561,6 +569,15 @@ func opaqueCrossTableAction(segment []rawToken) bool {
 			}
 		}
 		return false
+	}
+	refresh := false
+	for i := range segment {
+		if word(i, "REFRESH") {
+			refresh = true
+		}
+		if refresh && word(i, "DEPENDS") && word(i+1, "ON") {
+			return true
+		}
 	}
 	for i := range segment {
 		if !word(i+1, "PARTITION", "PART") {
