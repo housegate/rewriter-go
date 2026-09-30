@@ -252,3 +252,40 @@ func TestSameASTIgnoresKeyOrder(t *testing.T) {
 		t.Fatal("different values compared equal")
 	}
 }
+
+// TestRejectHashGluedTokens pins round 3, N1 at the tokenizer level: an
+// unquoted token containing '#' fails the tokenize; a '#' in a string, a
+// quoted identifier or an INSERT FORMAT payload does not.
+func TestRejectHashGluedTokens(t *testing.T) {
+	e := newTestEngine(t)
+	for _, s := range []string{
+		"RENAME TABLE# c\n`db2.x` TO db1.y",
+		"SELECT * FROM db1.o WHERE a IN# c\n`db2.x`",
+		"SELECT * FROM# c\ndb1.o",
+		"RENAME TABLE db1.a TO# c\ndb1.b",
+	} {
+		if _, err := tokenizeRaw(e, s); err == nil {
+			t.Errorf("tokenizeRaw(%q) = nil error, want a hash-glue refusal", s)
+		}
+	}
+	for _, s := range []string{
+		"SELECT 1 # comment",
+		"SELECT 1 #! comment",
+		"SELECT a #c\nFROM db1.o",
+		"SELECT `a#b`, 'c#d'",
+		"INSERT INTO db1.o FORMAT CSV\n1,#notacomment\n",
+		"SELECT * FROM db1.o WHERE s = 'a # b'",
+	} {
+		if _, err := tokenizeRaw(e, s); err != nil {
+			t.Errorf("tokenizeRaw(%q) = %v, want accepted", s, err)
+		}
+	}
+	// hashCheckLimit stops at a depth-0 FORMAT and its name, but a FORMAT nested
+	// in parentheses is not a payload boundary.
+	if got := hashCheckLimit([]rawToken{{TokenType: "SELECT"}, {TokenType: "FORMAT"}, {TokenType: "VAR", Text: "JSON"}, {TokenType: "VAR", Text: "x#y"}}); got != 3 {
+		t.Errorf("hashCheckLimit after FORMAT = %d, want 3", got)
+	}
+	if got := hashCheckLimit([]rawToken{{TokenType: "L_PAREN"}, {TokenType: "FORMAT"}, {TokenType: "R_PAREN"}, {TokenType: "VAR", Text: "z"}}); got != 4 {
+		t.Errorf("hashCheckLimit nested FORMAT = %d, want 4", got)
+	}
+}

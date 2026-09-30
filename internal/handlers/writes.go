@@ -761,6 +761,15 @@ func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.
 	if err != nil {
 		return nil, false, err
 	}
+	// Defence in depth (round 3 N1): a RENAME / EXCHANGE / ALTER … UPDATE with no
+	// table target is a command whose TABLE keyword the scanner could not find
+	// (e.g. a lexer divergence the tokenizer did not already refuse). Refuse it
+	// rather than forward a command with nothing decided.
+	if len(targets) == 0 {
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 	// Strict-decide each target IN ORDER (records accessed + table_rewrites, short-
 	// circuits on the first reject — mirrors C++ rewriteRenameSide→rewriteOneTarget).
 	// Build the splice map of the original (database, table) identity →
