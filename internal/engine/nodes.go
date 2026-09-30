@@ -1127,6 +1127,15 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			if err := walkGenericExpression(body["columns"], scope, visitor); err != nil {
 				return err
 			}
+			// A view's typed column list (`(a UInt8 DEFAULT …, INDEX …)`)
+			// is create_view.schema, not columns: its DEFAULT / MATERIALIZED
+			// / ALIAS / EPHEMERAL / TTL expressions are expression positions
+			// exactly like a CREATE TABLE column list's (spec 2026-09-26 R2).
+			// Its INDEX / PROJECTION / PRIMARY KEY items are opaque raw
+			// nodes, governed through ViewColumnListRawTexts.
+			if err := walkGenericExpression(body["schema"], scope, visitor); err != nil {
+				return err
+			}
 			return walkCreateProperties(body["table_properties"], scope, visitor)
 		case statementMap(n, NodeAlterTable) != nil:
 			// Structured ALTER actions (ADD COLUMN … DEFAULT, REPLACE PARTITION

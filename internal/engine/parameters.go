@@ -68,9 +68,10 @@ func TablePositionParameter(e Engine, ast AST, sql string) (bool, error) {
 		return true, nil
 	}
 	// An opaque Raw ALTER action (DELETE WHERE …, MODIFY TTL …, MODIFY QUERY
-	// …) is text the walker cannot see: any Identifier parameter in it is
-	// refused (spec 2026-09-26 R2).
-	texts, err := OpaqueAlterTexts(ast)
+	// …) or opaque CREATE VIEW column-list item (INDEX / PROJECTION) is text
+	// the walker cannot see: any Identifier parameter in it is refused (spec
+	// 2026-09-26 R2).
+	texts, err := OpaqueStatementTexts(e, ast, sql)
 	if err != nil {
 		return false, err
 	}
