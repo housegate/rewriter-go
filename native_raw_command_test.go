@@ -14,18 +14,27 @@ import (
 // checks tokenized that re-rendering while the original SQL was forwarded, so
 // token boundaries shifted and a target present in the original was never
 // decided.
-var rawCommandTrickyNames = []struct{ src, name string }{
-	{"`\"`", `"`},
-	{"`a\"b`", `a"b`},
-	{"\"a\"\"b\"", `a"b`},
-	{"`a``b`", "a`b"},
-	{"`a\\\\`", `a\`}, // a name ending in a backslash
-	{"`a\\N`", "a"},
-	{"`a,b`", "a,b"},
-	{"`a b`", "a b"},
-	{"`TO`", "TO"},
-	{"`AND`", "AND"},
-	{"`x TO phys.y`", "x TO phys.y"},
+//
+// renameGated marks a name Polyglot's own RENAME command text misspells (a `"`
+// re-quoted in "…" unescaped, a trailing backslash): the mid-statement drop
+// gate (#50) compares that text with the input and refuses every RENAME that
+// names it, exactly as main does. The splice from the original statement is
+// what keeps EXCHANGE and ALTER … UPDATE on such a name correct.
+var rawCommandTrickyNames = []struct {
+	src, name   string
+	renameGated bool
+}{
+	{"`\"`", `"`, true},
+	{"`a\"b`", `a"b`, true},
+	{"\"a\"\"b\"", `a"b`, true},
+	{"`a``b`", "a`b", false},
+	{"`a\\\\`", `a\`, true}, // a name ending in a backslash
+	{"`a\\N`", "a", false},
+	{"`a,b`", "a,b", false},
+	{"`a b`", "a b", false},
+	{"`TO`", "TO", false},
+	{"`AND`", "AND", false},
+	{"`x TO phys.y`", "x TO phys.y", false},
 }
 
 // TestTableRef_RawCommandTargetsDecidedFromSource pins round 2, F1: every
@@ -90,6 +99,12 @@ func TestTableRef_RawCommandTargetsDecidedFromSource(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s: %v", sql, err)
 				}
+				if n.renameGated && strings.Contains(sql, "RENAME") {
+					if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != engine.UnsupportedStatementMessage {
+						t.Errorf("si=%v %s: %s %q; want the drop gate's refusal", si, sql, resp.GetCode(), resp.GetMessage())
+					}
+					continue
+				}
 				if resp.GetCode() != pb.RewriteCode_Success {
 					t.Errorf("si=%v %s: %s %q; want Success", si, sql, resp.GetCode(), resp.GetMessage())
 					continue
@@ -124,13 +139,19 @@ func TestTableRef_Round2Pins(t *testing.T) {
 	var cases []tablerefCase
 	for _, si := range []bool{false, true} {
 		cases = append(cases,
-			// F2: a string literal is never refused for its bytes; ClickHouse
-			// accepts '\xFF' (hex '\xFF' = FF) and a non-hex '\xZZ'.
-			tablerefCase{name: "select_binary_literal", si: si, sql: "SELECT '\\xFF'", wantCode: pb.RewriteCode_Success},
-			tablerefCase{name: "values_binary_literal", si: si, sql: "INSERT INTO db1.o VALUES (1, '\\xFF')", wantCode: pb.RewriteCode_Success},
-			tablerefCase{name: "select_garbage_hex_literal", si: si, sql: "SELECT 'a\\xZZb' FROM db1.o", wantCode: pb.RewriteCode_Success},
-			// F2: ClickHouse accepts a non-UTF-8 identifier, so it is not refused.
-			tablerefCase{name: "non_utf8_identifier", si: si, sql: "SELECT * FROM db1.`\\xFF`", wantCode: pb.RewriteCode_Success},
+			// F2: the name decode never refuses a string literal for its bytes
+			// ('\xFF', a non-hex '\xZZ'), nor a non-UTF-8 identifier ClickHouse
+			// accepts. These four are refused all the same, by the
+			// mid-statement drop gate (#50), exactly as on main: Polyglot parses
+			// '\xFF' and `\xFF` as U+00FF (ÿ, two UTF-8 bytes) where ClickHouse
+			// reads the one byte 0xFF, and keeps '\xZZ' verbatim, which it
+			// regenerates escaped where ClickHouse reads the byte 0xEF. The
+			// regenerated statement names another value or table, so the
+			// refusal is correct.
+			tablerefCase{name: "select_binary_literal", si: si, sql: "SELECT '\\xFF'", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+			tablerefCase{name: "values_binary_literal", si: si, sql: "INSERT INTO db1.o VALUES (1, '\\xFF')", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+			tablerefCase{name: "select_garbage_hex_literal", si: si, sql: "SELECT 'a\\xZZb' FROM db1.o", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+			tablerefCase{name: "non_utf8_identifier", si: si, sql: "SELECT * FROM db1.`\\xFF`", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
 			// ClickHouse's unhex makes `n\x7ZtIn` notIn: refused like the plain spelling.
 			tablerefCase{name: "garbage_hex_notin_alter", si: si, sql: "ALTER TABLE db1.o DELETE WHERE `n\\x7ZtIn`(a, `db2.x`)",
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
@@ -153,8 +174,12 @@ func TestTableRef_Round2Pins(t *testing.T) {
 	// ClickHouse, not in, so the verbatim ALTER is not refused by the IN rule.
 	cases = append(cases, tablerefCase{name: "double_backslash_x69n_alter", sql: "ALTER TABLE db1.o UPDATE b = 1 WHERE `\\\\x69n`(a, `db2.x`)",
 		wantCode: pb.RewriteCode_Success, wantSQL: "ALTER TABLE phys.`db1.o` UPDATE b = 1 WHERE `\\\\x69n`(a, `db2.x`)"})
-	// F3: a RENAME source `\\x74` is the table \x74, rewritten as that table.
+	// F3: a RENAME source `\\x74` is the table \x74, not t (main read it as
+	// the Active db1.t). Polyglot's own command text collapses the doubled
+	// backslash (`\x74`, which ClickHouse reads as t), so the mid-statement
+	// drop gate (#50) refuses the statement, as main does in every mode but
+	// the SI one, where main names db1.t instead.
 	cases = append(cases, tablerefCase{name: "double_backslash_rename", sql: "RENAME TABLE db1.`\\\\x74` TO db1.p",
-		wantCode: pb.RewriteCode_Success, wantSQL: "RENAME TABLE phys.`db1.\\\\x74` TO phys.`db1.p`"})
+		wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: "RENAME TABLE db1.`\\\\x74` TO db1.p"})
 	runTablerefCases(t, cases)
 }

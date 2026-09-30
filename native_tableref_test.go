@@ -1526,11 +1526,16 @@ func TestTableRef_OpaqueNameDecode(t *testing.T) {
 		for _, sql := range []string{
 			"SELECT * FROM db1.o WHERE `IN`(a, `db2.x`)",
 			"SELECT * FROM db1.o WHERE `NOTIN`(a, `db2.x`)",
-			"SELECT * FROM db1.o WHERE `\\in`(a, `db2.x`)",
 			"INSERT INTO db1.o VALUES (`IN`(1, db1.p), 0, today())",
 		} {
 			cases = append(cases, tablerefCase{name: "ok/" + sql, sql: sql, si: si, wantCode: pb.RewriteCode_Success})
 		}
+		// An unknown-escape spelling in a SELECT is refused by the
+		// mid-statement drop gate (#50), as on main: Polyglot regenerates the
+		// function name unquoted (\in(a, …)), which is not a token.
+		sql := "SELECT * FROM db1.o WHERE `\\in`(a, `db2.x`)"
+		cases = append(cases, tablerefCase{name: "gate/" + sql, sql: sql, si: si,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"})
 	}
 	// On the verbatim-forwarding ALTER DELETE path, an unknown spelling is a
 	// Success (no read) with storage integrity inactive; with it active the SI

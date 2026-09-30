@@ -36,7 +36,8 @@ import (
 // another tenant's table). "this" is therefore replaced with the original
 // statement text, from its first token to its last token before any trailing
 // semicolon, so every command-text check and splice reads the same bytes the
-// rewriter forwards.
+// rewriter forwards. Polyglot's own text is kept beside it (polyglotThisKey)
+// for the fidelity gates, which must see what Polyglot failed to model.
 func decodeASTIdentifiers(e Engine, sql string, ast AST) (AST, error) {
 	isCommand := bytes.HasPrefix(bytes.TrimSpace(ast), []byte(`{"command"`))
 	if !isCommand && !strings.Contains(sql, "\\") {
@@ -106,6 +107,9 @@ func setCommandSourceText(e Engine, sql string, root any, changed *bool) error {
 		return err
 	}
 	if cmd["this"] != text {
+		// Keep Polyglot's own text for the refusal-only fidelity checks
+		// (PolyglotCommandSQL).
+		cmd[polyglotThisKey] = cmd["this"]
 		cmd["this"] = text
 		*changed = true
 	}
@@ -211,4 +215,40 @@ func sameAST(a, b AST) bool {
 		return false
 	}
 	return reflect.DeepEqual(x, y)
+}
+
+// polyglotThisKey holds, in a command node whose "this" setCommandSourceText
+// replaced, the text Polyglot itself produced. Polyglot's Command has no
+// such field and ignores it when an AST is handed back to it.
+const polyglotThisKey = "polyglot_this"
+
+// PolyglotCommandSQL returns the text Polyglot itself holds for a command
+// node: the "this" of its own parse, before setCommandSourceText replaced it
+// with the original statement. Every command check and splice reads the
+// original (CommandSQL), which is what the rewriter forwards; but Polyglot's
+// own text is where it shows what it failed to model. A streamed-VALUES
+// INSERT (INSERT INTO db1.o (a, b) VALUES) is kept as the command
+// INSERT INTO VALUES, table and columns gone, and a name holding `"` is
+// re-quoted without escaping. Only refusal-only fidelity checks read it: the
+// mid-statement drop gate (CheckRegenerated) and the whole-statement parse
+// gate's cut comparison (parsesAlike). A command node that was not rewritten
+// (its text was already the original, or an engine that does not ingest)
+// returns its own "this".
+func PolyglotCommandSQL(ast AST) (string, error) {
+	var head struct {
+		Command *struct {
+			This         string  `json:"this"`
+			PolyglotThis *string `json:"polyglot_this"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(ast, &head); err != nil {
+		return "", fmt.Errorf("engine: decode command: %w", err)
+	}
+	if head.Command == nil {
+		return "", fmt.Errorf("engine: AST is not a command node")
+	}
+	if head.Command.PolyglotThis != nil {
+		return *head.Command.PolyglotThis, nil
+	}
+	return head.Command.This, nil
 }

@@ -708,6 +708,20 @@ func TestTableRef_NameResolutionSettingsAreRefused(t *testing.T) {
 	runTablerefCases(t, cases)
 }
 
+// escapedRefusedSettingMsg is the refusal an escaped setting name gets once
+// quoted names are decoded as ClickHouse decodes them (#54): a name that
+// decodes to a refused setting is refused as that setting, before the
+// verbatim-spelling rule; any other escaped name keeps fallback.
+func escapedRefusedSettingMsg(sql, fallback string) string {
+	decoded := strings.ReplaceAll(sql, `\N`, "")
+	for _, n := range []string{"implicit_table_at_top_level", "enable_global_with_statement", "compatibility"} {
+		if strings.Contains(decoded, n) {
+			return "table setting " + n + " is not accepted"
+		}
+	}
+	return fallback
+}
+
 // TestTableRef_EscapedSettingNamesAreRefused pins review round 7, N11.
 // ClickHouse 26.2 / 25.8 decode `\N` in a quoted identifier to nothing, so
 // `\Nenable_global_with_statement`, "\Ncompatibility" and
@@ -732,7 +746,7 @@ func TestTableRef_EscapedSettingNamesAreRefused(t *testing.T) {
 		"SET \"max\"\"threads\" = 1",
 	} {
 		cases = append(cases,
-			tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql},
+			tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: escapedRefusedSettingMsg(sql, unsupported), wantSQL: sql},
 			tablerefCase{name: "si/" + sql, sql: sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
 	}
 	for _, si := range []bool{false, true} {
@@ -745,7 +759,7 @@ func TestTableRef_EscapedSettingNamesAreRefused(t *testing.T) {
 			"DESCRIBE TABLE db1.o SETTINGS `\\Nenable_global_with_statement` = 0",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
-				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: escapedRefusedSettingMsg(sql, unsupported), wantSQL: sql})
 		}
 		// Plain and quoted names without escapes behave as before.
 		for _, c := range []struct{ sql, want string }{
@@ -802,7 +816,7 @@ func TestTableRef_UnparseableSettingsClausesFailClosed(t *testing.T) {
 			"DESCRIBE TABLE db1.o SETTINGS",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
-				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: escapedRefusedSettingMsg(sql, unsupported), wantSQL: sql})
 		}
 		// Escape-free controls stay Success, including HouseGate's own keys.
 		for _, c := range []struct{ sql, want string }{
@@ -820,10 +834,16 @@ func TestTableRef_UnparseableSettingsClausesFailClosed(t *testing.T) {
 	}
 	// ALTER … UPDATE tail (SI off; with the SI surface active the mutation
 	// probe refuses a SETTINGS tail first, with the same message).
+	// With the SI surface inactive the decoded name (#54) is refused as the
+	// refused setting it names.
 	for _, si := range []bool{false, true} {
 		sql := "ALTER TABLE db1.o UPDATE a = 1 WHERE 1 SETTINGS SQL_a.b = 1, `\\Nenable_global_with_statement` = 0"
+		msg := unsupported
+		if !si {
+			msg = escapedRefusedSettingMsg(sql, unsupported)
+		}
 		cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
-			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg, wantSQL: sql})
 	}
 	// SET with a compound name is not a modelled SET (N15, fail closed); the
 	// session keys HouseGate uses have no dot and stay Success.
@@ -854,7 +874,7 @@ func TestTableRef_ShowSettingsSkipAndTableSettingNames(t *testing.T) {
 			"INSERT INTO db1.q (a) SETTINGS max_threads = 1 SELECT a AS show SETTINGS SQL_a.b = 1",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
-				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: escapedRefusedSettingMsg(sql, unsupported), wantSQL: sql})
 		}
 		// N17: escaped, doubled-quote and compound table-setting names.
 		for _, sql := range []string{

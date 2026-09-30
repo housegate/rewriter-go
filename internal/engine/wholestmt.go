@@ -73,8 +73,7 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 	if last <= 0 {
 		return nil // no earlier token to cut back to
 	}
-	cut, perr := e.ParseOne(sql[:toks[last].Span.Start])
-	if perr != nil || !sameAST(cut, ast) {
+	if !parsesAlike(e, sql[:toks[last].Span.Start], ast) {
 		return nil
 	}
 	stop := firstIgnoredToken(e, sql, ast, toks[:last+1])
@@ -90,8 +89,7 @@ func firstIgnoredToken(e Engine, sql string, ast AST, toks []rawToken) int {
 	lo, hi := 1, len(toks)-1
 	for lo < hi {
 		mid := (lo + hi) / 2
-		cut, err := e.ParseOne(sql[:toks[mid].Span.Start])
-		if err == nil && sameAST(cut, ast) {
+		if parsesAlike(e, sql[:toks[mid].Span.Start], ast) {
 			hi = mid
 		} else {
 			lo = mid + 1
@@ -101,6 +99,32 @@ func firstIgnoredToken(e Engine, sql string, ast AST, toks []rawToken) int {
 		hi++
 	}
 	return hi
+}
+
+// parsesAlike reports whether the cut statement cutSQL parses to the same AST
+// as the full statement, whose ParseOne result is ast. ParseOne stores the
+// original statement text in a command's "this", so a cut command's AST always
+// differs from the full one by the cut token; a command is therefore also
+// compared on the text Polyglot itself produced (PolyglotCommandSQL), which is
+// what the parse gate compared before the ingestion decode, and only that text
+// can show that Polyglot ignored the cut token.
+func parsesAlike(e Engine, cutSQL string, ast AST) bool {
+	cut, err := e.ParseOne(cutSQL)
+	if err != nil {
+		return false
+	}
+	if sameAST(cut, ast) {
+		return true
+	}
+	if kind, err := NodeKind(ast); err != nil || kind != NodeCommand {
+		return false
+	}
+	if ck, err := NodeKind(cut); err != nil || ck != NodeCommand {
+		return false
+	}
+	a, aerr := PolyglotCommandSQL(cut)
+	b, berr := PolyglotCommandSQL(ast)
+	return aerr == nil && berr == nil && a == b
 }
 
 func checkBrackets(sql string, toks []rawToken) error {

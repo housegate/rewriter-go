@@ -138,12 +138,14 @@ func TestTableRef_EscapedNamePins(t *testing.T) {
 				wantCode: pb.RewriteCode_SyntaxError, wantMsg: "is not a name ClickHouse accepts"},
 			// Low (review of c3eca8c), pinned as it behaves: Polyglot collapses
 			// the source `\\` before any decode, so `\\Nin` is read one level too
-			// far as in. In a SELECT the IN operand is then rewritten into the
-			// caller's own namespace; on the verbatim ALTER path it is refused.
-			// ClickHouse would call the unknown function \Nin (no read), so both
-			// are the safe direction.
+			// far as in. On the verbatim ALTER path it is refused. In a SELECT
+			// the mid-statement drop gate (#50) refuses it too, as main does:
+			// Polyglot regenerates the function name unquoted (\Nin(a, …)),
+			// which is not a token, so the regeneration cannot be shown to spell
+			// the input. ClickHouse would call the unknown function \Nin (no
+			// read), so both refusals are the safe direction.
 			tablerefCase{name: "low_double_backslash_select", si: si, sql: "SELECT * FROM db1.o WHERE `\\\\Nin`(a, `db2.x`)",
-				wantCode: pb.RewriteCode_Success, wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE \Nin(a, phys."db1.db2.x")`},
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
 			tablerefCase{name: "low_double_backslash_alter", si: si, sql: "ALTER TABLE db1.o DELETE WHERE `\\\\Nin`(a, `db2.x`)",
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
 		)
