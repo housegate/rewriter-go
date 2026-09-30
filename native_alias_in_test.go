@@ -834,3 +834,72 @@ func TestTableRef_UnparseableSettingsClausesFailClosed(t *testing.T) {
 	)
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_ShowSettingsSkipAndTableSettingNames pins review round 9.
+//
+// N16: only a SHOW [CHANGED] SETTINGS statement is exempt from the verbatim
+// settings scan, not a column or alias named show in front of a real SETTINGS
+// clause (`… WHERE show SETTINGS max_threads = [1]` used to skip the clause).
+//
+// N17: ClickHouse decodes an escaped name in ALTER … MODIFY / RESET SETTING
+// (`\Nstorage_policy` applies storage_policy); the forwarded raw action is
+// refused unless every setting name is verbatim-safe and simple.
+func TestTableRef_ShowSettingsSkipAndTableSettingNames(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"INSERT INTO db1.q (a) SETTINGS max_threads = 1 SELECT 1 AS show SETTINGS max_threads = (1)",
+			"INSERT INTO db1.q (a) SETTINGS max_threads = 1 SELECT show SETTINGS max_threads = [1]",
+			"INSERT INTO db1.q (a) SETTINGS max_threads = 1 SELECT a AS show SETTINGS SQL_a.b = 1",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		// N17: escaped, doubled-quote and compound table-setting names.
+		for _, sql := range []string{
+			"ALTER TABLE db1.o MODIFY SETTING `\\Nstorage_policy` = 'default'",
+			"ALTER TABLE db1.o MODIFY SETTING \"\\Ndisk\" = 'd'",
+			"ALTER TABLE db1.o MODIFY SETTING max_parts_in_total = 100, `stor\\Nage_policy` = 'default'",
+			"ALTER TABLE db1.o MODIFY SETTING `storage``policy` = 'default'",
+			"ALTER TABLE db1.o MODIFY SETTING a.storage_policy = 'default'",
+			"ALTER TABLE db1.o RESET SETTING `\\Nstorage_policy`",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantSQL: sql})
+		}
+		cases = append(cases, tablerefCase{name: "reset storage_policy", sql: "ALTER TABLE db1.o RESET SETTING storage_policy", si: si,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting storage_policy is not accepted", wantSQL: "ALTER TABLE db1.o RESET SETTING storage_policy"})
+		// Controls: plain and quoted names without escapes are unchanged.
+		for _, c := range []struct{ sql, want string }{
+			{"ALTER TABLE db1.o MODIFY SETTING max_parts_in_total = 100", `ALTER TABLE phys."db1.o" MODIFY SETTING max_parts_in_total=100`},
+			{"ALTER TABLE db1.o MODIFY SETTING `max_parts_in_total` = 100, parts_to_throw_insert = 3000", `ALTER TABLE phys."db1.o" MODIFY SETTING "max_parts_in_total" = 100, parts_to_throw_insert=3000`},
+			{"ALTER TABLE db1.o RESET SETTING max_parts_in_total", `ALTER TABLE phys."db1.o" RESET SETTING max_parts_in_total`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	// N16 on the ALTER … UPDATE tail (with the SI surface active the mutation
+	// probe refuses a SETTINGS tail first, with the same message).
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"ALTER TABLE db1.o UPDATE a = 1 WHERE show SETTINGS max_threads = [1]",
+			"ALTER TABLE db1.o UPDATE a = 1 WHERE show changed SETTINGS max_threads = [1]",
+			"ALTER TABLE db1.o UPDATE a = 1 WHERE show SETTINGS max_threads = 1, implicit_table_at_top_level",
+			"ALTER TABLE db1.o UPDATE a = 1 WHERE show SETTINGS SQL_a.b = 1",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantSQL: sql})
+		}
+	}
+	// SHOW SETTINGS followed by an assignment list is scanned like a clause
+	// (main refused these; they stay refused).
+	for _, sql := range []string{"SHOW SETTINGS max_threads = [1]", "SHOW SETTINGS max_threads = 1, implicit_table_at_top_level", "SHOW CHANGED SETTINGS SQL_a.b = 1"} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantSQL: sql})
+	}
+	// A real SHOW [CHANGED] SETTINGS statement is still not a SETTINGS clause.
+	for _, sql := range []string{"SHOW SETTINGS LIKE 'max%'", "SHOW CHANGED SETTINGS", "/* c */ SHOW CHANGED SETTINGS ILIKE 'max%'"} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_Success})
+	}
+	runTablerefCases(t, cases)
+}

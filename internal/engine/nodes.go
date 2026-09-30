@@ -417,7 +417,8 @@ func CreateTableStorage(e Engine, ast AST) (engines []StorageEngine, settings []
 				continue
 			}
 			sql, _ := raw["sql"].(string)
-			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "MODIFY SETTING") {
+			upper := strings.ToUpper(strings.TrimSpace(sql))
+			if !strings.HasPrefix(upper, "MODIFY SETTING") && !strings.HasPrefix(upper, "RESET SETTING") {
 				continue
 			}
 			keys, kerr := modifySettingKeys(e, sql)
@@ -482,13 +483,14 @@ func settingsPropertyKeys(property map[string]any) []string {
 }
 
 // modifySettingKeys extracts every setting key from an ALTER TABLE … MODIFY
-// SETTING action's raw SQL text (e.g. "MODIFY SETTING disk='d'") by
-// tokenizing (mirrors alterCrossTableTargets's precedent for raw ALTER
-// actions polyglot cannot structure): the first name token after the
-// "SETTING" keyword text is a key, and so is the first name token after every
-// subsequent top-level comma. Parenthesized argument lists inside a setting's
-// value (e.g. a function call) are skipped by paren depth so an argument's
-// own comma is never mistaken for a new setting.
+// SETTING (`k = v [, …]`) or RESET SETTING (`k [, …]`) action's raw SQL text,
+// which the rewriter forwards verbatim. It fails closed with an error (sealed
+// as UnsupportedStatement) on anything it cannot vet (review round 9, N17):
+// ClickHouse decodes an escaped name (`\Nstorage_policy` applies
+// storage_policy), so every key must be verbatim-safe (settingNameVerbatim:
+// no backslash, no doubled quote) and simple (no dotted compound name), and
+// the list must parse. A value's parenthesized argument list (`disk(…)`) is
+// skipped by depth so its commas never start a new key.
 func modifySettingKeys(e Engine, sql string) ([]string, error) {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
@@ -504,32 +506,45 @@ func modifySettingKeys(e Engine, sql string) ([]string, error) {
 	if settingIdx < 0 {
 		return nil, nil
 	}
+	reset := settingIdx > 0 && strings.EqualFold(toks[settingIdx-1].Text, "RESET")
 	var out []string
 	depth := 0
 	expectKey := true
 	for i := settingIdx + 1; i < len(toks); i++ {
 		tok := toks[i]
-		switch tok.TokenType {
-		case "L_PAREN":
-			depth++
-			continue
-		case "R_PAREN":
-			if depth > 0 {
-				depth--
+		if expectKey {
+			if !isNameTok(tok.TokenType) && !mutationProbeKeywordToken(tok) {
+				return nil, fmt.Errorf("engine: unparseable table setting list %q", sql)
 			}
-			continue
-		}
-		if depth > 0 {
-			continue
-		}
-		if expectKey && isNameTok(tok.TokenType) {
+			if !settingNameVerbatim(tok) {
+				return nil, fmt.Errorf("engine: table setting name %q needs decoding", tok.Source)
+			}
+			next := ""
+			if i+1 < len(toks) {
+				next = toks[i+1].TokenType
+			}
+			if reset && next != "" && next != "COMMA" || !reset && next != "EQ" {
+				return nil, fmt.Errorf("engine: unparseable table setting list %q", sql)
+			}
 			out = append(out, tok.Text)
 			expectKey = false
 			continue
 		}
-		if tok.TokenType == "COMMA" {
-			expectKey = true
+		switch tok.TokenType {
+		case "L_PAREN":
+			depth++
+		case "R_PAREN":
+			if depth > 0 {
+				depth--
+			}
+		case "COMMA":
+			if depth == 0 {
+				expectKey = true
+			}
 		}
+	}
+	if expectKey {
+		return nil, fmt.Errorf("engine: unparseable table setting list %q", sql)
 	}
 	return out, nil
 }

@@ -264,7 +264,7 @@ func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment,
 		if !opaqueKeyword(toks[i]) || !strings.EqualFold(toks[i].Text, "SETTINGS") {
 			continue
 		}
-		if showSettingsKeyword(toks, i) {
+		if showSettingsKeyword(toks, i) && !settingsListFollows(toks, i) {
 			continue // SHOW [CHANGED] SETTINGS [LIKE | ILIKE …]: not an assignment list
 		}
 		if i+1 < len(toks) && !settingNameToken(toks[i+1]) {
@@ -287,24 +287,46 @@ func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment,
 }
 
 // showSettingsKeyword reports whether toks[i] (a SETTINGS keyword) is the
-// object of SHOW SETTINGS / SHOW CHANGED SETTINGS.
+// object of a SHOW SETTINGS / SHOW CHANGED SETTINGS statement: SHOW must be
+// the statement's first token (comments are not tokens), optionally followed
+// by CHANGED, and SETTINGS the next one. A column or alias named show in
+// front of a real SETTINGS clause is not exempt (review round 9, N16).
 func showSettingsKeyword(toks []rawToken, i int) bool {
-	j := i - 1
-	if j >= 0 && opaqueKeyword(toks[j]) && strings.EqualFold(toks[j].Text, "CHANGED") {
-		j--
+	first := func(j int, word string) bool {
+		return opaqueKeyword(toks[j]) && strings.EqualFold(toks[j].Text, word)
 	}
-	return j >= 0 && opaqueKeyword(toks[j]) && strings.EqualFold(toks[j].Text, "SHOW")
+	switch i {
+	case 1:
+		return first(0, "SHOW")
+	case 2:
+		return first(0, "SHOW") && first(1, "CHANGED")
+	}
+	return false
 }
 
-// SettingsEscapeBackstop is a token-level backstop for N11 / N14 (review
-// rounds 7-8): it reports a quoted name followed by `=` anywhere after a
-// SETTINGS keyword in sql whose source spelling is not its plain text (a
-// backslash escape or a doubled quote). ClickHouse decodes such a name
+// settingsListFollows reports whether the SETTINGS keyword toks[i] is
+// followed by what could start an assignment list: a setting-name token that
+// is not the LIKE / ILIKE of SHOW SETTINGS LIKE. `SHOW SETTINGS max_threads =
+// [1]` is then scanned like any other clause (review round 9: main refused
+// it, and an exemption must not turn a refusal into Success).
+func settingsListFollows(toks []rawToken, i int) bool {
+	if i+1 >= len(toks) || !settingNameToken(toks[i+1]) {
+		return false
+	}
+	next := toks[i+1]
+	return !(opaqueKeyword(next) && (strings.EqualFold(next.Text, "LIKE") || strings.EqualFold(next.Text, "ILIKE")))
+}
+
+// SettingsEscapeBackstop is a token-level backstop for N11 / N14 / N17
+// (review rounds 7-9): it reports a quoted name followed by `=` anywhere
+// after a SETTINGS keyword, or the SETTING keyword of ALTER … MODIFY SETTING,
+// in sql whose source spelling is not its plain text (a backslash escape or a
+// doubled quote). ClickHouse decodes such a name
 // (`\N` to nothing), so it may be a refused setting whatever position the
 // structured checks think it is in. A tokenizer failure reports false: the
 // fail-closed paths elsewhere still apply.
 func SettingsEscapeBackstop(e Engine, sql string) bool {
-	if !strings.Contains(strings.ToUpper(sql), "SETTINGS") {
+	if !strings.Contains(strings.ToUpper(sql), "SETTING") {
 		return false
 	}
 	toks, err := tokenizeRaw(e, sql)
@@ -314,7 +336,7 @@ func SettingsEscapeBackstop(e Engine, sql string) bool {
 	seen := false
 	for i, tok := range toks {
 		if !seen {
-			seen = opaqueKeyword(tok) && strings.EqualFold(tok.Text, "SETTINGS")
+			seen = opaqueKeyword(tok) && (strings.EqualFold(tok.Text, "SETTINGS") || strings.EqualFold(tok.Text, "SETTING"))
 			continue
 		}
 		if tok.TokenType == "QUOTED_IDENTIFIER" && i+1 < len(toks) && toks[i+1].TokenType == "EQ" && !settingNameVerbatim(tok) {
