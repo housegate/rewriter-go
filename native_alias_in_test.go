@@ -771,3 +771,66 @@ func TestTableRef_EscapedSettingNamesAreRefused(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_UnparseableSettingsClausesFailClosed pins review round 8, N14.
+// ClickHouse accepts a compound (dotted) custom setting name (`SQL_a.b`,
+// `SQL_a`.b, "SQL_a"."b"). The opaque-text scanner used to skip a whole
+// SETTINGS clause whose first assignment was not `name =`, so an escaped
+// refused name after it reached ClickHouse (INSERT … (a) SETTINGS SQL_a.b = 1,
+// `\Nimplicit_table_at_top_level` = 'hg_unsafe.db1__t' SELECT a copied an
+// hg_unsafe row). Every SETTINGS clause (and SET list) a verbatim path cannot
+// fully parse into verbatim-safe (name, value) pairs is now refused; a dotted
+// setting name is not verbatim-safe (N15, a deliberate over-refusal).
+func TestTableRef_UnparseableSettingsClausesFailClosed(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			// The reviewer's reproducers.
+			"INSERT INTO db1.q (a) SETTINGS SQL_a.b = 1, `\\Nimplicit_table_at_top_level` = 'hg_unsafe.db1__t' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS `SQL_a`.b = 1, `\\Nimplicit_table_at_top_level` = 'hg_unsafe.db1__t' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS \"SQL_a\".\"b\" = 1, \"\\Nimplicit_table_at_top_level\" = 'hg_unsafe.db1__t' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS SQL_a.b = 1, `impl\\Nicit_table_at_top_level` = 'other.z' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS max_threads = 1 SELECT a SETTINGS SQL_a.b = 1, `\\Nimplicit_table_at_top_level` = 'hg_unsafe.db1__t'",
+			"DESCRIBE TABLE db1.o SETTINGS SQL_a.b = 1, `\\Nenable_global_with_statement` = 0",
+			"INSERT INTO db1.q (a) SETTINGS SQL_a.b = 1, max_threads = [1] SELECT a",
+			// A compound name alone, and later in the list.
+			"INSERT INTO db1.q (a) SETTINGS SQL_a.b = 1 SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS max_threads = 1, SQL_a . b = 1 SELECT a",
+			"DESCRIBE TABLE db1.o SETTINGS SQL_a.b.c = 1",
+			// A SETTINGS keyword that does not start a parseable list.
+			"DESCRIBE TABLE db1.o SETTINGS",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		// Escape-free controls stay Success, including HouseGate's own keys.
+		for _, c := range []struct{ sql, want string }{
+			{"INSERT INTO db1.q (a) SETTINGS max_threads = 1, SQL_x_payer = 'p' SELECT a",
+				`INSERT INTO phys."db1.q" (a) SETTINGS max_threads = 1, SQL_x_payer = 'p' SELECT a`},
+			{"INSERT INTO db1.q (a) SETTINGS SQL_sentio_driver = 1 SELECT a",
+				`INSERT INTO phys."db1.q" (a) SETTINGS SQL_sentio_driver = 1 SELECT a`},
+			// A column named settings is not a SETTINGS clause.
+			{"ALTER TABLE db1.o UPDATE settings = 1 WHERE 1", "ALTER TABLE phys.`db1.o` UPDATE settings = 1 WHERE 1"},
+			{"INSERT INTO db1.q (a) SETTINGS `max_threads` = 1 SELECT a SETTINGS max_block_size = 10",
+				`INSERT INTO phys."db1.q" (a) SETTINGS ` + "`max_threads`" + ` = 1 SELECT a SETTINGS max_block_size = 10`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	// ALTER … UPDATE tail (SI off; with the SI surface active the mutation
+	// probe refuses a SETTINGS tail first, with the same message).
+	for _, si := range []bool{false, true} {
+		sql := "ALTER TABLE db1.o UPDATE a = 1 WHERE 1 SETTINGS SQL_a.b = 1, `\\Nenable_global_with_statement` = 0"
+		cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+	}
+	// SET with a compound name is not a modelled SET (N15, fail closed); the
+	// session keys HouseGate uses have no dot and stay Success.
+	cases = append(cases,
+		tablerefCase{name: "SET SQL_a.b = 1", sql: "SET SQL_a.b = 1", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: "SET SQL_a.b = 1"},
+		tablerefCase{name: "SET SQL_x_read_mode", sql: "SET SQL_x_read_mode = 'safe', SQL_sentio_maintenance = 1", wantCode: pb.RewriteCode_Success,
+			wantSQL: "SET SQL_x_read_mode = 'safe', SQL_sentio_maintenance = 1"},
+	)
+	runTablerefCases(t, cases)
+}

@@ -339,6 +339,10 @@ func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, sql string, resp 
 			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(name)
 			return true, nil
 		}
+		if engine.SettingsEscapeBackstop(e, sql) {
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+			return true, nil
+		}
 	}
 	assignments, err := engine.QuerySettings(ast)
 	if err != nil {

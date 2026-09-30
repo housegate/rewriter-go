@@ -234,11 +234,18 @@ func plainSettingValueTokens(value []rawToken) bool {
 	return mutationProbeKeywordToken(tok)
 }
 
-// RawSettingsClauses returns the assignments of every query-level SETTINGS
-// clause in an opaque text (a command node or a Raw ALTER action): the
-// assignment list after each top-level SETTINGS keyword that is followed by
-// `name =`. ok=false when the text cannot be tokenized or a clause that
-// starts as an assignment list does not parse; the caller refuses.
+// RawSettingsClauses returns the assignments of every SETTINGS clause in an
+// opaque text (a command node, a Raw ALTER action, the query text after an
+// INSERT column list), which the rewriter forwards verbatim. It fails closed
+// (ok=false; the caller refuses) whenever it cannot fully parse a clause into
+// `name = value` pairs with simple names (review round 8, N14): the text
+// cannot be tokenized; a SETTINGS keyword followed by a name is nested in
+// parentheses or is not followed by an assignment list; a SETTINGS keyword
+// ends the text; or a clause does not parse,
+// which includes a compound (dotted) setting name such as `SQL_a.b` — a
+// valid custom setting to ClickHouse, but one the scanner cannot tell apart
+// from an escaped refused name. Only the non-assignment forms `SHOW
+// [CHANGED] SETTINGS …` are skipped.
 func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment, ok bool) {
 	toks, err := tokenizeRaw(e, text)
 	if err != nil {
@@ -254,11 +261,20 @@ func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment,
 			depth--
 			continue
 		}
-		if depth != 0 || !opaqueKeyword(toks[i]) || !strings.EqualFold(toks[i].Text, "SETTINGS") {
+		if !opaqueKeyword(toks[i]) || !strings.EqualFold(toks[i].Text, "SETTINGS") {
 			continue
 		}
-		if i+2 >= len(toks) || !settingNameToken(toks[i+1]) || toks[i+2].TokenType != "EQ" {
-			continue // not an assignment list (e.g. SHOW SETTINGS LIKE …)
+		if showSettingsKeyword(toks, i) {
+			continue // SHOW [CHANGED] SETTINGS [LIKE | ILIKE …]: not an assignment list
+		}
+		if i+1 < len(toks) && !settingNameToken(toks[i+1]) {
+			// A SETTINGS clause starts with a setting name; followed by
+			// anything else (`UPDATE settings = 1`) the word is a column,
+			// not a clause ClickHouse could apply.
+			continue
+		}
+		if depth != 0 || i+2 >= len(toks) || toks[i+2].TokenType != "EQ" {
+			return assignments, false
 		}
 		parsed, end, pok := parseSettingAssignments(toks, i+1)
 		assignments = append(assignments, parsed...)
@@ -268,6 +284,44 @@ func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment,
 		i = end - 1
 	}
 	return assignments, true
+}
+
+// showSettingsKeyword reports whether toks[i] (a SETTINGS keyword) is the
+// object of SHOW SETTINGS / SHOW CHANGED SETTINGS.
+func showSettingsKeyword(toks []rawToken, i int) bool {
+	j := i - 1
+	if j >= 0 && opaqueKeyword(toks[j]) && strings.EqualFold(toks[j].Text, "CHANGED") {
+		j--
+	}
+	return j >= 0 && opaqueKeyword(toks[j]) && strings.EqualFold(toks[j].Text, "SHOW")
+}
+
+// SettingsEscapeBackstop is a token-level backstop for N11 / N14 (review
+// rounds 7-8): it reports a quoted name followed by `=` anywhere after a
+// SETTINGS keyword in sql whose source spelling is not its plain text (a
+// backslash escape or a doubled quote). ClickHouse decodes such a name
+// (`\N` to nothing), so it may be a refused setting whatever position the
+// structured checks think it is in. A tokenizer failure reports false: the
+// fail-closed paths elsewhere still apply.
+func SettingsEscapeBackstop(e Engine, sql string) bool {
+	if !strings.Contains(strings.ToUpper(sql), "SETTINGS") {
+		return false
+	}
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return false
+	}
+	seen := false
+	for i, tok := range toks {
+		if !seen {
+			seen = opaqueKeyword(tok) && strings.EqualFold(tok.Text, "SETTINGS")
+			continue
+		}
+		if tok.TokenType == "QUOTED_IDENTIFIER" && i+1 < len(toks) && toks[i+1].TokenType == "EQ" && !settingNameVerbatim(tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // QuerySettings returns, in document order, every query-level SETTINGS
