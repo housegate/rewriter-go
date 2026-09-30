@@ -29,10 +29,24 @@ jobs:
 
   # Ordinary FFI lane: engine regressions + fidelity spike; not snapshot qualification.
   # Final paired snapshot qualification belongs to the private rewriter-grpc lane.
+  #
+  # Runs on the org's self-hosted runners: the Rust FFI build took ~16 minutes
+  # per run on GitHub-hosted runners. The built library is kept outside the
+  # workspace, keyed by the pinned polyglot submodule commit, so a run whose
+  # submodule is unchanged skips cargo entirely; a bump rebuilds incrementally
+  # in a persistent CARGO_TARGET_DIR.
   ffi:
     name: ordinary FFI and fidelity checks
-    if: github.event_name != 'pull_request' || github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    # Self-hosted runners must never execute code from forked PRs: a
+    # malicious fork could exfiltrate cached credentials, poison the shared
+    # FFI cache, or pivot into the runner's network. Skip the job when the
+    # PR's head repo is not this repo. `push` events on main are unaffected.
+    if: >-
+      (github.event_name != 'pull_request' || github.event.action != 'closed') &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,18 +55,24 @@ jobs:
         with:
           go-version: '1.22'
       - uses: dtolnay/rust-toolchain@stable
-      # Key the Rust build cache on the pinned submodule commit so bumping
-      # polyglot invalidates it.
-      - id: polyglot
-        run: echo "sha=$(git rev-parse HEAD:third_party/polyglot-src)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            third_party/polyglot-src/target
-          key: polyglot-ffi-${{ runner.os }}-${{ steps.polyglot.outputs.sha }}
-      - run: make ffi
+      - name: build or reuse the polyglot FFI library
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD:third_party/polyglot-src)"
+          root="$HOME/.cache/rewriter-go-ci/ffi"
+          lib="$root/$sha/libpolyglot_sql_ffi.so"
+          if [ -f "$lib" ]; then
+            echo "reusing FFI library built from polyglot $sha"
+          else
+            export CARGO_TARGET_DIR="$root/target"
+            (cd third_party/polyglot-src && cargo build -p polyglot-sql-ffi --profile ffi_release)
+            mkdir -p "$root/$sha"
+            tmp="$(mktemp "$root/$sha/.lib.XXXXXX")"
+            cp "$CARGO_TARGET_DIR/ffi_release/libpolyglot_sql_ffi.so" "$tmp"
+            mv -f "$tmp" "$lib"
+          fi
+          mkdir -p third_party/lib
+          cp "$lib" third_party/lib/libpolyglot_sql_ffi.so
       - run: make test-ordinary
       # Spec J D7: no test may rewrite a tracked file. characterize_test.go
       # used to overwrite internal/engine/testdata/ast-shapes/*.json on every
