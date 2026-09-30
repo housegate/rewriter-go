@@ -31,10 +31,12 @@ jobs:
   # Final paired snapshot qualification belongs to the private rewriter-grpc lane.
   #
   # Runs on the org's self-hosted runners: the Rust FFI build took ~16 minutes
-  # per run on GitHub-hosted runners. The built library is kept outside the
-  # workspace, keyed by the pinned polyglot submodule commit, so a run whose
-  # submodule is unchanged skips cargo entirely; a bump rebuilds incrementally
-  # in a persistent CARGO_TARGET_DIR.
+  # per run on GitHub-hosted runners. The job runs inside the official Rust
+  # image so it does not depend on the host's toolchain (the runners differ:
+  # one has no C linker). The built library is kept in a per-host named
+  # Docker volume, keyed by the pinned polyglot submodule commit, so a run
+  # whose submodule is unchanged skips cargo entirely; a bump rebuilds
+  # incrementally in a persistent CARGO_TARGET_DIR on the same volume.
   ffi:
     name: ordinary FFI and fidelity checks
     # Self-hosted runners must never execute code from forked PRs: a
@@ -47,24 +49,37 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 45
+    container:
+      image: rust:1-bookworm
+      volumes:
+        - rewriter-go-ci-cache:/cache
+    # Container jobs default to `sh`; the steps use bash features.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      # The workspace is owned by the runner user, not the container's root;
+      # checkout only trusts it inside its own temporary git config.
+      - name: trust the workspace for later git commands
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - uses: dtolnay/rust-toolchain@stable
       - name: build or reuse the polyglot FFI library
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD:third_party/polyglot-src)"
-          root="$HOME/.cache/rewriter-go-ci/ffi"
+          root="/cache/ffi"
           lib="$root/$sha/libpolyglot_sql_ffi.so"
           if [ -f "$lib" ]; then
-            echo "reusing FFI library built from polyglot $sha"
+            echo "FFI library cache hit for polyglot $sha"
           else
+            echo "FFI library cache miss for polyglot $sha; building"
             export CARGO_TARGET_DIR="$root/target"
+            export CARGO_HOME="/cache/cargo-home"
             (cd third_party/polyglot-src && cargo build -p polyglot-sql-ffi --profile ffi_release)
             mkdir -p "$root/$sha"
             tmp="$(mktemp "$root/$sha/.lib.XXXXXX")"
