@@ -42,7 +42,7 @@ func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
 	// Every quoted identifier leaves the engine carrying the name ClickHouse
 	// resolves (decodeASTIdentifiers), so no caller compares Polyglot's
 	// partially decoded spelling.
-	return decodeASTIdentifiers(sql, AST(ast))
+	return decodeASTIdentifiers(e, sql, AST(ast))
 }
 
 func (e *polyglotEngine) ParseGeneric(sql string) (AST, error) {
@@ -53,7 +53,7 @@ func (e *polyglotEngine) ParseGeneric(sql string) (AST, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engine: parse(generic): %w", err)
 	}
-	return decodeASTIdentifiers(sql, AST(ast))
+	return decodeASTIdentifiers(e, sql, AST(ast))
 }
 
 // Generate takes a single-statement AST (from ParseOne / RenameTables /

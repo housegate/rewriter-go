@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -1027,7 +1028,9 @@ func structuredActionRefsTable(payload map[string]any) bool {
 // the retained reject prefixes never catch one (there is no RENAME USER, no
 // EXCHANGE USER; DETACH is only table/view/dictionary). Verified via probe.
 func classifyWriteCommand(sql string) CommandSub {
-	u := strings.ToUpper(strings.TrimSpace(sql))
+	// The text is the original statement (decodeASTIdentifiers), so collapse
+	// whitespace runs before the keyword-prefix match.
+	u := strings.ToUpper(strings.Join(strings.Fields(sql), " "))
 	switch {
 	// Accepted table forms FIRST — the reject prefixes below (RENAME / EXCHANGE)
 	// would otherwise swallow them.
@@ -1143,29 +1146,28 @@ func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 // (decodeQuotedIdentifier / decodeQuotedString). Polyglot keeps several
 // ClickHouse escapes verbatim in token text (`ph\Nys` for the database
 // ClickHouse reads as phys), and opaque text is forwarded verbatim, so every
-// token matcher must see ClickHouse's value. Only a spelling with a backslash
-// differs; an undecodable one fails the tokenize, which every caller treats as
-// a refusal.
+// token matcher must see ClickHouse's value; token text is decoded here once
+// and must not be decoded again by a matcher. Only a spelling with a backslash
+// differs. An identifier ClickHouse itself rejects fails the tokenize (a
+// refusal). A string literal is never refused for its bytes, and a value that
+// is not valid UTF-8 keeps Polyglot's text (see decodedNotUTF8).
 func decodeRawTokenText(tok *rawToken, raw string) error {
 	if !strings.Contains(raw, "\\") {
 		return nil
 	}
 	switch tok.TokenType {
 	case "QUOTED_IDENTIFIER":
-		decoded, ok := decodeQuotedIdentifier(raw)
-		if !ok {
-			return fmt.Errorf("engine: tokenize: quoted identifier %s cannot be decoded as ClickHouse does", raw)
+		decoded, st := decodeQuotedIdentifier(raw)
+		switch st {
+		case decodedRejected:
+			return fmt.Errorf("engine: tokenize: quoted identifier %s is not a name ClickHouse accepts", raw)
+		case decodedExact:
+			tok.Text = decoded
 		}
-		tok.Text = decoded
 	case "STRING":
-		if !strings.HasPrefix(raw, "'") {
-			return nil // a heredoc or another literal form ClickHouse does not escape
+		if decoded, st := decodeQuotedString(raw); st == decodedExact {
+			tok.Text = decoded
 		}
-		decoded, ok := decodeQuotedString(raw)
-		if !ok {
-			return fmt.Errorf("engine: tokenize: string literal %s cannot be decoded as ClickHouse does", raw)
-		}
-		tok.Text = decoded
 	}
 	return nil
 }
@@ -1292,31 +1294,44 @@ func RawTableRefs(e Engine, ast AST) ([]TableTarget, CommandSub, error) {
 	return out, sub, nil
 }
 
-// SpliceRawTables rewrites table-name spans of a tier-C raw command. rewrites
-// maps the original reference's Identity() → new qualified name
-// (the caller is expected to pre-quote dotted/dynamic names via
-// QuoteQualified). It is keyed by identity rather than the written "db.table"
-// so a quoted `db1.o` and a qualified db1.o are spliced independently. Spans are replaced
-// right-to-left so earlier byte offsets stay valid. A ref absent from the map is
-// left untouched.
-func SpliceRawTables(e Engine, originalSQL string, rewrites map[TableTarget]string) (string, error) {
-	sub := classifyWriteCommand(originalSQL)
-	// Only the tier-C table-bearing commands have a table-name grammar to splice.
-	// Guard symmetric with RawTableRefs so a misuse on a non-rewriteable command
-	// (e.g. "USE db") can't accidentally splice a same-named identifier.
-	if sub != CmdRename && sub != CmdExchange && sub != CmdAlterUpdate {
-		return originalSQL, nil
+// ErrRawTargetUndecided reports a table-name span of a tier-C raw command that
+// the caller made no decision for; the statement must be refused.
+var ErrRawTargetUndecided = errors.New("engine: raw command table target was not decided")
+
+// SpliceRawTables rewrites the table-name spans of a tier-C raw command and
+// returns the command text to forward. It reads the same text RawTableRefs
+// reads — the command node's "this", which decodeASTIdentifiers set to the
+// original statement text — and tokenizes it the same way, so every span it
+// splices is a target RawTableRefs reported and the caller decided. decisions
+// maps each decided reference's Identity() to its replacement: a pre-quoted
+// qualified name (QuoteQualified), or "" to keep the span as written. A span
+// with no decision fails with ErrRawTargetUndecided rather than being
+// forwarded unchecked. Spans are replaced right-to-left so earlier byte
+// offsets stay valid.
+func SpliceRawTables(e Engine, ast AST, decisions map[TableTarget]string) (string, error) {
+	_, body, _, err := bodyOf(ast)
+	if err != nil {
+		return "", err
 	}
-	toks, err := tokenizeRaw(e, originalSQL)
+	raw, _ := body["this"].(string)
+	sub := classifyWriteCommand(raw)
+	// Only the tier-C table-bearing commands have a table-name grammar to splice.
+	if sub != CmdRename && sub != CmdExchange && sub != CmdAlterUpdate {
+		return raw, nil
+	}
+	toks, err := tokenizeRaw(e, raw)
 	if err != nil {
 		return "", err
 	}
 	spans := scanTableRefs(toks, sub)
-	out := originalSQL
+	out := raw
 	for i := len(spans) - 1; i >= 0; i-- {
 		s := spans[i]
-		nv, ok := rewrites[s.Target.Identity()]
+		nv, ok := decisions[s.Target.Identity()]
 		if !ok {
+			return "", fmt.Errorf("%w: %s", ErrRawTargetUndecided, raw[s.Start:s.End])
+		}
+		if nv == "" {
 			continue
 		}
 		out = out[:s.Start] + nv + out[s.End:]

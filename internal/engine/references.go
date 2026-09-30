@@ -141,21 +141,14 @@ func addOpaqueAlterDatabases(e Engine, ast AST, sql string, add func(string)) er
 // dictGet/dictHas/dictIsIn/dictGetHierarchy/dictGetChildren/dictGetDescendants
 // family, and hasColumnInTable.
 //
-// name is a Polyglot-decoded function name (a matcher passes either an AST
-// .name or a QUOTED_IDENTIFIER .Text). The ClickHouse identifier escapes are
-// finished first (decodeIdentifierEscapes), so a quoted `\NjoinGet` or
-// `joinG\x65t` — which ClickHouse resolves to the real lookup and runs — is
-// matched, not bypassed. A name that cannot be decoded fails closed as a lookup
-// so the caller refuses it; ClickHouse would fail such a statement anyway.
-// The prefix match stays case-insensitive as a deliberate over-match: ClickHouse
-// resolves these names case-sensitively, so a wrong-case spelling only reads
-// nothing.
+// name must already be the name ClickHouse resolves (token text from
+// tokenizeRaw, or an AST function name read through functionName); it is not
+// decoded again here, so `\\NjoinGet` names the unknown function \NjoinGet on
+// the token path. The prefix match stays case-insensitive as a deliberate
+// over-match: ClickHouse resolves these names case-sensitively, so a
+// wrong-case spelling only reads nothing.
 func IsStringLookup(name string) bool {
-	decoded, ok := decodeIdentifierEscapes(name)
-	if !ok {
-		return true
-	}
-	lower := strings.ToLower(decoded)
+	lower := strings.ToLower(name)
 	switch lower {
 	case "joinget", "joingetornull":
 		return true
@@ -179,7 +172,7 @@ func collectStringLookupDatabases(node any, add func(string)) {
 	switch n := node.(type) {
 	case map[string]any:
 		if fn, ok := n["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
+			name := functionName(fn)
 			args, _ := fn["args"].([]any)
 			if IsStringLookup(name) {
 				if db, ok := stringLookupArgDatabase(name, args); ok {
@@ -402,7 +395,7 @@ func collectStringLookupOccurrences(root any) []stringLookupOccurrence {
 	// choosing per-child which single field elevates to insideSelectBody=true.
 	checkAndDescend := func(n map[string]any, insideSelectBody bool, elevatedField string) {
 		if fn, ok := n["function"].(map[string]any); ok {
-			name, _ := fn["name"].(string)
+			name := functionName(fn)
 			args, _ := fn["args"].([]any)
 			if IsStringLookup(name) && len(args) > 0 {
 				call := decodeStringLookupCall(name, args)

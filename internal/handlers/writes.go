@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/housegate/rewriter-go/internal/engine"
@@ -766,17 +767,27 @@ func dispatchRawTables(e engine.Engine, ast engine.AST, sql string, info engine.
 	// QUOTED new qualified name. It is keyed by identity, not by the written
 	// "db.table", so a quoted `db1.o` and a qualified db1.o each keep their own
 	// physical name.
-	rewrites := map[engine.TableTarget]string{}
+	// Every target gets an entry: its quoted new name, or "" to keep it as
+	// written. SpliceRawTables reads the same command text and refuses a span
+	// that has no entry, so no target reaches ClickHouse undecided.
+	decisions := map[engine.TableTarget]string{}
 	for _, tt := range targets {
 		d, ok := decideWriteTarget(tt, kind, sel, resp)
 		if !ok {
 			return resp, true, nil // reject populated
 		}
 		if d.Action == engine.ActionRename {
-			rewrites[tt.Identity()] = engine.QuoteQualified(d.NewDB, d.NewTable)
+			decisions[tt.Identity()] = engine.QuoteQualified(d.NewDB, d.NewTable)
+		} else if _, seen := decisions[tt.Identity()]; !seen {
+			decisions[tt.Identity()] = ""
 		}
 	}
-	out, err := engine.SpliceRawTables(e, sql, rewrites)
+	out, err := engine.SpliceRawTables(e, ast, decisions)
+	if errors.Is(err, engine.ErrRawTargetUndecided) {
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 	if err != nil {
 		return nil, false, err
 	}

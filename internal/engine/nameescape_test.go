@@ -5,31 +5,26 @@ import (
 	"testing"
 )
 
-// TestDecodeIdentifierEscapes pins the residual ClickHouse identifier decode
-// this package applies on top of Polyglot's tokenizer output. Inputs are
-// Polyglot-decoded names (quotes stripped, \xHH / doubled quotes / “…” already
-// resolved by Polyglot), so the cases exercise the escapes Polyglot leaves:
-// \N and the backslash escapes.
+// TestDecodeIdentifierEscapes pins the residual ClickHouse decode applied to an
+// AST function name (Polyglot-decoded, no span): \N and the backslash escapes
+// Polyglot leaves, with ClickHouse's unhex for \x.
 func TestDecodeIdentifierEscapes(t *testing.T) {
 	for _, tc := range []struct {
-		in   string
-		want string
-		ok   bool
+		in, want string
+		ok       bool
 	}{
 		{"in", "in", true},
-		{`\Nin`, "in", true}, // \N decodes to nothing
+		{`\Nin`, "in", true},
 		{`i\Nn`, "in", true},
 		{`in\N`, "in", true},
-		{`\N\Nin`, "in", true},
 		{`\in`, `\in`, true},  // unknown escape keeps its backslash
-		{`\\in`, `\in`, true}, // Polyglot already collapsed the source \\ to one \; \i stays unknown
-		{`joinGet`, "joinGet", true},
+		{`\\in`, `\in`, true}, // \\ is one backslash
 		{`\NjoinGet`, "joinGet", true},
-		{`joinGe\Nt`, "joinGet", true},
-		{`\x69n`, "in", true},  // defensive: a \xHH left in the text still decodes
-		{`\xZZ`, `\xZZ`, true}, // not two hex digits: unknown escape, kept
-		{`\x6`, `\x6`, true},   // truncated \x: kept, not an error
-		{`ab\`, "", false},     // trailing lone backslash: cannot decode
+		{`\x69n`, "in", true},
+		{`n\x7ZtIn`, "notIn", true}, // ClickHouse unhex: 7*16 + (-1) = 'o'
+		{`\xZZ`, "\xef", true},      // (-1)*16 + (-1)
+		{`\x6`, "", false},          // fewer than two bytes after \x
+		{`ab\`, "", false},          // trailing lone backslash
 	} {
 		got, ok := decodeIdentifierEscapes(tc.in)
 		if ok != tc.ok || (ok && got != tc.want) {
@@ -38,113 +33,14 @@ func TestDecodeIdentifierEscapes(t *testing.T) {
 	}
 }
 
-// TestCanonicalCallableInName pins the IN-family recognition: every
-// escape-spelling that ClickHouse 26.2 resolves to an IN-family function is
-// recognised, and every spelling ClickHouse treats as an unknown function
-// (wrong case, or a name that decodes to something else) is not.
-func TestCanonicalCallableInName(t *testing.T) {
-	recognised := []string{
-		"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn",
-		"globalNullIn", "globalNotNullIn", "inIgnoreSet", "globalNotNullInIgnoreSet",
-		`\Nin`, `i\Nn`, `in\N`, // \N spellings resolve to in
-		`not\x49n`,    // -> notIn
-		`glob\x61lIn`, // -> globalIn
-	}
-	for _, n := range recognised {
-		if _, ok := canonicalCallableInName(n); !ok {
-			t.Errorf("canonicalCallableInName(%q) = false, want recognised", n)
-		}
-	}
-	// Case-sensitive: ClickHouse runs `in` but not `IN` / `In` / `NOTIN`.
-	unknown := []string{"IN", "In", "NOTIN", "NotIn", "GLOBALIN", `\in`, `\\in`, `i\n`, "notin", "isNull"}
-	for _, n := range unknown {
-		if _, ok := canonicalCallableInName(n); ok {
-			t.Errorf("canonicalCallableInName(%q) = true, want unknown", n)
-		}
-	}
-}
-
-// TestIsStringLookupDecodesEscapes pins that an escaped lookup name is still
-// recognised (so its target is governed / refused), while an unknown spelling
-// is not misread as a lookup.
-func TestIsStringLookupDecodesEscapes(t *testing.T) {
-	for _, n := range []string{"joinGet", `\NjoinGet`, `joinGe\Nt`, "dictGetUInt64", `\NdictGetString`, "hasColumnInTable"} {
-		if !IsStringLookup(n) {
-			t.Errorf("IsStringLookup(%q) = false, want true", n)
-		}
-	}
-	for _, n := range []string{`\join`, "notALookup", `\NnotALookup`} {
-		if IsStringLookup(n) {
-			t.Errorf("IsStringLookup(%q) = true, want false", n)
-		}
-	}
-}
-
-// TestSQLBearingSettingDecodesEscapes pins that an escaped dialect / SQL-bearing
-// setting name is still refused.
-func TestSQLBearingSettingDecodesEscapes(t *testing.T) {
-	for _, n := range []string{"dialect", `\Ndialect`, "polyglot_dialect", `additional_table_filters`, `\Nadditional_result_filter`} {
-		if !SQLBearingSetting(n) {
-			t.Errorf("SQLBearingSetting(%q) = false, want true", n)
-		}
-	}
-	for _, n := range []string{"max_threads", `\Nmax_threads`, "log_comment"} {
-		if SQLBearingSetting(n) {
-			t.Errorf("SQLBearingSetting(%q) = true, want false", n)
-		}
-	}
-}
-
-// TestOpaqueQuotedNameDecode drives the opaque-text scanners with the escape
-// spellings the ALTER / INSERT paths forward verbatim: an escaped IN-family or
-// lookup name whose operand reads another table must be refused, exactly like
-// its plain spelling; a wrong-case or unknown spelling must not be over-refused
-// by the IN rule (its own operand is a bare identifier that reads nothing).
-func TestOpaqueQuotedNameDecode(t *testing.T) {
-	e := newTestEngine(t)
-	// ungoverned=true: the escaped name is an IN that reads a table. (String
-	// lookups in an ALTER action are refused by the T6 lookup scan through
-	// lookupCallsInRawTokens / IsStringLookup, not OpaqueTextIsUngoverned; see
-	// TestIsStringLookupDecodesEscapes and TestTableRef_OpaqueNameDecode.)
-	refuse := []string{
-		"DELETE WHERE `\\Nin`(a, `db2.x`)",
-		"DELETE WHERE `i\\Nn`(a, `db2.x`)",
-		"DELETE WHERE `in\\N`(a, `db2.x`)",
-		"DELETE WHERE \"i\\Nn\"(a, `db2.x`)",
-		"DELETE WHERE `not\\x49n`(a, `db2.x`)",
-		"DELETE WHERE `glob\\x61lIn`(a, `db2.x`)",
-	}
-	for _, s := range refuse {
-		if !OpaqueTextIsUngoverned(e, s) {
-			t.Errorf("OpaqueTextIsUngoverned(%q) = false, want true", s)
-		}
-	}
-	// ungoverned=false: ClickHouse reads nothing from these (unknown function).
-	pass := []string{
-		"DELETE WHERE `\\in`(a, `db2.x`)",
-		"DELETE WHERE \"\\in\"(a, `db2.x`)",
-		"DELETE WHERE `\\\\in`(a, `db2.x`)",
-		"DELETE WHERE `IN`(a, `db2.x`)",
-		"DELETE WHERE `NOTIN`(a, `db2.x`)",
-	}
-	for _, s := range pass {
-		if OpaqueTextIsUngoverned(e, s) {
-			t.Errorf("OpaqueTextIsUngoverned(%q) = true, want false", s)
-		}
-	}
-	// The same for an opaque INSERT query text.
-	if !OpaqueInsertQueryIsUngoverned(e, "SETTINGS x=1 VALUES (`\\NjoinGet`('db2.x','v',1))") {
-		t.Errorf("OpaqueInsertQueryIsUngoverned escaped joinGet = false, want true")
-	}
-}
-
 // TestClickHouseEscapeFidelity pins the escape table measured on ClickHouse
 // 26.2 (DESCRIBE (SELECT 1 AS `…`)): \/ and \= drop the backslash, \e is ESC,
-// \: and unknown letters keep it.
+// \: and unknown letters keep it, \x takes any two bytes.
 func TestClickHouseEscapeFidelity(t *testing.T) {
 	for in, want := range map[string]string{
 		`a\/b`: "a/b", `a\=b`: "a=b", `a\eb`: "a\x1bb", `a\:b`: `a\:b`, `a\qb`: `a\qb`,
 		`a\'b`: "a'b", `a\"b`: `a"b`, "a\\`b": "a`b", `a\\b`: `a\b`, `a\tb`: "a\tb", `a\0b`: "a\x00b",
+		`\x6Z`: "_", `\x7Z`: "o", `\xZ0`: "\xf0", `\x0Z`: "\xff", `\xg1`: "\xf1", `\x-1`: "\xf1",
 	} {
 		if got, ok := decodeIdentifierEscapes(in); !ok || got != want {
 			t.Errorf("decodeIdentifierEscapes(%q) = %q, %v; want %q", in, got, ok, want)
@@ -152,40 +48,127 @@ func TestClickHouseEscapeFidelity(t *testing.T) {
 	}
 }
 
-// TestDecodeQuotedIdentifier decodes source spellings exactly as ClickHouse's
-// ParserIdentifier does, and refuses what ClickHouse cannot read as a name.
+// TestCanonicalCallableInName: the IN family is matched case-sensitively on a
+// name that is already decoded; nothing is decoded here.
+func TestCanonicalCallableInName(t *testing.T) {
+	for _, n := range []string{"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn",
+		"globalNullIn", "globalNotNullIn", "inIgnoreSet", "globalNotNullInIgnoreSet"} {
+		if _, ok := canonicalCallableInName(n); !ok {
+			t.Errorf("canonicalCallableInName(%q) = false", n)
+		}
+	}
+	for _, n := range []string{"IN", "In", "NOTIN", "NotIn", "GLOBALIN", `\in`, `\Nin`, `\x69n`, "notin", "isNull"} {
+		if _, ok := canonicalCallableInName(n); ok {
+			t.Errorf("canonicalCallableInName(%q) = true, want unknown", n)
+		}
+	}
+	// An AST function name is decoded once, by functionName.
+	for n, want := range map[string]bool{`\Nin`: true, `i\Nn`: true, `n\x7ZtIn`: true, `\in`: false, "IN": false} {
+		_, ok := canonicalCallableInName(functionName(map[string]any{"name": n}))
+		if ok != want {
+			t.Errorf("functionName(%q) IN-family = %v, want %v", n, ok, want)
+		}
+	}
+}
+
+// TestNameMatchersDoNotDecode: IsStringLookup and SQLBearingSetting compare the
+// decoded name they are given (round 2, F3).
+func TestNameMatchersDoNotDecode(t *testing.T) {
+	for _, n := range []string{"joinGet", "dictGetUInt64", "hasColumnInTable", "JOINGET"} {
+		if !IsStringLookup(n) {
+			t.Errorf("IsStringLookup(%q) = false", n)
+		}
+	}
+	for _, n := range []string{`\NjoinGet`, `\join`, "notALookup"} {
+		if IsStringLookup(n) {
+			t.Errorf("IsStringLookup(%q) = true", n)
+		}
+	}
+	for _, n := range []string{"dialect", "polyglot_dialect", "additional_table_filters", "Dialect"} {
+		if !SQLBearingSetting(n) {
+			t.Errorf("SQLBearingSetting(%q) = false", n)
+		}
+	}
+	for _, n := range []string{`\Ndialect`, "max_threads"} {
+		if SQLBearingSetting(n) {
+			t.Errorf("SQLBearingSetting(%q) = true", n)
+		}
+	}
+}
+
+// TestOpaqueQuotedNameDecode drives the opaque-text scanners: token text is
+// decoded once, exactly as ClickHouse reads the forwarded text.
+func TestOpaqueQuotedNameDecode(t *testing.T) {
+	e := newTestEngine(t)
+	for _, s := range []string{
+		"DELETE WHERE `\\Nin`(a, `db2.x`)",
+		"DELETE WHERE `i\\Nn`(a, `db2.x`)",
+		"DELETE WHERE `in\\N`(a, `db2.x`)",
+		"DELETE WHERE \"i\\Nn\"(a, `db2.x`)",
+		"DELETE WHERE `not\\x49n`(a, `db2.x`)",
+		"DELETE WHERE `glob\\x61lIn`(a, `db2.x`)",
+		"DELETE WHERE `n\\x7ZtIn`(a, `db2.x`)",
+	} {
+		if !OpaqueTextIsUngoverned(e, s) {
+			t.Errorf("OpaqueTextIsUngoverned(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{
+		"DELETE WHERE `\\in`(a, `db2.x`)",
+		"DELETE WHERE \"\\in\"(a, `db2.x`)",
+		"DELETE WHERE `\\\\in`(a, `db2.x`)",
+		"DELETE WHERE `\\\\x69n`(a, `db2.x`)", // \x69n: an unknown function (F3)
+		"DELETE WHERE `\\\\Nin`(a, `db2.x`)",  // \Nin: an unknown function
+		"DELETE WHERE `IN`(a, `db2.x`)",
+		"DELETE WHERE `NOTIN`(a, `db2.x`)",
+	} {
+		if OpaqueTextIsUngoverned(e, s) {
+			t.Errorf("OpaqueTextIsUngoverned(%q) = true, want false", s)
+		}
+	}
+	if !OpaqueInsertQueryIsUngoverned(e, "SETTINGS x=1 VALUES (`\\NjoinGet`('db2.x','v',1))") {
+		t.Errorf("OpaqueInsertQueryIsUngoverned escaped joinGet = false, want true")
+	}
+}
+
+// TestDecodeQuotedIdentifier decodes source spellings as ClickHouse's
+// ParserIdentifier does and classifies what ClickHouse rejects.
 func TestDecodeQuotedIdentifier(t *testing.T) {
 	for _, tc := range []struct {
 		raw, want string
-		ok        bool
+		st        quotedDecode
 	}{
-		{"`ph\\Nys`", "phys", true},
-		{`"ph\Nys"`, "phys", true},
-		{"`hg_\\Nsafe`", "hg_safe", true},
-		{"`t\\N`", "t", true},
-		{"`t\\\\N`", `t\N`, true}, // an escaped backslash is a real one
-		{"`\\x74`", "t", true},
-		{"`a``b`", "a`b", true},
-		{`"a""b"`, `a"b`, true},
-		{"`a\\`b`", "a`b", true},
-		{"“in”", "in", true},
-		{"“a\\Nb”", `a\Nb`, true},  // English quotes take no escapes
-		{"`\\N`", "", false},       // empty identifier
-		{"`ph\\xZZys`", "", false}, // \x without two hex digits
-		{"`ab\\x6`", "", false},    // \x swallowing the closing quote
-		{"`\\xff`", "", false},     // not UTF-8
-		{"`abc", "", false},
-		{"abc", "", false},
+		{"`ph\\Nys`", "phys", decodedExact},
+		{`"ph\Nys"`, "phys", decodedExact},
+		{"`hg_\\Nsafe`", "hg_safe", decodedExact},
+		{"`hg\\x6Zsafe`", "hg_safe", decodedExact}, // non-hex \x: ClickHouse unhex
+		{"`t\\N`", "t", decodedExact},
+		{"`t\\\\N`", `t\N`, decodedExact},
+		{"`\\x74`", "t", decodedExact},
+		{"`a``b`", "a`b", decodedExact},
+		{`"a""b"`, `a"b`, decodedExact},
+		{"`a\\`b`", "a`b", decodedExact},
+		{"“in”", "in", decodedExact},
+		{"“a\\Nb”", `a\Nb`, decodedExact},
+		{"`\\xff`", "\xff", decodedNotUTF8}, // ClickHouse accepts it
+		{"`a\\xZZb`", "a\xefb", decodedNotUTF8},
+		{"`\\N`", "", decodedRejected},    // empty identifier
+		{"`ab\\x6`", "", decodedRejected}, // \x swallows the closing quote
+		{"`abc", "", decodedRejected},
+		{"abc", "", decodedRejected},
 	} {
-		got, ok := decodeQuotedIdentifier(tc.raw)
-		if ok != tc.ok || (ok && got != tc.want) {
-			t.Errorf("decodeQuotedIdentifier(%q) = %q, %v; want %q, %v", tc.raw, got, ok, tc.want, tc.ok)
+		got, st := decodeQuotedIdentifier(tc.raw)
+		if st != tc.st || (st != decodedRejected && got != tc.want) {
+			t.Errorf("decodeQuotedIdentifier(%q) = %q, %d; want %q, %d", tc.raw, got, st, tc.want, tc.st)
 		}
 	}
 	for raw, want := range map[string]string{`'ph\Nys'`: "phys", `'a''b'`: "a'b", `'a\\b'`: `a\b`, `'x\x41'`: "xA"} {
-		if got, ok := decodeQuotedString(raw); !ok || got != want {
-			t.Errorf("decodeQuotedString(%q) = %q, %v; want %q", raw, got, ok, want)
+		if got, st := decodeQuotedString(raw); st != decodedExact || got != want {
+			t.Errorf("decodeQuotedString(%q) = %q, %d; want %q", raw, got, st, want)
 		}
+	}
+	if _, st := decodeQuotedString(`'\xFF'`); st != decodedNotUTF8 {
+		t.Errorf("decodeQuotedString('\\xFF') = %d, want decodedNotUTF8", st)
 	}
 }
 
@@ -194,15 +177,13 @@ func TestDecodeQuotedIdentifier(t *testing.T) {
 func TestQuoteIdentifierSQLRoundTrips(t *testing.T) {
 	for _, name := range []string{"db1.t", `t\N`, "a`b", `a\x41`, "tab\there", "esc\x1bape", "nul\x00", "é"} {
 		quoted := quoteIdentifierSQL(name)
-		if got, ok := decodeQuotedIdentifier(quoted); !ok || got != name {
-			t.Errorf("quoteIdentifierSQL(%q) = %s decodes to %q, %v", name, quoted, got, ok)
+		if got, st := decodeQuotedIdentifier(quoted); st != decodedExact || got != name {
+			t.Errorf("quoteIdentifierSQL(%q) = %s decodes to %q, %d", name, quoted, got, st)
 		}
 	}
 }
 
-// TestDecodeASTIdentifiersIngestion checks the ParseOne ingestion: escaped
-// names arrive decoded, a statement without a backslash keeps Polyglot's exact
-// bytes, and an undecodable name fails the parse.
+// TestDecodeASTIdentifiersIngestion checks the ParseOne ingestion.
 func TestDecodeASTIdentifiersIngestion(t *testing.T) {
 	e := newTestEngine(t)
 	ast, err := e.ParseOne("SELECT `_hg_\\Nrow_id` FROM `db\\N1`.`t\\N`")
@@ -216,22 +197,48 @@ func TestDecodeASTIdentifiersIngestion(t *testing.T) {
 	if !strings.Contains(string(ast), `"_hg_row_id"`) {
 		t.Fatalf("column not decoded: %s", ast)
 	}
+	// A quote-lost node (Polyglot marks an EXCEPT list quoted: false) is
+	// decoded from its span too, and re-marked quoted (round 2, F4).
+	ex, err := e.ParseOne("SELECT * EXCEPT (`_hg_\\Nrow_id`) FROM db1.t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ex), `"_hg_row_id"`) || strings.Contains(string(ex), `\\N`) {
+		t.Fatalf("EXCEPT list not decoded: %s", ex)
+	}
 	if _, err := e.ParseOne("SELECT * FROM `\\N`.x"); err == nil {
 		t.Fatal("empty decoded identifier parsed")
 	}
-	// No backslash: byte-identical to the fast path's input.
+	// ClickHouse accepts a non-UTF-8 name: not refused, Polyglot's name kept.
+	if _, err := e.ParseOne("SELECT * FROM db1.`\\xFF`"); err != nil {
+		t.Fatalf("non-UTF-8 identifier refused: %v", err)
+	}
+	// No backslash and not a command: byte-identical to Polyglot's AST.
 	plain, _ := e.ParseOne("SELECT * FROM db1.t")
-	again, _ := decodeASTIdentifiers("SELECT * FROM db1.t", plain)
+	again, _ := decodeASTIdentifiers(e, "SELECT * FROM db1.t", plain)
 	if string(plain) != string(again) {
 		t.Fatal("fast path changed the AST")
 	}
-	// Tokens carry the decoded text too.
+	// A command node carries the original statement text (round 2, F1).
+	cmd, err := e.ParseOne("/* c */ RENAME TABLE db1.`\"` TO db1.y ;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cmd), "RENAME TABLE db1.`\\\"` TO db1.y\"") {
+		t.Fatalf("command text not the original: %s", cmd)
+	}
+	// Tokens carry the decoded text too; strings never fail for their bytes.
 	toks, err := tokenizeRaw(e, "DELETE WHERE `ph\\Nys`.x = 'a\\Nb'")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if toks[2].Text != "phys" || toks[len(toks)-1].Text != "ab" {
 		t.Fatalf("tokens = %+v", toks)
+	}
+	for _, s := range []string{"SELECT '\\xFF'", "SELECT 'a\\xZZb'", "SELECT 'a\\x6'"} {
+		if _, err := tokenizeRaw(e, s); err != nil {
+			t.Errorf("tokenizeRaw(%q): %v", s, err)
+		}
 	}
 }
 

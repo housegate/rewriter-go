@@ -555,18 +555,17 @@ func decodeNamespaceFunctionRef(fn map[string]any) (NamespaceRef, bool) {
 }
 
 func decodeNamespaceFunctionRefDetail(fn map[string]any) (namespaceRefDetail, bool) {
-	name, _ := fn["name"].(string)
+	name := functionName(fn)
 	args, _ := fn["args"].([]any)
 	if canonical, ok := canonicalCallableInName(name); ok {
 		return decodeCallableInNamespaceRefDetail(canonical, args)
 	}
 	// The carrier table functions below are matched case-insensitively (a
 	// deliberate over-match: ClickHouse resolves them case-sensitively, so a
-	// wrong-case spelling reads nothing) but the ClickHouse identifier escapes
-	// must still be finished, so a quoted `\Nremote` / `rem\x6fte` is recognised
-	// as the carrier it runs.
-	decodedName, _ := decodeIdentifierEscapes(name)
-	lower := strings.ToLower(decodedName)
+	// wrong-case spelling reads nothing); functionName has finished the
+	// ClickHouse escapes, so a quoted `\Nremote` is recognised as the carrier
+	// it runs.
+	lower := strings.ToLower(name)
 	switch lower {
 	case "remote", "remotesecure", "cluster", "clusterallreplicas":
 		return decodeNamespacePairDetail(NamespaceRefTableFunction, name, args, 1), true
@@ -669,20 +668,14 @@ var inFamilyCanonical = map[string]string{
 	"globalInIgnoreSet": "globalin", "globalNotInIgnoreSet": "globalnotin", "globalNullInIgnoreSet": "globalnullin", "globalNotNullInIgnoreSet": "globalnotnullin",
 }
 
-// canonicalCallableInName reports whether name (a Polyglot-decoded function
-// name, quoted or bare) is a callable of the ClickHouse IN family and returns
-// its lowercased canonical key. It first finishes the ClickHouse identifier
-// decode (decodeIdentifierEscapes) so a quoted spelling such as `\Nin` or
-// `not\x49n` is compared as the name ClickHouse runs, then matches
-// case-sensitively against the registered set. A name that cannot be decoded is
-// not a recognised IN callable (its statement fails in ClickHouse before any
-// read); the opaque-text scanners fail closed on the tokenize error instead.
+// canonicalCallableInName reports whether name is a callable of the ClickHouse
+// IN family and returns its lowercased canonical key, matching the registered
+// spellings case-sensitively. name must already be the name ClickHouse
+// resolves: token text is decoded once by tokenizeRaw, and an AST function name
+// is read through functionName. It is never decoded here, so a name is decoded
+// exactly once (`\\x69n` names the unknown function \x69n, not in).
 func canonicalCallableInName(name string) (string, bool) {
-	decoded, ok := decodeIdentifierEscapes(name)
-	if !ok {
-		return "", false
-	}
-	canonical, ok := inFamilyCanonical[decoded]
+	canonical, ok := inFamilyCanonical[name]
 	return canonical, ok
 }
 
@@ -2498,7 +2491,7 @@ func walkFunctionExpression(function map[string]any, scope readSourceScope, visi
 	args, _ := function["args"].([]any)
 	// The callable IN family's second argument goes through the same shared
 	// decoder as the infix form; a parameter operand is a T2 hit.
-	if _, ok := canonicalCallableInName(nameOf(function)); ok && len(args) == 2 {
+	if _, ok := canonicalCallableInName(functionName(function)); ok && len(args) == 2 {
 		if kind, _ := decodeInOperand(args[1], false); kind == inOperandParameter && visitor.parameter != nil {
 			visitor.parameter(function)
 		}

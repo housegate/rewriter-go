@@ -56,6 +56,8 @@ var escapedNameTwins = []escapedNameTwin{
 	// Reserved row-id column on the Active table.
 	{"SELECT `_hg_row_id` FROM db1.t", "SELECT `_hg_\\Nrow_id` FROM db1.t"},
 	{"SELECT a FROM db1.t WHERE `_hg_row_id` = ''", "SELECT a FROM db1.t WHERE `\\N_hg_row_id` = ''"},
+	// F4 (round 2): Polyglot marks an EXCEPT list quoted: false.
+	{"SELECT * EXCEPT (`_hg_row_id`) FROM db1.t", "SELECT * EXCEPT (`_hg_\\Nrow_id`) FROM db1.t"},
 	// An ordinary tenant table and its twin resolve through database_map the same way.
 	{"SELECT * FROM db1.o", "SELECT * FROM `db\\N1`.`o\\N`"},
 	{"ALTER TABLE db1.o UPDATE b = 1 WHERE 1", "ALTER TABLE db1.`o\\N` UPDATE b = 1 WHERE 1"},
@@ -98,7 +100,11 @@ func TestTableRef_EscapedNamesAnswerLikePlain(t *testing.T) {
 					}
 					return
 				}
-				if esc.GetSqlAfterRewrite() != plain.GetSqlAfterRewrite() {
+				// Identifier double quotes are compared away: the decoded twin of a
+				// quote-lost node (an EXCEPT list) is re-emitted quoted, the plain
+				// one bare, and no twin name contains a double quote.
+				unq := func(s string) string { return strings.ReplaceAll(s, `"`, "") }
+				if unq(esc.GetSqlAfterRewrite()) != unq(plain.GetSqlAfterRewrite()) {
 					t.Fatalf("escaped sql = %q, plain sql = %q", esc.GetSqlAfterRewrite(), plain.GetSqlAfterRewrite())
 				}
 			})
@@ -124,11 +130,12 @@ func TestTableRef_EscapedNamePins(t *testing.T) {
 			// emitted as the decoded name.
 			tablerefCase{name: "alias_fidelity", si: si, sql: "SELECT 1 AS `a\\/b`, 2 AS `c\\Nd`, 3 AS `e\\:f` FROM db1.o",
 				wantCode: pb.RewriteCode_Success, wantSQL: `SELECT 1 AS "a/b", 2 AS "cd", 3 AS "e\\:f" FROM phys."db1.o" "db1.o"`},
-			// An identifier ClickHouse cannot decode is refused.
-			tablerefCase{name: "undecodable_hex", si: si, sql: "SELECT * FROM `ph\\xZZys`.x",
-				wantCode: pb.RewriteCode_SyntaxError, wantMsg: "cannot be decoded"},
+			// An identifier is refused only where ClickHouse rejects it: a name
+			// that decodes to nothing, or a \x that swallows the closing quote.
+			tablerefCase{name: "rejected_swallowed_quote", si: si, sql: "SELECT * FROM `ab\\x6`.x",
+				wantCode: pb.RewriteCode_SyntaxError, wantMsg: "is not a name ClickHouse accepts"},
 			tablerefCase{name: "empty_after_decode", si: si, sql: "SELECT * FROM `\\N`.x",
-				wantCode: pb.RewriteCode_SyntaxError, wantMsg: "cannot be decoded"},
+				wantCode: pb.RewriteCode_SyntaxError, wantMsg: "is not a name ClickHouse accepts"},
 			// Low (review of c3eca8c), pinned as it behaves: Polyglot collapses
 			// the source `\\` before any decode, so `\\Nin` is read one level too
 			// far as in. In a SELECT the IN operand is then rewritten into the

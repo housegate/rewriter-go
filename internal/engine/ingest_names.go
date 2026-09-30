@@ -8,26 +8,38 @@ import (
 	"strings"
 )
 
-// decodeASTIdentifiers rewrites the name of every quoted identifier node in a
-// freshly parsed AST to the name ClickHouse resolves, decoded from the node's
-// source spelling (decodeQuotedIdentifier). Polyglot keeps several ClickHouse
-// escapes verbatim in AST names (`ph\Nys` for the database ClickHouse reads as
-// phys, `t\N` for table t), so without this every downstream check — the
-// protected / known-physical / reserved database checks, database_map
-// resolution, the storage-integrity Active-table lookup, the reserved-column
-// check and DDL targets — compared a name ClickHouse never uses. Polyglot's
-// generator escapes a backslash inside a quoted name, so the regenerated SQL
-// then carries exactly the decoded name.
+// decodeASTIdentifiers makes a freshly parsed AST carry the names and text
+// ClickHouse will read from the original SQL.
 //
-// Only an identifier node (an object with a string "name", "quoted": true and a
-// source "span") whose source spelling holds a backslash is touched; the
-// common case returns ast unchanged, byte for byte. A function node carries no
-// span and keeps Polyglot's name; its matchers finish the decode themselves
-// (decodeIdentifierEscapes). A quoted identifier whose spelling cannot be
-// decoded, or whose span does not cover a quoted spelling while its name holds
-// a backslash, fails the parse (the statement is refused).
-func decodeASTIdentifiers(sql string, ast AST) (AST, error) {
-	if !strings.Contains(sql, "\\") {
+// Quoted identifiers. Polyglot keeps several ClickHouse escapes verbatim in AST
+// names (`ph\Nys` for the database ClickHouse reads as phys, `t\N` for table
+// t), so without this every downstream check — the protected / known-physical
+// / reserved database checks, database_map resolution, the storage-integrity
+// Active-table lookup, the reserved-column check and DDL targets — compared a
+// name ClickHouse never uses. Every node with a string "name" and a source
+// "span" whose spelling is quoted and holds a backslash gets the name decoded
+// from that spelling (decodeQuotedIdentifier), whatever its "quoted" flag:
+// Polyglot marks an EXCEPT column list `quoted: false` although its source is
+// quoted, and the decoded name is then marked quoted so the generator re-quotes
+// it. Polyglot's generator escapes a backslash inside a quoted name, so the
+// regenerated SQL carries exactly the decoded name. A spelling ClickHouse
+// rejects fails the parse; one ClickHouse reads as non-UTF-8 bytes keeps
+// Polyglot's name (see decodedNotUTF8). A function node carries no span and
+// keeps Polyglot's name; its matchers finish the decode themselves.
+//
+// Command text. A statement Polyglot leaves as a `command` node is checked by
+// tokenizing its "this" text, but that text is Polyglot's re-rendering: it
+// re-quotes names in "…" without escaping them, so a name holding `"` or a
+// trailing backslash shifts every later token, while the rewriter forwards (or
+// splices) the original SQL. A target present in the original could then go
+// unchecked (RENAME TABLE db1.`"` TO db1.y, phys.`db2.x` TO db1.`"` renamed
+// another tenant's table). "this" is therefore replaced with the original
+// statement text, from its first token to its last token before any trailing
+// semicolon, so every command-text check and splice reads the same bytes the
+// rewriter forwards.
+func decodeASTIdentifiers(e Engine, sql string, ast AST) (AST, error) {
+	isCommand := bytes.HasPrefix(bytes.TrimSpace(ast), []byte(`{"command"`))
+	if !isCommand && !strings.Contains(sql, "\\") {
 		return ast, nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(ast))
@@ -36,31 +48,38 @@ func decodeASTIdentifiers(sql string, ast AST) (AST, error) {
 	if err := dec.Decode(&root); err != nil {
 		return nil, fmt.Errorf("engine: parse: decode AST for identifier decoding: %w", err)
 	}
-	stream := newTokenStream(sql)
 	changed := false
-	var walk func(any) error
-	walk = func(n any) error {
-		switch v := n.(type) {
-		case map[string]any:
-			if err := decodeIdentifierNode(sql, stream, v, &changed); err != nil {
-				return err
-			}
-			for _, child := range v {
-				if err := walk(child); err != nil {
-					return err
-				}
-			}
-		case []any:
-			for _, child := range v {
-				if err := walk(child); err != nil {
-					return err
-				}
-			}
+	if isCommand {
+		if err := setCommandSourceText(e, sql, root, &changed); err != nil {
+			return nil, err
 		}
-		return nil
 	}
-	if err := walk(root); err != nil {
-		return nil, err
+	if strings.Contains(sql, "\\") {
+		stream := newTokenStream(sql)
+		var walk func(any) error
+		walk = func(n any) error {
+			switch v := n.(type) {
+			case map[string]any:
+				if err := decodeIdentifierNode(sql, stream, v, &changed); err != nil {
+					return err
+				}
+				for _, child := range v {
+					if err := walk(child); err != nil {
+						return err
+					}
+				}
+			case []any:
+				for _, child := range v {
+					if err := walk(child); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if err := walk(root); err != nil {
+			return nil, err
+		}
 	}
 	if !changed {
 		return ast, nil
@@ -74,18 +93,60 @@ func decodeASTIdentifiers(sql string, ast AST) (AST, error) {
 	return AST(bytes.TrimRight(buf.Bytes(), "\n")), nil
 }
 
+// setCommandSourceText replaces a top-level command node's "this" with the
+// original statement text (see decodeASTIdentifiers).
+func setCommandSourceText(e Engine, sql string, root any, changed *bool) error {
+	top, _ := root.(map[string]any)
+	cmd, _ := top[NodeCommand].(map[string]any)
+	if _, ok := cmd["this"].(string); !ok {
+		return nil
+	}
+	text, err := commandSourceText(e, sql)
+	if err != nil {
+		return err
+	}
+	if cmd["this"] != text {
+		cmd["this"] = text
+		*changed = true
+	}
+	return nil
+}
+
+// commandSourceText returns sql from its first token to its last token that is
+// neither a semicolon nor zero-width: leading comments and whitespace and the
+// trailing terminator are dropped, everything in between is kept byte for byte.
+func commandSourceText(e Engine, sql string) (string, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return "", fmt.Errorf("engine: parse: %w", err)
+	}
+	last := -1
+	for i := len(toks) - 1; i >= 0; i-- {
+		if toks[i].TokenType != "SEMICOLON" && toks[i].Span.End > toks[i].Span.Start {
+			last = i
+			break
+		}
+	}
+	if last < 0 {
+		return "", nil
+	}
+	first := 0
+	for first < last && toks[first].Span.End == toks[first].Span.Start {
+		first++
+	}
+	return sql[toks[first].Span.Start:toks[last].Span.End], nil
+}
+
 func decodeIdentifierNode(sql string, stream tokenStream, node map[string]any, changed *bool) error {
 	name, ok := node["name"].(string)
 	if !ok {
-		return nil
-	}
-	if quoted, _ := node["quoted"].(bool); !quoted {
 		return nil
 	}
 	span, hasSpan := node["span"].(map[string]any)
 	if !hasSpan {
 		return nil // a function node: no source spelling to decode from
 	}
+	quoted, _ := node["quoted"].(bool)
 	start, sok := jsonInt(span["start"])
 	end, eok := jsonInt(span["end"])
 	var raw string
@@ -94,18 +155,25 @@ func decodeIdentifierNode(sql string, stream tokenStream, node map[string]any, c
 			raw = sql[b0:b1]
 		}
 	}
-	if !strings.Contains(raw, "\\") {
-		if strings.Contains(name, "\\") && !isQuotedSpelling(raw) {
+	if !strings.Contains(raw, "\\") || !isQuotedSpelling(raw) {
+		if quoted && strings.Contains(name, "\\") && !isQuotedSpelling(raw) {
 			return fmt.Errorf("engine: parse: quoted identifier %q has no verifiable source spelling", name)
 		}
 		return nil
 	}
-	decoded, ok := decodeQuotedIdentifier(raw)
-	if !ok {
-		return fmt.Errorf("engine: parse: quoted identifier %s cannot be decoded as ClickHouse does", raw)
+	decoded, st := decodeQuotedIdentifier(raw)
+	switch st {
+	case decodedRejected:
+		return fmt.Errorf("engine: parse: quoted identifier %s is not a name ClickHouse accepts", raw)
+	case decodedNotUTF8:
+		return nil
 	}
 	if decoded != name {
 		node["name"] = decoded
+		*changed = true
+	}
+	if !quoted {
+		node["quoted"] = true
 		*changed = true
 	}
 	return nil
