@@ -1101,9 +1101,11 @@ type readSourceScope struct {
 	// reads the physical table x (measured on ClickHouse 26.2 and 25.8 under
 	// both analyzers). The same holds for a WITH expression alias, whatever
 	// its value, and for a projection alias, in every such position except a
-	// lightweight UPDATE and a table TTL … WHERE, which bind them; treating
-	// them as tables there too only refuses a statement that names no table
-	// (fail-safe). In an unbound scope no WITH clause or SELECT declares a
+	// lightweight UPDATE and a table TTL … WHERE written in CREATE TABLE,
+	// which bind them (ALTER … MODIFY TTL reads the table); treating them as
+	// tables there too only refuses a statement that names no table
+	// (fail-safe). A table-source alias reads the table under both
+	// analyzers. In an unbound scope no WITH clause or SELECT declares a
 	// binding, so each such name is a table reference like any other.
 	unbound bool
 }
@@ -1663,9 +1665,10 @@ func isScopedCurrentDatabaseRef(ref NamespaceRef, scope readSourceScope) bool {
 
 func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSourceScope {
 	if parent.unbound {
-		// No projection alias binds an IN operand in an R2 expression
-		// position (measured, see readSourceScope.unbound), and a
-		// table-source alias never binds one under enable_analyzer=0.
+		// Neither a projection alias nor a table-source alias binds an IN
+		// operand in an R2 expression position: in a lightweight DELETE or
+		// UPDATE, `(SELECT v FROM (…) AS x WHERE v IN x)` reads the table x
+		// under both analyzers (see readSourceScope.unbound).
 		return parent
 	}
 	aliases := cloneReadSourceNames(parent.aliases, 4)

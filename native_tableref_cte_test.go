@@ -12,8 +12,10 @@ import (
 // text, whose storage-integrity read surface is re-parsed), a CHECK / ASSUME
 // constraint (in CREATE and in ALTER ADD CONSTRAINT), a table or column TTL,
 // an INDEX expression, a column DEFAULT / MATERIALIZED expression, a storage
-// key, an ALTER ADD COLUMN default, INSERT VALUES rows and a materialized
-// view's inner-table TTL. %S is the IN operand.
+// key, an ALTER ADD COLUMN default, INSERT VALUES rows, a materialized view's
+// inner-table TTL, ORDER BY / PRIMARY KEY / SAMPLE BY, a PROJECTION, an ALIAS
+// column, CTAS column / constraint expressions, and scalar-subquery / EXISTS
+// operands. %S is the operand.
 var cteMutationPositions = []struct{ name, sql string }{
 	{"lightweight_delete", "DELETE FROM db1.o WHERE a IN %S"},
 	{"update_where", "UPDATE db1.o SET b = 1 WHERE a IN %S"},
@@ -34,6 +36,24 @@ var cteMutationPositions = []struct{ name, sql string }{
 	{"alter_add_column_default", "ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT a IN %S"},
 	{"insert_values", "INSERT INTO db1.o VALUES (1, 1 IN %S)"},
 	{"mv_inner_ttl", "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a TTL d + INTERVAL 1 DAY DELETE WHERE a IN %S AS SELECT a, d FROM db1.o"},
+	// Storage keys: on 25.8 ClickHouse reads the table there, resolved
+	// against the default database; 26.2 refuses a subquery in a key.
+	{"order_by", "CREATE TABLE db1.n (a Int64) ENGINE = MergeTree ORDER BY a IN %S"},
+	{"primary_key", "CREATE TABLE db1.n (a Int64) ENGINE = MergeTree PRIMARY KEY a IN %S ORDER BY a"},
+	{"sample_by", "CREATE TABLE db1.n (a Int64) ENGINE = MergeTree ORDER BY a SAMPLE BY a IN %S"},
+	{"create_projection", "CREATE TABLE db1.n (a Int64, PROJECTION p (SELECT a WHERE a IN %S)) ENGINE = MergeTree ORDER BY a"},
+	{"alter_add_projection", "ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a IN %S)"},
+	{"alias_column", "CREATE TABLE db1.n (a Int64, b UInt8 ALIAS a IN %S) ENGINE = MergeTree ORDER BY a"},
+	// A CREATE TABLE … AS SELECT keeps binding in its body, but its column
+	// and constraint expressions are R2 positions.
+	{"ctas_column_default", "CREATE TABLE db1.n (a Int64, b UInt8 DEFAULT a IN %S) ENGINE = MergeTree ORDER BY a AS SELECT a FROM db1.o"},
+	{"ctas_check", "CREATE TABLE db1.n (a Int64, CONSTRAINT k CHECK a IN %S) ENGINE = MergeTree ORDER BY a AS SELECT a FROM db1.o"},
+	// Scalar-subquery and EXISTS forms: the operand is the subquery itself
+	// (UPDATE SET b = (WITH x … SELECT a FROM x) sets b from the table x).
+	{"update_set_scalar", "UPDATE db1.o SET b = %S WHERE 1"},
+	{"delete_where_scalar", "DELETE FROM db1.o WHERE a = %S"},
+	{"delete_where_exists", "DELETE FROM db1.o WHERE EXISTS %S"},
+	{"insert_values_scalar", "INSERT INTO db1.o VALUES (1, %S)"},
 }
 
 // cteOperandForms declare %D and read %N inside the IN operand: a CTE read
