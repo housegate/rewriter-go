@@ -417,7 +417,8 @@ func CreateTableStorage(e Engine, ast AST) (engines []StorageEngine, settings []
 				continue
 			}
 			sql, _ := raw["sql"].(string)
-			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "MODIFY SETTING") {
+			upper := strings.ToUpper(strings.TrimSpace(sql))
+			if !strings.HasPrefix(upper, "MODIFY SETTING") && !strings.HasPrefix(upper, "RESET SETTING") {
 				continue
 			}
 			keys, kerr := modifySettingKeys(e, sql)
@@ -482,13 +483,14 @@ func settingsPropertyKeys(property map[string]any) []string {
 }
 
 // modifySettingKeys extracts every setting key from an ALTER TABLE … MODIFY
-// SETTING action's raw SQL text (e.g. "MODIFY SETTING disk='d'") by
-// tokenizing (mirrors alterCrossTableTargets's precedent for raw ALTER
-// actions polyglot cannot structure): the first name token after the
-// "SETTING" keyword text is a key, and so is the first name token after every
-// subsequent top-level comma. Parenthesized argument lists inside a setting's
-// value (e.g. a function call) are skipped by paren depth so an argument's
-// own comma is never mistaken for a new setting.
+// SETTING (`k = v [, …]`) or RESET SETTING (`k [, …]`) action's raw SQL text,
+// which the rewriter forwards verbatim. It fails closed with an error (sealed
+// as UnsupportedStatement) on anything it cannot vet (review round 9, N17):
+// ClickHouse decodes an escaped name (`\Nstorage_policy` applies
+// storage_policy), so every key must be verbatim-safe (settingNameVerbatim:
+// no backslash, no doubled quote) and simple (no dotted compound name), and
+// the list must parse. A value's parenthesized argument list (`disk(…)`) is
+// skipped by depth so its commas never start a new key.
 func modifySettingKeys(e Engine, sql string) ([]string, error) {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
@@ -504,32 +506,45 @@ func modifySettingKeys(e Engine, sql string) ([]string, error) {
 	if settingIdx < 0 {
 		return nil, nil
 	}
+	reset := settingIdx > 0 && strings.EqualFold(toks[settingIdx-1].Text, "RESET")
 	var out []string
 	depth := 0
 	expectKey := true
 	for i := settingIdx + 1; i < len(toks); i++ {
 		tok := toks[i]
-		switch tok.TokenType {
-		case "L_PAREN":
-			depth++
-			continue
-		case "R_PAREN":
-			if depth > 0 {
-				depth--
+		if expectKey {
+			if !isNameTok(tok.TokenType) && !mutationProbeKeywordToken(tok) {
+				return nil, fmt.Errorf("engine: unparseable table setting list %q", sql)
 			}
-			continue
-		}
-		if depth > 0 {
-			continue
-		}
-		if expectKey && isNameTok(tok.TokenType) {
+			if !settingNameVerbatim(tok) {
+				return nil, fmt.Errorf("engine: table setting name %q needs decoding", tok.Source)
+			}
+			next := ""
+			if i+1 < len(toks) {
+				next = toks[i+1].TokenType
+			}
+			if reset && next != "" && next != "COMMA" || !reset && next != "EQ" {
+				return nil, fmt.Errorf("engine: unparseable table setting list %q", sql)
+			}
 			out = append(out, tok.Text)
 			expectKey = false
 			continue
 		}
-		if tok.TokenType == "COMMA" {
-			expectKey = true
+		switch tok.TokenType {
+		case "L_PAREN":
+			depth++
+		case "R_PAREN":
+			if depth > 0 {
+				depth--
+			}
+		case "COMMA":
+			if depth == 0 {
+				expectKey = true
+			}
 		}
+	}
+	if expectKey {
+		return nil, fmt.Errorf("engine: unparseable table setting list %q", sql)
 	}
 	return out, nil
 }
@@ -749,7 +764,62 @@ func decodeInOperand(operand any, literalIsTable bool) (inOperandKind, namespace
 	if unresolvedIdentifierNode(node) {
 		return inOperandParameter, namespaceRefDetail{}
 	}
+	// A bare keyword (`a IN NOW`, `a IN (current_user)`, `a IN EXISTS`) is a
+	// no-parens function or an `identifier` node to Polyglot but an ordinary
+	// identifier to ClickHouse 26.2, which reads the table of that name in the
+	// current database under both analyzers. It is an unqualified table
+	// operand like `a IN b`.
+	name, ok := noParensKeywordName(node)
+	if !ok {
+		// `a IN EXISTS` / `a IN interval`: Polyglot emits a bare `identifier`
+		// node (not a `column`) for these words, and ClickHouse 26.2 reads the
+		// table of that name under both analyzers (review round 3, N4).
+		name, ok = bareIdentifierOperandName(node)
+	}
+	if ok {
+		return inOperandTable, namespaceRefDetail{
+			ref: NamespaceRef{
+				Source:              NamespaceRefInTable,
+				Target:              TableTarget{Table: name},
+				UsesCurrentDatabase: true,
+			},
+			tableOrigin: namespaceValueIdentifier,
+		}
+	}
 	return inOperandValue, namespaceRefDetail{}
+}
+
+// bareIdentifierOperandName returns the name of a bare `identifier` node, the
+// shape Polyglot gives the words EXISTS and INTERVAL in IN-operand position.
+func bareIdentifierOperandName(node map[string]any) (string, bool) {
+	if len(node) != 1 {
+		return "", false
+	}
+	ident, ok := node["identifier"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	name, _ := ident["name"].(string)
+	return name, name != ""
+}
+
+// noParensKeywordName returns the spelling of a bare keyword that Polyglot
+// parsed as a no-parens, argument-less function call (`NOW`, `CURRENT_DATE`,
+// `current_user`, `PI`, …). ClickHouse has no niladic-keyword syntax: such a
+// word is an identifier, so it must never count as a function call.
+func noParensKeywordName(node map[string]any) (string, bool) {
+	fn, ok := node["function"].(map[string]any)
+	if !ok || len(node) != 1 {
+		return "", false
+	}
+	if noParens, _ := fn["no_parens"].(bool); !noParens {
+		return "", false
+	}
+	if args, _ := fn["args"].([]any); len(args) != 0 {
+		return "", false
+	}
+	name, _ := fn["name"].(string)
+	return name, name != ""
 }
 
 // inOperandAlias returns the body of an aliased IN operand, `x IN (db.t AS z)`
@@ -1087,9 +1157,41 @@ type readSourceVisitor struct {
 	sourceFunction func(name string)
 }
 
+// readSourceScope holds the names an unqualified IN operand may bind to
+// instead of a table. Measured on ClickHouse 26.2 with enable_analyzer=1 and
+// =0 (a tenant chooses the analyzer per query or per session):
+//
+//   - ctes: a read-query CTE name (`WITH c AS (SELECT …)`) binds a FROM table
+//     and an IN operand in every nested scope, even under a same-named table
+//     alias;
+//   - aliases: a WITH expression alias whose value is provably not a table
+//     reference (`WITH 1 AS c`, `WITH (1, 2) AS c`, `WITH f(x) AS c`,
+//     `WITH (SELECT 1) AS c`; not `WITH NOW AS c`, a bare keyword) binds an IN operand as an expression in every
+//     nested scope. An identifier value (`WITH "other.secret" AS c`,
+//     `WITH w AS c`) binds nothing: ClickHouse reads a table through it, so
+//     declareCTEBinding leaves it out and lets it shadow an enclosing binding;
+//   - projection: a projection alias binds an IN operand as an expression
+//     only in its own SELECT. In a nested SELECT the old analyzer reads the
+//     table of that name, so it is never inherited.
+//
+// A table-source alias (FROM / JOIN table, subquery or table function) binds
+// nothing here: in an enclosing SELECT both analyzers read the table of that
+// name, and in the IN's own SELECT the old analyzer does. Treating it as a
+// binding forwarded the operand verbatim, so ClickHouse read that table in
+// the session's physical database, unreported.
+//
+// Inside a stored view body (CREATE VIEW, CREATE MATERIALIZED VIEW with TO,
+// ENGINE, POPULATE or REFRESH; measured on ClickHouse 26.2 and 25.8 under
+// both analyzers) the binding is narrower, so storedView is set there and
+// inherited by every nested query: a WITH alias binds only when its value is
+// a single folded literal (withValueIsStoredViewLiteral), and no projection
+// alias binds. A read-query CTE name binds as elsewhere. The `view()` table
+// function, INSERT … SELECT and CTAS bodies follow the plain-SELECT rule.
 type readSourceScope struct {
-	ctes    map[string]bool
-	aliases map[string]bool
+	ctes       map[string]bool
+	aliases    map[string]bool
+	projection map[string]bool
+	storedView bool
 	// unbound marks an expression position ClickHouse stores or executes
 	// outside a SELECT scope: a structured UPDATE / DELETE, an INSERT's VALUES
 	// rows, and a CREATE TABLE / CREATE VIEW / ALTER column, constraint
@@ -1114,6 +1216,26 @@ type readSourceScope struct {
 // enclosing statement reaches it, and no WITH inside it declares one.
 func unboundScope() readSourceScope {
 	return readSourceScope{unbound: true}
+}
+
+// storedViewBodyKey marks the root read-query node of a view body that
+// ExtractViewBody hands to the SELECT pipeline on its own. walkReadQuery turns
+// it into readSourceScope.storedView, which the scope then carries to every
+// node below (SELECT arms, set operations, subqueries). It is internal JSON
+// metadata (polyglot ignores unknown AST fields); SetViewBody strips it.
+const storedViewBodyKey = "_rewriter_go_stored_view_body"
+
+// storedViewRootMarked reports whether the read-query node m (its single
+// kind's body) carries storedViewBodyKey.
+func storedViewRootMarked(m map[string]any) bool {
+	for _, body := range m {
+		if b, ok := body.(map[string]any); ok {
+			if marked, _ := b[storedViewBodyKey].(bool); marked {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // walkStatementObjects is the sole statement-level dispatcher behind the
@@ -1142,7 +1264,9 @@ func walkStatementObjects(node any, scope readSourceScope, visitor readSourceVis
 			return walkCreateTableObjects(statementMap(n, NodeCreateTable), scope, visitor)
 		case statementMap(n, NodeCreateView) != nil:
 			body := statementMap(n, NodeCreateView)
-			if err := walkExpression(body["query"], scope, visitor); err != nil {
+			bodyScope := scope
+			bodyScope.storedView = true
+			if err := walkExpression(body["query"], bodyScope, visitor); err != nil {
 				return err
 			}
 			if err := walkExpression(body["options"], scope, visitor); err != nil {
@@ -1426,6 +1550,15 @@ func walkReadQuery(node any, parent readSourceScope, visitor readSourceVisitor) 
 	if !ok {
 		return false, nil
 	}
+	// A nested query never sees the enclosing SELECT's projection aliases.
+	parent.projection = nil
+	// A view body handed to the SELECT pipeline on its own carries the
+	// stored-view marker on its root read-query node (select, set operation,
+	// or subquery / parenthesis wrapper); from here the scope carries it to
+	// every node below, set operations included.
+	if storedViewRootMarked(m) {
+		parent.storedView = true
+	}
 	if selectNode, ok := m[NodeSelect].(map[string]any); ok {
 		return true, walkSelectObjects(selectNode, parent, visitor)
 	}
@@ -1565,15 +1698,17 @@ func walkWithObjects(withNode any, parent readSourceScope, visitor readSourceVis
 			withNode = body
 		}
 	}
+	parent.projection = nil
 	with, _ := withNode.(map[string]any)
 	ctes, _ := with["ctes"].([]any)
 	if len(ctes) == 0 {
 		return parent, walkExpression(with["search"], parent, visitor)
 	}
 	scope := readSourceScope{
-		ctes:    cloneReadSourceNames(parent.ctes, len(ctes)),
-		aliases: cloneReadSourceNames(parent.aliases, len(ctes)),
-		unbound: parent.unbound,
+		ctes:       cloneReadSourceNames(parent.ctes, len(ctes)),
+		aliases:    cloneReadSourceNames(parent.aliases, len(ctes)),
+		storedView: parent.storedView,
+		unbound:    parent.unbound,
 	}
 	recursive, _ := with["recursive"].(bool)
 	if recursive {
@@ -1618,7 +1753,230 @@ func declareCTEBinding(scope readSourceScope, cte map[string]any) {
 		scope.ctes[name] = true
 		return
 	}
-	scope.aliases[name] = true
+	binds := withValueIsNotTableReference(cte["this"])
+	if scope.storedView {
+		binds = withValueIsStoredViewLiteral(cte["this"])
+	}
+	if binds {
+		scope.aliases[name] = true
+		return
+	}
+	// An identifier value (or a chain through another alias) binds nothing,
+	// and it shadows any enclosing binding of the same name.
+	delete(scope.aliases, name)
+	delete(scope.ctes, name)
+}
+
+// withValueIsNotTableReference reports whether a WITH expression alias's value
+// is provably not a table reference, so that the alias binds an IN operand of
+// its name as an expression. Measured on ClickHouse 26.2 with both analyzers:
+// a literal, a tuple or array of literals, a parenthesised function call and a
+// scalar subquery bind as expressions at every depth (a no-parens keyword such
+// as `NOW` or `CURRENT_DATE`, which Polyglot parses as a function call, is an
+// identifier to ClickHouse); an identifier value (bare,
+// quoted, parenthesised, qualified or unresolvable), including another alias,
+// makes ClickHouse read a table in the IN position (the table the identifier
+// names, or the table named after the alias). Anything else is treated as an
+// identifier: the operand is then rewritten as a table, which fails safe.
+func withValueIsNotTableReference(node any) bool {
+	for {
+		m, ok := node.(map[string]any)
+		if !ok || len(m) != 1 {
+			return false
+		}
+		paren, ok := m["paren"].(map[string]any)
+		if !ok {
+			break
+		}
+		node = paren["this"]
+	}
+	m := node.(map[string]any)
+	if cteBodyIsReadQuery(m) {
+		return true
+	}
+	if lexedNumberColumn(m) {
+		return true
+	}
+	if neg, ok := m["neg"].(map[string]any); ok {
+		if inner, _ := neg["this"].(map[string]any); lexedNumberColumn(inner) {
+			return true
+		}
+	}
+	// A parenthesised call only: a no-parens keyword (`NOW`, `CURRENT_DATE`)
+	// is an identifier to ClickHouse, which reads a table through it.
+	for _, kind := range []string{"function", "aggregate_function"} {
+		if fn, ok := m[kind].(map[string]any); ok {
+			noParens, _ := fn["no_parens"].(bool)
+			return !noParens
+		}
+	}
+	return !containsNameReference(m)
+}
+
+// withValueIsStoredViewLiteral reports whether a WITH alias's value binds an
+// IN operand inside a stored view body. Measured on ClickHouse 26.2 and 25.8,
+// both analyzers: only a value the ClickHouse parser folds into one literal
+// binds there — a number (negated or not), a string, NULL or a boolean,
+// optionally parenthesised, or a flat tuple / bracket array of those. A
+// function call, cast, operator, scalar subquery, `tuple(…)` / `array(…)`, a
+// parenthesised or nested tuple and an array of tuples make ClickHouse read
+// the table named after the alias.
+func withValueIsStoredViewLiteral(node any) bool {
+	m, ok := node.(map[string]any)
+	if !ok || len(m) != 1 {
+		return false
+	}
+	if storedViewScalarLiteral(unwrapParenNodes(m)) {
+		return true
+	}
+	if tuple, ok := m["tuple"].(map[string]any); ok {
+		return allStoredViewScalarLiterals(tuple["expressions"])
+	}
+	if array, ok := m["array_func"].(map[string]any); ok {
+		if bracket, _ := array["bracket_notation"].(bool); bracket {
+			return allStoredViewScalarLiterals(array["expressions"])
+		}
+	}
+	return false
+}
+
+func unwrapParenNodes(m map[string]any) map[string]any {
+	for len(m) == 1 {
+		paren, ok := m["paren"].(map[string]any)
+		if !ok {
+			break
+		}
+		inner, ok := paren["this"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		m = inner
+	}
+	return m
+}
+
+func allStoredViewScalarLiterals(node any) bool {
+	items, ok := node.([]any)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if !storedViewScalarLiteral(m) {
+			return false
+		}
+	}
+	return true
+}
+
+// storedViewScalarLiteral: a number (decimal, hex `0x…`, binary `0b…`,
+// inf / nan) or string (quoted, `x'…'`, heredoc) literal, NULL, a boolean, or
+// a negated number, with no parentheses of its own. Measured on ClickHouse
+// 26.2 and 25.8, both analyzers: each binds in a stored view body. Known
+// Polyglot divergences (review round 6, N10; not "measured to bind", they
+// only turn a name or a syntax error into a constant, so no table is read):
+// `0x_10` is a ClickHouse identifier that Polyglot types `hex_number` and
+// regenerates as `0x10`; `$é$x$é$`, and `x'41'` immediately followed by
+// `'42'`, are ClickHouse syntax errors Polyglot regenerates as `'x'` and
+// `x'41'42'`.
+func storedViewScalarLiteral(m map[string]any) bool {
+	if len(m) != 1 {
+		return false
+	}
+	if lit, ok := m["literal"].(map[string]any); ok {
+		switch lit["literal_type"] {
+		case "number", "hex_number", "string", "hex_string", "dollar_string":
+			return true
+		}
+		return false
+	}
+	if _, ok := m["null"]; ok {
+		return true
+	}
+	if _, ok := m["boolean"]; ok {
+		return true
+	}
+	if lexedNumberColumn(m) {
+		return true
+	}
+	if neg, ok := m["neg"].(map[string]any); ok {
+		inner, _ := neg["this"].(map[string]any)
+		if len(inner) != 1 {
+			return false
+		}
+		if lit, ok := inner["literal"].(map[string]any); ok {
+			return lit["literal_type"] == "number" || lit["literal_type"] == "hex_number"
+		}
+		return lexedNumberColumn(inner)
+	}
+	return false
+}
+
+// lexedNumberColumn reports whether m is a `column` node Polyglot produced
+// for a word the ClickHouse lexer reads as a number literal: an unquoted,
+// unqualified `inf` / `nan` (any case) or `0b…` binary literal. Measured on
+// ClickHouse 26.2 and 25.8, both analyzers: `WITH inf AS s … a IN s` binds the
+// value, in a plain SELECT and in a stored view body. A quoted `inf` stays an
+// identifier.
+func lexedNumberColumn(m map[string]any) bool {
+	col, ok := m["column"].(map[string]any)
+	if !ok || len(m) != 1 || col["table"] != nil {
+		return false
+	}
+	name, _ := col["name"].(map[string]any)
+	if quoted, _ := name["quoted"].(bool); quoted {
+		return false
+	}
+	word, _ := name["name"].(string)
+	switch strings.ToLower(word) {
+	case "inf", "nan":
+		return true
+	}
+	if len(word) > 2 && strings.HasPrefix(word, "0b") {
+		for _, r := range word[2:] {
+			if r != '0' && r != '1' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// nameReferenceKeys are the AST node kinds that can carry a name ClickHouse
+// might resolve to a table (or a nested query that can).
+var nameReferenceKeys = map[string]bool{
+	"column": true, "identifier": true, "dot": true, "parameter": true,
+	"star": true, "lambda": true, "table": true, "subquery": true,
+	NodeSelect: true, NodeUnion: true, NodeIntersect: true, NodeExcept: true,
+}
+
+// containsNameReference reports whether node has any name-bearing node, so
+// that a value without one (literals and operators over them) is a constant.
+func containsNameReference(node any) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		for key, child := range n {
+			if nameReferenceKeys[key] || containsNameReference(child) {
+				return true
+			}
+			// A no-parens function node is a bare keyword, i.e. a name.
+			if key == "function" || key == "aggregate_function" {
+				if fn, ok := child.(map[string]any); ok {
+					if noParens, _ := fn["no_parens"].(bool); noParens {
+						return true
+					}
+				}
+			}
+		}
+	case []any:
+		for _, child := range n {
+			if containsNameReference(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cteBodyIsReadQuery(node any) bool {
@@ -1660,9 +2018,12 @@ func isScopedCurrentDatabaseRef(ref NamespaceRef, scope readSourceScope) bool {
 	if !ref.UsesCurrentDatabase || ref.Target.DB != "" || ref.Target.Table == "" {
 		return false
 	}
-	return scope.ctes[ref.Target.Table] || scope.aliases[ref.Target.Table]
+	name := ref.Target.Table
+	return scope.ctes[name] || scope.aliases[name] || scope.projection[name]
 }
 
+// selectAliasScope gives a SELECT its own projection aliases. Its table-source
+// aliases are deliberately not bindings (see readSourceScope).
 func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSourceScope {
 	if parent.unbound {
 		// Neither a projection alias nor a table-source alias binds an IN
@@ -1671,11 +2032,12 @@ func selectAliasScope(selectNode map[string]any, parent readSourceScope) readSou
 		// under both analyzers (see readSourceScope.unbound).
 		return parent
 	}
-	aliases := cloneReadSourceNames(parent.aliases, 4)
-	collectProjectionAliases(selectNode["expressions"], aliases)
-	collectTableSourceAliases(selectNode["from"], aliases)
-	collectJoinSourceAliases(selectNode["joins"], aliases)
-	parent.aliases = aliases
+	projection := make(map[string]bool)
+	if !parent.storedView {
+		// In a stored view body no projection alias binds an IN operand.
+		collectProjectionAliases(selectNode["expressions"], projection)
+	}
+	parent.projection = projection
 	return parent
 }
 
@@ -1687,61 +2049,6 @@ func collectProjectionAliases(node any, aliases map[string]bool) {
 		if name := concreteIdentifierName(alias["alias"]); name != "" {
 			aliases[name] = true
 		}
-	}
-}
-
-func collectTableSourceAliases(node any, aliases map[string]bool) {
-	switch n := node.(type) {
-	case []any:
-		for _, child := range n {
-			collectTableSourceAliases(child, aliases)
-		}
-	case map[string]any:
-		if from, ok := n["from"].(map[string]any); ok {
-			collectTableSourceAliases(from["expressions"], aliases)
-			return
-		}
-		if expressions, ok := n["expressions"].([]any); ok && n["name"] == nil {
-			collectTableSourceAliases(expressions, aliases)
-			return
-		}
-		if table, ok := n["table"].(map[string]any); ok {
-			if name := concreteIdentifierName(table["alias"]); name != "" {
-				aliases[name] = true
-			}
-			return
-		}
-		if alias, ok := n["alias"].(map[string]any); ok {
-			if name := concreteIdentifierName(alias["alias"]); name != "" {
-				aliases[name] = true
-			}
-			return
-		}
-		if subquery, ok := n["subquery"].(map[string]any); ok {
-			if name := concreteIdentifierName(subquery["alias"]); name != "" {
-				aliases[name] = true
-			}
-			return
-		}
-		if paren, ok := n["paren"].(map[string]any); ok {
-			collectTableSourceAliases(paren["this"], aliases)
-			return
-		}
-		if joined, ok := n["joined_table"].(map[string]any); ok {
-			collectTableSourceAliases(joined["left"], aliases)
-			collectJoinSourceAliases(joined["joins"], aliases)
-		}
-	}
-}
-
-func collectJoinSourceAliases(node any, aliases map[string]bool) {
-	switch n := node.(type) {
-	case []any:
-		for _, child := range n {
-			collectJoinSourceAliases(child, aliases)
-		}
-	case map[string]any:
-		collectTableSourceAliases(n["this"], aliases)
 	}
 }
 
@@ -1855,9 +2162,13 @@ func QueryBodiedTableFunction(name string) bool {
 // bind the outer CTE (a CREATE VIEW / MATERIALIZED VIEW body, the legacy
 // analyzer) the rewrite is fail-safe: it reaches only the caller's own
 // governed table.
+//
+// The empty scope keeps storedView: a view() body inside a stored view body is
+// stored with it, and ClickHouse 26.2 / 25.8 apply the stored-view binding
+// rule there (a function-valued WITH alias reads the table named after it).
 func tableFunctionArgScope(function map[string]any, scope readSourceScope) readSourceScope {
 	if QueryBodiedTableFunction(nameOf(function)) {
-		return readSourceScope{}
+		return readSourceScope{storedView: scope.storedView}
 	}
 	return scope
 }

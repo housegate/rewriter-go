@@ -1245,15 +1245,105 @@ func TestCollectEmbeddedReadSources_InTableOperandsRespectOutputAndTableAliases(
 			sql:  `SELECT tuple(1, 2) AS t, in(1, t)`,
 			want: []readSourceView{},
 		},
+		// A table-source alias never binds an IN operand: ClickHouse 26.2 reads
+		// the table named t in the current database for a same-scope alias
+		// under enable_analyzer=0, and for an enclosing SELECT's alias under
+		// both analyzers. The operand is a current-database table.
 		{
-			name: "FROM alias is scoped before projection infix IN",
+			name: "FROM alias is not an infix IN binding",
 			sql:  `SELECT id IN t FROM other.u AS t`,
-			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true}},
+			want: []readSourceView{
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+			},
 		},
 		{
-			name: "FROM alias is scoped before projection callable IN",
+			name: "FROM alias is not a callable IN binding",
 			sql:  `SELECT in(id, t) FROM other.u AS t`,
-			want: []readSourceView{{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true}},
+			want: []readSourceView{
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+			},
+		},
+		{
+			name: "enclosing FROM alias is not an IN binding",
+			sql:  `SELECT * FROM other.u AS t WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "enclosing projection alias is not an IN binding",
+			sql:  `SELECT 1 AS t FROM other.u WHERE id IN (SELECT id FROM other.w WHERE in(id, t))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "identifier-valued WITH alias is not an IN binding",
+			sql:  `WITH "other.secret" AS t SELECT * FROM other.u WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "identifier-valued WITH alias shadows an enclosing constant one",
+			sql:  `WITH 1 AS t SELECT * FROM other.u WHERE id IN (WITH w AS t SELECT id FROM other.w WHERE in(id, t))`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			// Review round 4: in a stored view body a function-valued WITH
+			// alias and a projection alias bind nothing (whole-statement walk).
+			name: "stored view body: function WITH alias is not an IN binding",
+			sql:  `CREATE VIEW other.v AS WITH toUInt64(1) AS t SELECT id FROM other.u WHERE id IN t`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "stored view body: projection alias is not an IN binding",
+			sql:  `CREATE MATERIALIZED VIEW other.v TO other.w AS SELECT id, 1 AS t FROM other.u WHERE in(id, t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			// Review round 5, N7: a set-operation body carries the leading
+			// WITH on the set node; the stored-view scope still applies.
+			name: "stored view set-operation body: function WITH alias is not an IN binding",
+			sql:  `CREATE VIEW other.v AS WITH toUInt64(1) AS t SELECT id FROM other.u WHERE 0 UNION ALL SELECT id FROM other.w WHERE id IN t`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+				{kind: ReadSourceInTable, target: TableTarget{Table: "t"}, usesCurrentDatabase: true},
+			},
+		},
+		{
+			name: "stored view body: literal WITH alias stays an IN binding",
+			sql:  `CREATE VIEW other.v AS WITH (1, 2) AS t SELECT id FROM other.u WHERE id IN t`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u"}, resolved: true},
+			},
+		},
+		{
+			name: "enclosing WITH expression alias stays an IN binding",
+			sql:  `WITH 1 AS t SELECT * FROM other.u AS t WHERE id IN (SELECT id FROM other.w WHERE id IN t)`,
+			want: []readSourceView{
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "u", Alias: "t"}, resolved: true},
+				{kind: ReadSourceTable, target: TableTarget{DB: "other", Table: "w"}, resolved: true},
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1745,5 +1835,53 @@ func TestCollectNamespaceRefs_foreignConnectorFamily(t *testing.T) {
 				t.Fatalf("refs = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestExtractViewBodyCarriesStoredViewScope pins review round 5, N7 on the
+// path dispatchView takes: the body ExtractViewBody returns is walked on its
+// own, and the stored-view scope must reach every read-query shape below its
+// root — a set operation (leading WITH on the set node), a parenthesised one,
+// and a set node nested under another — so a function-valued WITH alias does
+// not bind the IN operand anywhere in it.
+func TestExtractViewBodyCarriesStoredViewScope(t *testing.T) {
+	e := newTestEngine(t)
+	for _, body := range []string{
+		"WITH toUInt64(1) AS t SELECT id FROM other.u WHERE id IN t",
+		"WITH toUInt64(1) AS t SELECT id FROM other.u WHERE id IN t UNION ALL SELECT 1",
+		"WITH (SELECT 1) AS t SELECT id FROM other.u WHERE 0 UNION DISTINCT SELECT id FROM other.u WHERE in(id, t)",
+		"WITH 1 + 1 AS t SELECT id FROM other.u WHERE id IN t INTERSECT SELECT 1",
+		"WITH toUInt64(1) AS t SELECT id FROM other.u EXCEPT SELECT id FROM other.u WHERE id NOT IN (t)",
+		"(WITH toUInt64(1) AS t SELECT id FROM other.u WHERE id IN t UNION ALL SELECT 1)",
+		"SELECT 1 UNION ALL (WITH toUInt64(1) AS t SELECT id FROM other.u WHERE id IN t UNION ALL SELECT 1)",
+	} {
+		ast, err := e.ParseOne("CREATE VIEW other.v AS " + body)
+		if err != nil {
+			t.Fatalf("parse %q: %v", body, err)
+		}
+		extracted, ok, err := ExtractViewBody(ast)
+		if err != nil || !ok {
+			t.Fatalf("extract %q: ok=%v err=%v", body, ok, err)
+		}
+		refs, err := CollectEmbeddedReadSources(extracted)
+		if err != nil {
+			t.Fatalf("collect %q: %v", body, err)
+		}
+		found := false
+		for _, ref := range refs {
+			if ref.Kind == ReadSourceInTable && ref.Target == (TableTarget{Table: "t"}) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: the IN operand t is not a table in the extracted stored view body: %+v", body, refs)
+		}
+		restored, err := SetViewBody(ast, extracted)
+		if err != nil {
+			t.Fatalf("set %q: %v", body, err)
+		}
+		if strings.Contains(string(restored), storedViewBodyKey) {
+			t.Errorf("%q: SetViewBody left the stored-view marker in the statement", body)
+		}
 	}
 }

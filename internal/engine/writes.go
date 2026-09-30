@@ -570,11 +570,51 @@ func ExtractViewBody(ast AST) (AST, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
+	// The body is stored by ClickHouse, which binds IN operands more narrowly
+	// there; mark its root read-query node so the walker starts the body's
+	// scope as a stored view and carries it to every node below when the body
+	// is rewritten on its own (see readSourceScope).
+	markStoredViewRoot(q, true)
 	b, err := json.Marshal(q)
+	markStoredViewRoot(q, false)
 	if err != nil {
 		return nil, false, fmt.Errorf("engine: encode view body: %w", err)
 	}
 	return AST(b), true, nil
+}
+
+// markStoredViewRoot sets (on) or removes (off) storedViewBodyKey on the root
+// read-query node of a view body: the body of its single kind (select, a set
+// operation, or a subquery / parenthesis wrapper). The walker turns the
+// marker into readSourceScope.storedView and carries that scope to every
+// node below it.
+func markStoredViewRoot(q map[string]any, on bool) {
+	for _, body := range q {
+		b, ok := body.(map[string]any)
+		if !ok {
+			continue
+		}
+		if on {
+			b[storedViewBodyKey] = true
+		} else {
+			delete(b, storedViewBodyKey)
+		}
+	}
+}
+
+// stripStoredViewMarkers removes storedViewBodyKey anywhere under node.
+func stripStoredViewMarkers(node any) {
+	switch n := node.(type) {
+	case map[string]any:
+		delete(n, storedViewBodyKey)
+		for _, child := range n {
+			stripStoredViewMarkers(child)
+		}
+	case []any:
+		for _, child := range n {
+			stripStoredViewMarkers(child)
+		}
+	}
 }
 
 // SetViewBody replaces create_view.query with the given {"select":…} body AST and
@@ -592,6 +632,7 @@ func SetViewBody(ast AST, body AST) (AST, error) {
 	if err := json.Unmarshal(body, &bodyNode); err != nil {
 		return nil, fmt.Errorf("engine: decode view body: %w", err)
 	}
+	stripStoredViewMarkers(bodyNode)
 	b["query"] = bodyNode
 	out, err := json.Marshal(root)
 	if err != nil {
@@ -1065,6 +1106,10 @@ type rawToken struct {
 		Start int `json:"start"`
 		End   int `json:"end"`
 	} `json:"span"`
+	// Source is the token's exact source text (sql[Span.Start:Span.End]),
+	// set by tokenizeRaw. Text is Polyglot's decoded spelling, which may
+	// differ (a quoted identifier's escapes).
+	Source string `json:"-"`
 }
 
 // tokenizeRaw runs the engine lexer over sql and decodes the token stream.
@@ -1085,6 +1130,7 @@ func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 				toks[i].Span.Start, toks[i].Span.End, cursor.characters())
 		}
 		toks[i].Span.Start, toks[i].Span.End = start, end
+		toks[i].Source = sql[start:end]
 	}
 	return toks, nil
 }

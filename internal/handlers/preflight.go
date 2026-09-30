@@ -339,6 +339,10 @@ func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, sql string, resp 
 			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(name)
 			return true, nil
 		}
+		if engine.SettingsEscapeBackstop(e, sql) {
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+			return true, nil
+		}
 	}
 	assignments, err := engine.QuerySettings(ast)
 	if err != nil {
@@ -388,7 +392,9 @@ func settingsVerdict(assignments []engine.SettingAssignment) (pb.RewriteCode, st
 		if engine.SQLBearingSetting(a.Name) {
 			return pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(a.Name), true
 		}
-		if !a.PlainValue {
+		// A name ClickHouse would decode, on a path that forwards the text
+		// verbatim (review round 7, N11).
+		if a.EscapedName || !a.PlainValue {
 			return pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage, true
 		}
 	}

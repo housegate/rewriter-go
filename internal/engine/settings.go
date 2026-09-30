@@ -10,9 +10,26 @@ import (
 // wherever they appear (spec 2026-09-26 R5): those whose value is SQL
 // evaluated against tables (a filter expression, or a map of per-table filter
 // expressions ClickHouse parses and executes with the query — it can read any
-// table the rewriter never sees), and the dialect switches, which make
+// table the rewriter never sees), the dialect switches, which make
 // ClickHouse parse later SQL with a grammar the rewriter does not model (the
-// polyglot dialect transpiles `IN [db2.x]` into a table operand).
+// polyglot dialect transpiles `IN [db2.x]` into a table operand), and the
+// name-resolution settings that change what a name the rewriter trusts binds
+// to (review round 6, N9; measured on ClickHouse 26.2 and 25.8 under both
+// analyzers by flipping every Bool setting and eleven `compatibility`
+// versions over the binding shapes):
+//
+//   - enable_global_with_statement = 0 stops a WITH alias or CTE name from
+//     reaching nested queries and later set arms, so ClickHouse reads the
+//     table of that name there (the only Bool flip that did);
+//   - compatibility restores older defaults as a group; the versions 20.1,
+//     20.8 and 21.1 restore enable_global_with_statement = 0 and read the
+//     same tables, and any version can change defaults nobody measured;
+//   - implicit_table_at_top_level names the table a FROM-less SELECT reads
+//     (`SELECT a SETTINGS implicit_table_at_top_level = 'z'` reads phys.z).
+//
+// enable_analyzer / allow_experimental_analyzer stay accepted: every binding
+// rule was measured under both analyzers, and the sweep found no read the
+// rules do not already model.
 var sqlBearingSettings = map[string]bool{
 	"additional_table_filters":            true,
 	"additional_result_filter":            true,
@@ -22,6 +39,14 @@ var sqlBearingSettings = map[string]bool{
 	"allow_experimental_polyglot_dialect": true,
 	"allow_experimental_prql_dialect":     true,
 	"allow_experimental_kusto_dialect":    true,
+	"enable_global_with_statement":        true,
+	"compatibility":                       true,
+	"implicit_table_at_top_level":         true,
+	// promql_table / promql_database name the TimeSeries table the promql
+	// dialect reads. They act only under dialect = 'promql', which is refused
+	// above; they are refused too as defence in depth (review round 7, N12).
+	"promql_table":    true,
+	"promql_database": true,
 }
 
 // SQLBearingSetting reports whether name is one of sqlBearingSettings or any
@@ -40,6 +65,12 @@ func SQLBearingSetting(name string) bool {
 type SettingAssignment struct {
 	Name       string
 	PlainValue bool
+	// EscapedName reports a name whose source spelling is not its plain text
+	// (settingNameVerbatim): ClickHouse would decode it, and the rewriter
+	// forwards the statement text verbatim, so it cannot tell which setting
+	// the name is (review round 7, N11: `\N` decodes to nothing, so
+	// `\Nenable_global_with_statement` is the refused setting).
+	EscapedName bool
 }
 
 // SessionSettingAssignments parses a `command` node's text as a session SET
@@ -93,7 +124,8 @@ func parseSettingAssignments(toks []rawToken, i int) ([]SettingAssignment, int, 
 		if len(value) == 0 {
 			return out, j, false
 		}
-		out = append(out, SettingAssignment{Name: name, PlainValue: plainSettingValueTokens(value)})
+		out = append(out, SettingAssignment{Name: name, PlainValue: plainSettingValueTokens(value),
+			EscapedName: !settingNameVerbatim(toks[i])})
 		if j < len(toks) && settingsListEnd(toks[j]) {
 			return out, j, true // an INSERT's query follows its SETTINGS list
 		}
@@ -152,6 +184,31 @@ func SettingsBackstop(e Engine, sql string) (name string, hit bool) {
 	return "", false
 }
 
+// settingNameVerbatim reports whether a setting-name token's source text is
+// exactly its name: a bare word, or a name in one pair of backticks or double
+// quotes with no escape sequence (no backslash) and no doubled quote. Any
+// other spelling needs decoding, and ClickHouse's decoding differs from
+// Polyglot's (`\N` is decoded to nothing by ClickHouse and kept by Polyglot),
+// so a path that forwards the text verbatim refuses it.
+func settingNameVerbatim(tok rawToken) bool {
+	src := tok.Source
+	if src == "" || strings.Contains(src, "\\") {
+		return false
+	}
+	if src == tok.Text {
+		return true
+	}
+	if len(src) < 2 {
+		return false
+	}
+	quote := src[0]
+	if (quote != '`' && quote != '"') || src[len(src)-1] != quote {
+		return false
+	}
+	inner := src[1 : len(src)-1]
+	return inner == tok.Text && !strings.ContainsRune(inner, rune(quote))
+}
+
 func settingNameToken(tok rawToken) bool {
 	return isNameTok(tok.TokenType) || mutationProbeKeywordToken(tok)
 }
@@ -177,11 +234,18 @@ func plainSettingValueTokens(value []rawToken) bool {
 	return mutationProbeKeywordToken(tok)
 }
 
-// RawSettingsClauses returns the assignments of every query-level SETTINGS
-// clause in an opaque text (a command node or a Raw ALTER action): the
-// assignment list after each top-level SETTINGS keyword that is followed by
-// `name =`. ok=false when the text cannot be tokenized or a clause that
-// starts as an assignment list does not parse; the caller refuses.
+// RawSettingsClauses returns the assignments of every SETTINGS clause in an
+// opaque text (a command node, a Raw ALTER action, the query text after an
+// INSERT column list), which the rewriter forwards verbatim. It fails closed
+// (ok=false; the caller refuses) whenever it cannot fully parse a clause into
+// `name = value` pairs with simple names (review round 8, N14): the text
+// cannot be tokenized; a SETTINGS keyword followed by a name is nested in
+// parentheses or is not followed by an assignment list; a SETTINGS keyword
+// ends the text; or a clause does not parse,
+// which includes a compound (dotted) setting name such as `SQL_a.b` — a
+// valid custom setting to ClickHouse, but one the scanner cannot tell apart
+// from an escaped refused name. Only the non-assignment forms `SHOW
+// [CHANGED] SETTINGS …` are skipped.
 func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment, ok bool) {
 	toks, err := tokenizeRaw(e, text)
 	if err != nil {
@@ -197,11 +261,20 @@ func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment,
 			depth--
 			continue
 		}
-		if depth != 0 || !opaqueKeyword(toks[i]) || !strings.EqualFold(toks[i].Text, "SETTINGS") {
+		if !opaqueKeyword(toks[i]) || !strings.EqualFold(toks[i].Text, "SETTINGS") {
 			continue
 		}
-		if i+2 >= len(toks) || !settingNameToken(toks[i+1]) || toks[i+2].TokenType != "EQ" {
-			continue // not an assignment list (e.g. SHOW SETTINGS LIKE …)
+		if showSettingsKeyword(toks, i) && !settingsListFollows(toks, i) {
+			continue // SHOW [CHANGED] SETTINGS [LIKE | ILIKE …]: not an assignment list
+		}
+		if i+1 < len(toks) && !settingNameToken(toks[i+1]) {
+			// A SETTINGS clause starts with a setting name; followed by
+			// anything else (`UPDATE settings = 1`) the word is a column,
+			// not a clause ClickHouse could apply.
+			continue
+		}
+		if depth != 0 || i+2 >= len(toks) || toks[i+2].TokenType != "EQ" {
+			return assignments, false
 		}
 		parsed, end, pok := parseSettingAssignments(toks, i+1)
 		assignments = append(assignments, parsed...)
@@ -211,6 +284,66 @@ func RawSettingsClauses(e Engine, text string) (assignments []SettingAssignment,
 		i = end - 1
 	}
 	return assignments, true
+}
+
+// showSettingsKeyword reports whether toks[i] (a SETTINGS keyword) is the
+// object of a SHOW SETTINGS / SHOW CHANGED SETTINGS statement: SHOW must be
+// the statement's first token (comments are not tokens), optionally followed
+// by CHANGED, and SETTINGS the next one. A column or alias named show in
+// front of a real SETTINGS clause is not exempt (review round 9, N16).
+func showSettingsKeyword(toks []rawToken, i int) bool {
+	first := func(j int, word string) bool {
+		return opaqueKeyword(toks[j]) && strings.EqualFold(toks[j].Text, word)
+	}
+	switch i {
+	case 1:
+		return first(0, "SHOW")
+	case 2:
+		return first(0, "SHOW") && first(1, "CHANGED")
+	}
+	return false
+}
+
+// settingsListFollows reports whether the SETTINGS keyword toks[i] is
+// followed by what could start an assignment list: a setting-name token that
+// is not the LIKE / ILIKE of SHOW SETTINGS LIKE. `SHOW SETTINGS max_threads =
+// [1]` is then scanned like any other clause (review round 9: main refused
+// it, and an exemption must not turn a refusal into Success).
+func settingsListFollows(toks []rawToken, i int) bool {
+	if i+1 >= len(toks) || !settingNameToken(toks[i+1]) {
+		return false
+	}
+	next := toks[i+1]
+	return !(opaqueKeyword(next) && (strings.EqualFold(next.Text, "LIKE") || strings.EqualFold(next.Text, "ILIKE")))
+}
+
+// SettingsEscapeBackstop is a token-level backstop for N11 / N14 / N17
+// (review rounds 7-9): it reports a quoted name followed by `=` anywhere
+// after a SETTINGS keyword, or the SETTING keyword of ALTER … MODIFY SETTING,
+// in sql whose source spelling is not its plain text (a backslash escape or a
+// doubled quote). ClickHouse decodes such a name
+// (`\N` to nothing), so it may be a refused setting whatever position the
+// structured checks think it is in. A tokenizer failure reports false: the
+// fail-closed paths elsewhere still apply.
+func SettingsEscapeBackstop(e Engine, sql string) bool {
+	if !strings.Contains(strings.ToUpper(sql), "SETTING") {
+		return false
+	}
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return false
+	}
+	seen := false
+	for i, tok := range toks {
+		if !seen {
+			seen = opaqueKeyword(tok) && (strings.EqualFold(tok.Text, "SETTINGS") || strings.EqualFold(tok.Text, "SETTING"))
+			continue
+		}
+		if tok.TokenType == "QUOTED_IDENTIFIER" && i+1 < len(toks) && toks[i+1].TokenType == "EQ" && !settingNameVerbatim(tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // QuerySettings returns, in document order, every query-level SETTINGS
