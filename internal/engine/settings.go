@@ -10,9 +10,26 @@ import (
 // wherever they appear (spec 2026-09-26 R5): those whose value is SQL
 // evaluated against tables (a filter expression, or a map of per-table filter
 // expressions ClickHouse parses and executes with the query — it can read any
-// table the rewriter never sees), and the dialect switches, which make
+// table the rewriter never sees), the dialect switches, which make
 // ClickHouse parse later SQL with a grammar the rewriter does not model (the
-// polyglot dialect transpiles `IN [db2.x]` into a table operand).
+// polyglot dialect transpiles `IN [db2.x]` into a table operand), and the
+// name-resolution settings that change what a name the rewriter trusts binds
+// to (review round 6, N9; measured on ClickHouse 26.2 and 25.8 under both
+// analyzers by flipping every Bool setting and eleven `compatibility`
+// versions over the binding shapes):
+//
+//   - enable_global_with_statement = 0 stops a WITH alias or CTE name from
+//     reaching nested queries and later set arms, so ClickHouse reads the
+//     table of that name there (the only Bool flip that did);
+//   - compatibility restores older defaults as a group; the versions 20.1,
+//     20.8 and 21.1 restore enable_global_with_statement = 0 and read the
+//     same tables, and any version can change defaults nobody measured;
+//   - implicit_table_at_top_level names the table a FROM-less SELECT reads
+//     (`SELECT a SETTINGS implicit_table_at_top_level = 'z'` reads phys.z).
+//
+// enable_analyzer / allow_experimental_analyzer stay accepted: every binding
+// rule was measured under both analyzers, and the sweep found no read the
+// rules do not already model.
 var sqlBearingSettings = map[string]bool{
 	"additional_table_filters":            true,
 	"additional_result_filter":            true,
@@ -22,6 +39,9 @@ var sqlBearingSettings = map[string]bool{
 	"allow_experimental_polyglot_dialect": true,
 	"allow_experimental_prql_dialect":     true,
 	"allow_experimental_kusto_dialect":    true,
+	"enable_global_with_statement":        true,
+	"compatibility":                       true,
+	"implicit_table_at_top_level":         true,
 }
 
 // SQLBearingSetting reports whether name is one of sqlBearingSettings or any

@@ -1857,7 +1857,13 @@ func allStoredViewScalarLiterals(node any) bool {
 // storedViewScalarLiteral: a number (decimal, hex `0x…`, binary `0b…`,
 // inf / nan) or string (quoted, `x'…'`, heredoc) literal, NULL, a boolean, or
 // a negated number, with no parentheses of its own. Measured on ClickHouse
-// 26.2 and 25.8, both analyzers: each binds in a stored view body.
+// 26.2 and 25.8, both analyzers: each binds in a stored view body. Known
+// Polyglot divergences (review round 6, N10; not "measured to bind", they
+// only turn a name or a syntax error into a constant, so no table is read):
+// `0x_10` is a ClickHouse identifier that Polyglot types `hex_number` and
+// regenerates as `0x10`; `$é$x$é$`, and `x'41'` immediately followed by
+// `'42'`, are ClickHouse syntax errors Polyglot regenerates as `'x'` and
+// `x'41'42'`.
 func storedViewScalarLiteral(m map[string]any) bool {
 	if len(m) != 1 {
 		return false

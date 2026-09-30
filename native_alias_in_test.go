@@ -637,3 +637,73 @@ func TestTableRef_StoredViewAliasPins(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_NameResolutionSettingsAreRefused pins review round 6, N9.
+// Measured on ClickHouse 26.2 and 25.8, both analyzers, by flipping every
+// Bool setting (802 / 711) and eleven `compatibility` versions over 13
+// binding shapes and 4 stored-view shapes: only enable_global_with_statement
+// = 0, and a `compatibility` version (20.1, 20.8, 21.1) that restores it as
+// the default, turn a name the binding rule trusts (a WITH alias or CTE name
+// in a nested query or a later set arm) into a table read, in a query-level
+// SETTINGS clause, a view body's SETTINGS and a session SET before CREATE
+// VIEW. implicit_table_at_top_level names a table a FROM-less SELECT reads
+// (`SELECT a SETTINGS implicit_table_at_top_level = 'z'` reads phys.z). Both
+// are refused wherever dynamic mode governs settings, whatever the value.
+func TestTableRef_NameResolutionSettingsAreRefused(t *testing.T) {
+	msg := func(name string) string { return "table setting " + name + " is not accepted" }
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, name string }{
+			// The reviewer's N9 reproducers.
+			{`CREATE VIEW db1.v AS WITH 1 AS "other.secret" SELECT a FROM db1.o WHERE 0 UNION ALL SELECT a FROM db1.o WHERE a IN "other.secret" SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`CREATE VIEW db1.v AS WITH 'x' AS "db1.t" SELECT a FROM db1.o WHERE 0 UNION ALL SELECT a FROM db1.o WHERE a IN "db1.t" SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`CREATE MATERIALIZED VIEW db1.mv ENGINE = Memory POPULATE AS WITH 1 AS "other.secret" SELECT a FROM db1.o WHERE 0 UNION ALL SELECT a FROM db1.o WHERE a IN "other.secret" SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`CREATE VIEW db1.v AS WITH "other.secret" AS (SELECT toUInt64(1) AS a) SELECT a FROM db1.o WHERE 0 UNION ALL SELECT a FROM "other.secret" SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`WITH "other.secret" AS (SELECT toUInt64(1) AS a) SELECT a FROM db1.o WHERE a IN (SELECT a FROM "other.secret") SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`WITH 1 AS "other.secret" SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN "other.secret") SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`INSERT INTO db1.q WITH toUInt64(1) AS "other.secret" SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN "other.secret") SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			{`CREATE TABLE db1.n ENGINE = Memory AS WITH toUInt64(1) AS "other.secret" SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN "other.secret") SETTINGS enable_global_with_statement = 0`, "enable_global_with_statement"},
+			// Every value and spelling, and the INSERT header list.
+			{"SELECT a FROM db1.o SETTINGS enable_global_with_statement = 1", "enable_global_with_statement"},
+			{"SELECT a FROM db1.o SETTINGS max_threads = 1, Enable_Global_With_Statement = false", "Enable_Global_With_Statement"},
+			{"INSERT INTO db1.q SETTINGS enable_global_with_statement = 0 SELECT a FROM db1.o", "enable_global_with_statement"},
+			// compatibility = '20.1' … '21.1' restores the old default
+			// enable_global_with_statement = 0 (measured: the same reads).
+			{`WITH 1 AS "other.secret" SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN "other.secret") SETTINGS compatibility = '20.8'`, "compatibility"},
+			{`CREATE VIEW db1.v AS WITH "other.secret" AS (SELECT toUInt64(1) AS a) SELECT a FROM db1.o WHERE 0 UNION ALL SELECT a FROM "other.secret" SETTINGS compatibility = '21.1'`, "compatibility"},
+			{"SELECT a FROM db1.o SETTINGS compatibility = '25.1'", "compatibility"},
+			// implicit_table_at_top_level names the table a FROM-less SELECT reads.
+			{"SELECT a SETTINGS implicit_table_at_top_level = 'z'", "implicit_table_at_top_level"},
+			{"SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p) SETTINGS implicit_table_at_top_level = 'other.secret'", "implicit_table_at_top_level"},
+			{"CREATE VIEW db1.v AS SELECT a SETTINGS implicit_table_at_top_level = 'z'", "implicit_table_at_top_level"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg(c.name), wantSQL: c.sql})
+		}
+	}
+	// A session SET (the carve-out exists only while the SI surface is
+	// inactive; with it active every SET is the SI catch-all).
+	for _, c := range []struct{ sql, name string }{
+		{"SET enable_global_with_statement = 0", "enable_global_with_statement"},
+		{"SET max_threads = 1, enable_global_with_statement = 0", "enable_global_with_statement"},
+		{"SET implicit_table_at_top_level = 'z'", "implicit_table_at_top_level"},
+		{"SET compatibility = '20.1'", "compatibility"},
+	} {
+		cases = append(cases,
+			tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg(c.name), wantSQL: c.sql},
+			tablerefCase{name: "si/" + c.sql, sql: c.sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+	}
+	// Settings measured not to change binding stay accepted, including the
+	// analyzer switch: every binding rule was measured under both analyzers.
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT a FROM db1.o SETTINGS enable_analyzer = 0",
+				`SELECT a FROM phys."db1.o" "db1.o" SETTINGS enable_analyzer = 0`},
+			{"SELECT a FROM db1.o SETTINGS allow_experimental_analyzer = 0, enable_scopes_for_with_statement = 0, prefer_column_name_to_alias = 1",
+				`SELECT a FROM phys."db1.o" "db1.o" SETTINGS allow_experimental_analyzer = 0, enable_scopes_for_with_statement = 0, prefer_column_name_to_alias = 1`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+	}
+	runTablerefCases(t, cases)
+}
