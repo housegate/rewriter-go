@@ -385,32 +385,35 @@ func TestRewriteDBLevel_showDictionariesStorageIntegrityNamespaces(t *testing.T)
 			wantLogical:  "db1",
 			wantSI:       true,
 		},
+		// An ordinary namespace passes the SI check and is then refused as a
+		// read of system.dictionaries (spec 2026-09-26 §5, "The system
+		// database"), echoing the request SQL.
 		{
-			name:        "ordinary namespace remains passthrough",
+			name:        "ordinary namespace reads system.dictionaries",
 			sql:         "SHOW DICTIONARIES FROM other",
 			physicalDB:  "hg_safe",
-			wantCode:    pb.RewriteCode_Success,
-			wantMessage: "success",
+			wantCode:    pb.RewriteCode_UnsupportedStatement,
+			wantMessage: "system table system.dictionaries is not accessible",
 		},
 		{
-			name:        "TEMPORARY ordinary namespace remains passthrough",
+			name:        "TEMPORARY ordinary namespace reads system.dictionaries",
 			sql:         "SHOW TEMPORARY DICTIONARIES FROM other",
-			wantCode:    pb.RewriteCode_Success,
-			wantMessage: "success",
+			wantCode:    pb.RewriteCode_UnsupportedStatement,
+			wantMessage: "system table system.dictionaries is not accessible",
 		},
 		{
 			name:        "FULL ordinary namespace preserves request SQL",
 			sql:         "sHoW FULL DICTIONARIES   FROM other",
-			wantCode:    pb.RewriteCode_Success,
-			wantMessage: "success",
+			wantCode:    pb.RewriteCode_UnsupportedStatement,
+			wantMessage: "system table system.dictionaries is not accessible",
 		},
 		{
 			name:        "semantic context is not decoded again",
 			sql:         "SHOW DICTIONARIES",
 			contextDB:   `hg\x5Fsafe`,
 			mapContext:  true,
-			wantCode:    pb.RewriteCode_Success,
-			wantMessage: "success",
+			wantCode:    pb.RewriteCode_UnsupportedStatement,
+			wantMessage: "system table system.dictionaries is not accessible",
 		},
 	}
 
@@ -470,7 +473,10 @@ func TestRewriteDBLevel_showDictionariesStorageIntegrityNamespaces(t *testing.T)
 	}
 }
 
-func TestRewriteDBLevel_showDictionariesWithoutStorageIntegrityPassthrough(t *testing.T) {
+// TestRewriteDBLevel_showDictionariesWithoutStorageIntegrityRefused: without
+// the SI surface every SHOW DICTIONARIES form reads system.dictionaries and is
+// refused (spec 2026-09-26 §5, "The system database"), echoing the request.
+func TestRewriteDBLevel_showDictionariesWithoutStorageIntegrityRefused(t *testing.T) {
 	e := newEngine(t)
 	dyn := &pb.RewriteTableDynamicArgs{
 		DatabaseMap:            map[string]string{"other": "phys"},
@@ -489,7 +495,7 @@ func TestRewriteDBLevel_showDictionariesWithoutStorageIntegrityPassthrough(t *te
 			if err != nil || !handled {
 				t.Fatalf("handled=%v err=%v", handled, err)
 			}
-			if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES ||
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "system table system.dictionaries is not accessible" ||
 				resp.GetSqlAfterRewrite() != sql {
 				t.Fatalf("code=%v stmt=%v sql=%q message=%q", resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
 			}
@@ -505,21 +511,24 @@ func TestRewriteDBLevel_prefixedShowDictionariesPreservesRequestWithoutRegenerat
 	sql := "sHoW FULL TEMPORARY DICTIONARIES   FROM other"
 	ast := mustParse(t, base, sql)
 	e := showGenerateOverrideEngine{Engine: base, generated: "SHOW DICTIONARIES FROM formatter_output"}
+	// With dynamic args the form is refused as a system.dictionaries read
+	// (spec 2026-09-26 §5); either way the request SQL is echoed, never the
+	// formatter's regeneration.
 	for _, tc := range []struct {
-		name string
-		opts []*pb.RewriteOption
+		name     string
+		opts     []*pb.RewriteOption
+		wantCode pb.RewriteCode
 	}{
-		{name: "active SI ordinary namespace", opts: dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))},
-		{name: "no SI dynamic args", opts: dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"other": "phys"}})},
-		{name: "no dynamic args"},
+		{name: "active SI ordinary namespace", opts: dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)), wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "no SI dynamic args", opts: dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"other": "phys"}}), wantCode: pb.RewriteCode_UnsupportedStatement},
+		{name: "no dynamic args", wantCode: pb.RewriteCode_Success},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp, handled, err := RewriteDBLevel(e, ast, sql, tc.opts)
 			if err != nil || !handled {
 				t.Fatalf("handled=%v err=%v", handled, err)
 			}
-			if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES ||
-				resp.GetSqlAfterRewrite() != sql {
+			if resp.GetCode() != tc.wantCode || resp.GetSqlAfterRewrite() != sql {
 				t.Fatalf("code=%v stmt=%v sql=%q message=%q", resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
 			}
 		})
@@ -529,6 +538,9 @@ func TestRewriteDBLevel_prefixedShowDictionariesPreservesRequestWithoutRegenerat
 func TestRewriteDBLevel_showDictionariesKeywordDatabaseNamesRemainOrdinary(t *testing.T) {
 	e := newEngine(t)
 	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
+	// Keyword-lexed names are ordinary, not SI, namespaces: the SI check
+	// passes them and the form is then refused as a system.dictionaries read
+	// (spec 2026-09-26 §5), with nothing recorded.
 	for _, db := range []string{"system", "default", "select", "from", "table", "settings", "123db"} {
 		sql := "SHOW FULL DICTIONARIES FROM " + db
 		t.Run(db, func(t *testing.T) {
@@ -537,7 +549,7 @@ func TestRewriteDBLevel_showDictionariesKeywordDatabaseNamesRemainOrdinary(t *te
 			if err != nil || !handled {
 				t.Fatalf("handled=%v err=%v", handled, err)
 			}
-			if resp.GetCode() != pb.RewriteCode_Success || resp.GetStatementType() != pb.StatementType_STATEMENT_TYPE_SHOW_TABLES ||
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "system table system.dictionaries is not accessible" ||
 				resp.GetSqlAfterRewrite() != sql {
 				t.Fatalf("code=%v stmt=%v sql=%q message=%q", resp.GetCode(), resp.GetStatementType(), resp.GetSqlAfterRewrite(), resp.GetMessage())
 			}
@@ -552,10 +564,22 @@ func TestRewriteDBLevel_nonDatabaseShowIgnoresStorageIntegrityContext(t *testing
 	e := newEngine(t)
 	dyn := siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)
 	dyn.UpstreamLogicalDatabaseInContext = "hg_safe"
-	for _, sql := range []string{"SHOW CLUSTERS", "SHOW SETTINGS", "SHOW MERGES", "SHOW CACHES"} {
+	// SHOW MERGES / SHOW CACHES read refused system tables (spec 2026-09-26
+	// §5): refused with the system-table message, never an SI one.
+	for _, c := range []struct {
+		sql      string
+		wantCode pb.RewriteCode
+		wantMsg  string
+	}{
+		{"SHOW CLUSTERS", pb.RewriteCode_Success, "success"},
+		{"SHOW SETTINGS", pb.RewriteCode_Success, "success"},
+		{"SHOW MERGES", pb.RewriteCode_UnsupportedStatement, "system table system.merges is not accessible"},
+		{"SHOW CACHES", pb.RewriteCode_UnsupportedStatement, "system table system.filesystem_cache_settings is not accessible"},
+	} {
+		sql := c.sql
 		ast := mustParse(t, e, sql)
 		resp, handled, err := RewriteDBLevel(e, ast, sql, dynOpt(dyn))
-		if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
+		if err != nil || !handled || resp.GetCode() != c.wantCode || resp.GetMessage() != c.wantMsg {
 			t.Fatalf("%q: handled=%v err=%v resp=%+v", sql, handled, err, resp)
 		}
 		if resp.GetSqlAfterRewrite() != sql || len(resp.GetOriginalAccessedTables()) != 0 {
@@ -947,10 +971,12 @@ func TestRewriteDBLevel_unknownShowKindFallsThroughUnderStorageIntegrity(t *test
 	}
 }
 
-// TestRewriteDBLevel_unknownShowKindStillPassesThroughWithoutStorageIntegrity
-// is the other half: an empty-SI request keeps the legacy pass-through, so the
-// catch-all narrows nothing outside the storage-integrity surface.
-func TestRewriteDBLevel_unknownShowKindStillPassesThroughWithoutStorageIntegrity(t *testing.T) {
+// TestRewriteDBLevel_unknownShowKindRefusedWithoutStorageIntegrity is the
+// other half: without the SI surface an unknown SHOW kind reads an unknown
+// system table and is refused with "statement is not supported" (spec
+// 2026-09-26 §5, "The system database"), while the SHOW kinds the SI surface
+// does not model but that read an allowed table keep the pass-through.
+func TestRewriteDBLevel_unknownShowKindRefusedWithoutStorageIntegrity(t *testing.T) {
 	e := newEngine(t)
 	opts := dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"other": "phys"}})
 	for _, sql := range []string{"SHOW SOMETHINGNEW FROM other", "SHOW SOMETHINGNEW"} {
@@ -959,8 +985,15 @@ func TestRewriteDBLevel_unknownShowKindStillPassesThroughWithoutStorageIntegrity
 		if err != nil || !handled {
 			t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
 		}
-		if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != sql {
-			t.Errorf("%q: code=%v sql=%q, want Success with the statement unchanged", sql, resp.GetCode(), resp.GetSqlAfterRewrite())
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "statement is not supported" || resp.GetSqlAfterRewrite() != sql {
+			t.Errorf("%q: code=%v message=%q sql=%q, want the T7 refusal", sql, resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
+		}
+	}
+	for _, sql := range []string{"SHOW CHANGED SETTINGS", "SHOW SETTING max_threads", "SHOW PRIVILEGES"} {
+		ast := mustParse(t, e, sql)
+		resp, handled, err := RewriteDBLevel(e, ast, sql, opts)
+		if err != nil || !handled || resp.GetCode() != pb.RewriteCode_Success {
+			t.Errorf("%q: handled=%v err=%v resp=%+v, want Success", sql, handled, err, resp)
 		}
 	}
 }

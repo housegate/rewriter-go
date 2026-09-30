@@ -18,6 +18,7 @@ const (
 type DBLevelInfo struct {
 	Kind              DBLevelKind
 	ShowWhat          string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
+	ShowWhatNext      string // SHOW: the token after ShowWhat, uppercased (ROLES in SHOW CURRENT ROLES); "" when none
 	ShowExtended      bool   // SHOW carries the optional EXTENDED prefix (SHOW [EXTENDED] [FULL] COLUMNS ...)
 	ShowFull          bool   // SHOW carries the optional FULL prefix
 	ShowTemporary     bool   // SHOW carries the optional TEMPORARY prefix
@@ -100,6 +101,9 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 			// ASTShowTablesQuery family (TABLES/CLUSTER/SETTINGS/...).
 			info.ShowWhat = strings.ToUpper(toks[i].Text)
 			i++
+			if i < len(toks) {
+				info.ShowWhatNext = strings.ToUpper(toks[i].Text)
+			}
 		}
 		// FROM/IN is a database clause only in this bounded grammar prefix,
 		// immediately after the SHOW kind. Never keep scanning for IN: later IN

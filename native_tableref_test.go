@@ -1677,7 +1677,7 @@ func TestTableRef_Residual2ShowBodies(t *testing.T) {
 	}
 	cases = append(cases,
 		tablerefCase{name: "columns_limit_5", sql: "SHOW COLUMNS FROM o LIMIT 5", wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.o` LIMIT 5"},
-		tablerefCase{name: "dictionaries_like", sql: "SHOW DICTIONARIES LIKE 'a%'", wantCode: pb.RewriteCode_Success},
+		tablerefCase{name: "dictionaries_like", sql: "SHOW DICTIONARIES LIKE 'a%'", wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "system table system.dictionaries is not accessible"},
 		tablerefCase{name: "clusters_like_limit", sql: "SHOW CLUSTERS LIKE 'x' LIMIT 3", wantCode: pb.RewriteCode_Success},
 		tablerefCase{name: "si/clusters_like_limit", sql: "SHOW CLUSTERS LIKE 'x' LIMIT 3", si: true, wantCode: pb.RewriteCode_Success},
 		tablerefCase{name: "keyword_if_call_allowed", sql: "SHOW COLUMNS FROM o WHERE if(1, 1, 0) = 1", wantCode: pb.RewriteCode_Success},

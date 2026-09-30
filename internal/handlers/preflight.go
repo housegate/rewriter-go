@@ -11,7 +11,9 @@ import (
 // PreflightTableReferences applies the position-independent halves of the
 // table-reference policy (spec 2026-09-26 §5) before any handler runs, in
 // precedence order: identifier parameters (T2); for a command node, the
-// unmodelled-class refusal; protected databases (T3); the table-function /
+// unmodelled-class refusal; protected databases (T3); system tables outside
+// the allowlist (systemTableScan; with the SI surface active, deferred to the
+// SI pipeline when the statement names an SI object); the table-function /
 // table-engine / table-setting allowlists (T5, only while the
 // storage-integrity surface is inactive — while it is active,
 // rewriteSelectCore and preflightStorageIntegrityWrite run the same check
@@ -86,6 +88,21 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 		recordAccessedDatabase(resp, db, sel.Dynamic)
 		rejectInvalid(resp, nameresolve.ProtectedDatabaseRejectMessage(db))
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
+	// System tables (spec 2026-09-26 §5, "The system database"): a
+	// caller-input reference to a system table outside the allowlist, in any
+	// position, right after T3 and before T5 / T6 / R5 / R2, in both SI
+	// states. While the SI surface is active and the statement also names a
+	// storage-integrity object, the SI pipeline answers first and the same
+	// check runs on its would-be Success (RejectSystemTablesOnSuccess, from
+	// finalize), so an SI message keeps precedence.
+	if table, refused, siObject, serr := systemTableScan(e, ast, sql, sel); serr != nil {
+		return nil, false, serr
+	} else if refused && !siObject {
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectSystemTable(resp, table, sel)
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
