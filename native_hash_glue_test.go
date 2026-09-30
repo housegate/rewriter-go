@@ -78,3 +78,53 @@ func TestTableRef_HashCommentsStillAccepted(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_HashGlueWithFormatIdentifier pins round 4, R3-1: Polyglot types
+// a bare identifier `format` as a FORMAT token, but only a genuine INSERT …
+// FORMAT data clause exempts the inline payload from the '#' rule. So a
+// statement that merely names `format` before a glued keyword — as a WHERE
+// column, an UPDATE target or value, a function name, or a table name, and in
+// RENAME / EXCHANGE — is scanned in full and refused, in both SI modes.
+// Verified on ClickHouse 26.2 (EXPLAIN AST reads each glued form as in(a,
+// db2.x) with the '# c' as a comment).
+func TestTableRef_HashGlueWithFormatIdentifier(t *testing.T) {
+	glued := []string{
+		"ALTER TABLE db1.o UPDATE b = 1 WHERE format = 1 OR a IN# c\n`db2.x`",
+		"ALTER TABLE db1.o UPDATE format = 1 WHERE a IN# c\n`db2.x`",
+		"ALTER TABLE db1.o UPDATE s = format WHERE a IN# c\n`db2.x`",
+		"ALTER TABLE db1.o UPDATE b = format('{}', 'x') = '' WHERE a IN# c\n`db2.x`",
+		"ALTER TABLE db1.format UPDATE b = 1 WHERE a IN# c\n`db2.x`",
+		"ALTER TABLE db1.o DELETE WHERE format = 1 OR a IN# c\n`db2.x`",
+		"RENAME TABLE db1.format TO db1.y, db1.a TO# c\nphys.`db2.x`",
+		"EXCHANGE TABLES db1.format AND db1.a, db1.b AND# c\nphys.`db2.x`",
+		"SELECT format, a IN# c\n`db2.x` FROM db1.o",
+	}
+	e := newEngine(t)
+	for _, si := range []bool{false, true} {
+		for _, sql := range glued {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil {
+				t.Fatalf("%s: %v", sql, err)
+			}
+			if resp.GetCode() == pb.RewriteCode_Success {
+				t.Errorf("si=%v %q: Success, forwarded %q; want refused", si, sql, resp.GetSqlAfterRewrite())
+			}
+		}
+	}
+	// A genuine INSERT … FORMAT payload that contains '#' data is still accepted,
+	// and a real trailing '# comment' after the payload is a comment.
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"INSERT INTO db1.o FORMAT CSV\n1,#notacomment\n",
+			"INSERT INTO db1.o FORMAT CSV 1,2,3 # c",
+		} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil {
+				t.Fatalf("%s: %v", sql, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success {
+				t.Errorf("si=%v %q: %s %q; want Success", si, sql, resp.GetCode(), resp.GetMessage())
+			}
+		}
+	}
+}

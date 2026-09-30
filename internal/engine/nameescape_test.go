@@ -253,19 +253,30 @@ func TestSameASTIgnoresKeyOrder(t *testing.T) {
 	}
 }
 
-// TestRejectHashGluedTokens pins round 3, N1 at the tokenizer level: an
-// unquoted token containing '#' fails the tokenize; a '#' in a string, a
-// quoted identifier or an INSERT FORMAT payload does not.
+// TestRejectHashGluedTokens pins round 3 N1 / round 4 R3-1 at the token level.
+// tokenizeRaw itself no longer refuses (the check needs the AST to exempt a
+// genuine INSERT FORMAT payload, so it lives in CheckParsedInFull);
+// rejectHashGluedTokens over the whole token stream refuses a '#' glued to an
+// unquoted word and accepts a '#' that is a comment (dropped, no token) or data
+// in a string / quoted identifier.
 func TestRejectHashGluedTokens(t *testing.T) {
 	e := newTestEngine(t)
+	scan := func(s string) error {
+		toks, err := tokenizeRaw(e, s)
+		if err != nil {
+			return err
+		}
+		return rejectHashGluedTokens(toks, len(toks))
+	}
 	for _, s := range []string{
 		"RENAME TABLE# c\n`db2.x` TO db1.y",
 		"SELECT * FROM db1.o WHERE a IN# c\n`db2.x`",
 		"SELECT * FROM# c\ndb1.o",
 		"RENAME TABLE db1.a TO# c\ndb1.b",
+		"ALTER TABLE db1.o UPDATE b = 1 WHERE format = 1 OR a IN# c\n`db2.x`",
 	} {
-		if _, err := tokenizeRaw(e, s); err == nil {
-			t.Errorf("tokenizeRaw(%q) = nil error, want a hash-glue refusal", s)
+		if scan(s) == nil {
+			t.Errorf("rejectHashGluedTokens(%q) = nil, want a hash-glue refusal", s)
 		}
 	}
 	for _, s := range []string{
@@ -273,19 +284,20 @@ func TestRejectHashGluedTokens(t *testing.T) {
 		"SELECT 1 #! comment",
 		"SELECT a #c\nFROM db1.o",
 		"SELECT `a#b`, 'c#d'",
-		"INSERT INTO db1.o FORMAT CSV\n1,#notacomment\n",
 		"SELECT * FROM db1.o WHERE s = 'a # b'",
 	} {
-		if _, err := tokenizeRaw(e, s); err != nil {
-			t.Errorf("tokenizeRaw(%q) = %v, want accepted", s, err)
+		if err := scan(s); err != nil {
+			t.Errorf("rejectHashGluedTokens(%q) = %v, want accepted", s, err)
 		}
 	}
-	// hashCheckLimit stops at a depth-0 FORMAT and its name, but a FORMAT nested
-	// in parentheses is not a payload boundary.
-	if got := hashCheckLimit([]rawToken{{TokenType: "SELECT"}, {TokenType: "FORMAT"}, {TokenType: "VAR", Text: "JSON"}, {TokenType: "VAR", Text: "x#y"}}); got != 3 {
-		t.Errorf("hashCheckLimit after FORMAT = %d, want 3", got)
+	// The limit bounds the scan: a '#' token past the limit (an INSERT FORMAT
+	// payload the gate exempts by cutting at the format name) is not refused,
+	// one before it is.
+	pay := []rawToken{{TokenType: "INSERT"}, {TokenType: "FORMAT"}, {TokenType: "VAR", Text: "CSV"}, {TokenType: "VAR", Text: "1,#x"}}
+	if err := rejectHashGluedTokens(pay, 3); err != nil {
+		t.Errorf("payload past limit refused: %v", err)
 	}
-	if got := hashCheckLimit([]rawToken{{TokenType: "L_PAREN"}, {TokenType: "FORMAT"}, {TokenType: "R_PAREN"}, {TokenType: "VAR", Text: "z"}}); got != 4 {
-		t.Errorf("hashCheckLimit nested FORMAT = %d, want 4", got)
+	if err := rejectHashGluedTokens(pay, len(pay)); err == nil {
+		t.Errorf("payload within limit not refused")
 	}
 }

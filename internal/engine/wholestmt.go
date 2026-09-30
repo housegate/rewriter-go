@@ -49,6 +49,14 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 			}
 		}
 	}
+	// The glued-'#' refusal (round 3 N1 / round 4 R3-1) is enforced here, over
+	// exactly the tokens up to the AST-proven INSERT … FORMAT payload boundary
+	// computed above. A non-INSERT statement keeps every token, so a bare
+	// identifier Polyglot types FORMAT (`format` as a column, target or table
+	// name) cannot exempt the rest of it.
+	if herr := rejectHashGluedTokens(toks, len(toks)); herr != nil {
+		return herr
+	}
 	for len(toks) > 0 && toks[len(toks)-1].TokenType == "SEMICOLON" {
 		toks = toks[:len(toks)-1]
 	}

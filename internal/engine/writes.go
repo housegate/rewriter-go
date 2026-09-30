@@ -1116,6 +1116,11 @@ type rawToken struct {
 }
 
 // tokenizeRaw runs the engine lexer over sql and decodes the token stream.
+// tokenizeRaw tokenizes sql and normalizes token spans and text. It does NOT
+// enforce the glued-'#' rule: that check needs the parsed AST to exempt a
+// genuine INSERT … FORMAT data payload while refusing every other unquoted '#'
+// (round 4 R3-1), so it lives in CheckParsedInFull, which runs before any
+// handler or opaque scanner on every SQL-generating path.
 func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 	toksAST, err := e.Tokenize(sql)
 	if err != nil {
@@ -1138,9 +1143,6 @@ func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 			return nil, err
 		}
 	}
-	if err := rejectHashGluedTokens(toks); err != nil {
-		return nil, err
-	}
 	return toks, nil
 }
 
@@ -1155,22 +1157,25 @@ func stringLikeTokenType(tt string) bool {
 	return false
 }
 
-// rejectHashGluedTokens fails closed on any unquoted token whose text contains
-// a '#'. ClickHouse ends an unquoted word at '#' and reads '# …' / '#!…' as a
-// line comment, but the pinned Polyglot lexes a '#' glued to a word (`TABLE#`,
-// `IN#`, `TO#`) as one identifier token. That divergence let a keyword vanish
-// from Polyglot's view — `RENAME TABLE# c<newline>…` scanned as having no TABLE
-// keyword and was forwarded verbatim, renaming another tenant's table (round 3
-// N1) — so every statement carrying such a token is refused, in every mode.
+// rejectHashGluedTokens fails closed on any unquoted token, in toks[:limit],
+// whose text contains a '#'. ClickHouse ends an unquoted word at '#' and reads
+// '# …' / '#!…' as a line comment, but the pinned Polyglot lexes a '#' glued to
+// a word (`TABLE#`, `IN#`, `TO#`) as one identifier token. That divergence let
+// a keyword vanish from Polyglot's view — `RENAME TABLE# c<newline>…` scanned
+// as having no TABLE keyword and was forwarded verbatim, renaming another
+// tenant's table (round 3 N1) — so every statement carrying such a token is
+// refused, in every mode.
 //
-// Excluded: a string / quoted-identifier / heredoc token, where '#' is data;
-// a real `# comment` / `#!comment` after whitespace, which Polyglot drops (no
-// token); and an INSERT … FORMAT inline payload, which is data ClickHouse reads
-// as rows, not SQL (the whole-statement gate skips it the same way). This
-// extends the mid-statement gate's regenerated-bare-word '#' rule (PR #50) to
-// the input text.
-func rejectHashGluedTokens(toks []rawToken) error {
-	limit := hashCheckLimit(toks)
+// limit is len(toks) for every statement except a genuine INSERT … FORMAT one,
+// where the caller passes the format-name boundary so the inline data payload
+// (which ClickHouse reads as rows, not SQL, and may legitimately contain '#')
+// is not scanned. A string / quoted-identifier / heredoc token is skipped
+// because '#' is data there. This extends the mid-statement gate's
+// regenerated-bare-word '#' rule (PR #50) to the input text.
+func rejectHashGluedTokens(toks []rawToken, limit int) error {
+	if limit > len(toks) {
+		limit = len(toks)
+	}
 	for i := 0; i < limit; i++ {
 		if stringLikeTokenType(toks[i].TokenType) {
 			continue
@@ -1180,29 +1185,6 @@ func rejectHashGluedTokens(toks []rawToken) error {
 		}
 	}
 	return nil
-}
-
-// hashCheckLimit returns the number of leading tokens rejectHashGluedTokens
-// scans: everything up to and including a depth-0 `FORMAT <name>`, after which
-// an INSERT's tokens are its inline data payload (Polyglot lexes the payload as
-// ordinary tokens). A statement with no such clause is scanned in full.
-func hashCheckLimit(toks []rawToken) int {
-	depth := 0
-	for i := 0; i < len(toks); i++ {
-		switch toks[i].TokenType {
-		case "L_PAREN", "L_BRACKET", "L_BRACE":
-			depth++
-		case "R_PAREN", "R_BRACKET", "R_BRACE":
-			if depth > 0 {
-				depth--
-			}
-		case "FORMAT":
-			if depth == 0 && i+1 < len(toks) {
-				return i + 2 // FORMAT and the format-name token; the rest is payload
-			}
-		}
-	}
-	return len(toks)
 }
 
 // decodeRawTokenText replaces the text of a quoted identifier or single-quoted
