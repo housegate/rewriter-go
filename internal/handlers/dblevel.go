@@ -345,6 +345,18 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if table, refused, _ := systemTableShowRefusal(info); refused {
 			return rejectShowSystemTable(sql, resp, table)
 		}
+		if info.ShowTableMultiPart {
+			// SHOW COLUMNS / INDEX FROM a.b.c: ClickHouse reads database a,
+			// table c (engine.DBLevelInfo.ShowTableMultiPart). The echo path
+			// below would forward it unmapped and unreported, so it is refused
+			// fail-closed; a refused system table in it was already named by
+			// the system-table check (spec 2026-09-26 §5, "The system
+			// database").
+			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+			resp.SqlAfterRewrite = sql
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
+		}
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
 		}

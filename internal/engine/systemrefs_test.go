@@ -59,8 +59,14 @@ func TestQualifiedSourceRuns(t *testing.T) {
 		{"RENAME TABLE system /* c */ . query_log TO db1.x", []ObjectRef{
 			{DB: "system", Table: "query_log", Exact: true}, {DB: "db1", Table: "x", Exact: true}}},
 		{"GRANT SELECT ON system.* TO u", []ObjectRef{{DB: "system", Table: "*"}}},
-		{"SELECT a.b.c", []ObjectRef{{DB: "a", Table: "b", Exact: true}}},
+		{"SELECT a.b.c", []ObjectRef{{DB: "a", Table: "c", Exact: true}, {DB: "a", Table: "b", Exact: true}}},
 		{"SELECT 'system.processes'", nil},
+		{"DESCRIBE “system”.“processes”", []ObjectRef{{DB: "system", Table: "processes", Exact: true}}},
+		{"DESCRIBE ‘system’.processes", nil},
+		{"SHOW COLUMNS FROM system.tables.processes", []ObjectRef{
+			{DB: "system", Table: "processes", Exact: true}, {DB: "system", Table: "tables", Exact: true}}},
+		{"SHOW COLUMNS FROM a.b.c.d", []ObjectRef{{DB: "a", Table: "d", Exact: true}, {DB: "a", Table: "b", Exact: true}}},
+		{"SHOW COLUMNS FROM system.tables.*", []ObjectRef{{DB: "system", Table: "*"}, {DB: "system", Table: "tables", Exact: true}}},
 	} {
 		got, ok := qualifiedSourceRuns(e, c.text)
 		if !ok {

@@ -55,21 +55,35 @@ func IsSystemDatabase(db, contextDB string) bool {
 	return db == systemDatabaseName
 }
 
-// CollectObjectRefs returns, in document order, every caller-input
-// reference to a table-like object, in every position the table-reference
-// policy governs: FROM / JOIN / subquery / CTE / UNION arm / view() and
-// view / materialized-view bodies / INSERT … SELECT and CTAS sources / IN
-// operands (every form) / column and ALTER-action expressions, write and DDL
-// targets, table-function and table-engine arguments, string-lookup
-// arguments (joinGet / dictGet / hasColumnInTable families), opaque ALTER,
-// CREATE VIEW column-list and INSERT query text, and, for a command node (DESCRIBE, EXISTS, SHOW
-// CREATE, SHOW COLUMNS / INDEX, RENAME, ALTER … UPDATE, GRANT, …), every
-// qualified `<db>.<name>` run in its text plus its unqualified target. Names
-// are decoded the way ClickHouse's ParserIdentifier reads them. Only caller
-// input is read: SQL the rewriter emits is never passed here, so the
-// rewriter's own system.tables / system.columns synthesis is not a
-// reference. A qualified run in command or opaque text can also be a
-// qualified column; callers use the result only to refuse.
+// CollectObjectRefs returns every caller-input reference to a table-like
+// object, in every position the table-reference policy governs: FROM / JOIN
+// / subquery / CTE / UNION arm / view() and view / materialized-view bodies /
+// INSERT … SELECT and CTAS sources / IN operands (every form) / column and
+// ALTER-action expressions, write and DDL targets, table-function and
+// table-engine arguments, string-lookup arguments (joinGet / dictGet /
+// hasColumnInTable families), opaque ALTER, CREATE VIEW column-list and
+// INSERT query text, and, for a command node (DESCRIBE, EXISTS, SHOW CREATE,
+// SHOW COLUMNS / INDEX, RENAME, ALTER … UPDATE, GRANT, …), every qualified
+// `<db>.<name>` run in its text plus its unqualified target. Names are
+// decoded the way ClickHouse's ParserIdentifier reads them. Only caller input
+// is read: SQL the rewriter emits is never passed here, so the rewriter's own
+// system.tables / system.columns synthesis is not a reference. A qualified
+// run in command or opaque text can also be a qualified column; callers use
+// the result only to refuse.
+//
+// The order is deterministic and is part of the cross-engine contract,
+// because the first refused reference names the refusal. It is collector
+// order, not strict document order:
+//   - structured statement: the statement's own write / DDL targets (in
+//     AllWriteTargets order), then every read source and carrier in walker
+//     order (a CTE body before the main query, the select list before FROM,
+//     FROM / JOIN before WHERE / IN, a FROM subquery before a later JOIN),
+//     then the qualified runs of the opaque texts (ALTER actions, view
+//     column-list items, the INSERT query text), then the string-lookup
+//     arguments in walk order;
+//   - command node: the qualified runs of its text in text order, then the
+//     SHOW COLUMNS / INDEX target, then the unqualified DESCRIBE / EXISTS /
+//     SHOW CREATE target.
 func CollectObjectRefs(e Engine, ast AST, sql string) ([]ObjectRef, error) {
 	var out []ObjectRef
 	addTarget := func(tt TableTarget) {
@@ -173,13 +187,15 @@ const errTokenizeObjectRefs = objectRefsError("engine: tokenize object reference
 // qualifiedSourceRuns scans text with the engine tokenizer and returns every
 // `<db> . <name>` run whose first part is not itself the table half of a
 // longer run, with each part read from its source lexeme the way ClickHouse
-// reads it: a bare word as spelled (a keyword token such as SYSTEM
-// included: the tokenizer types it by spelling, ClickHouse reads it as a
-// name here), a quoted identifier decoded by clickhouseUnquote. Whitespace
-// and comments between the parts do not matter, as for ClickHouse. A
-// `<db> .` followed by anything that is not a name (`system.*`) is a
-// reference to no static object. ok=false means the text could not be
-// tokenized.
+// reads it: a bare word as spelled (a keyword token such as SYSTEM included:
+// the tokenizer types it by spelling, ClickHouse reads it as a name here), a
+// quoted identifier decoded by clickhouseUnquote, a “…” identifier verbatim.
+// Whitespace and comments between the parts do not matter, as for
+// ClickHouse. A `<db> .` followed by anything that is not a name
+// (`system.*`) is a reference to no static object. For a run of three or
+// more parts, `<first> . <last>` (ClickHouse's SHOW COLUMNS / INDEX reading)
+// is reported before `<first> . <second>` (an expression's reading). ok=false
+// means the text could not be tokenized.
 func qualifiedSourceRuns(e Engine, text string) ([]ObjectRef, bool) {
 	toks, err := tokenizeRaw(e, text)
 	if err != nil {
@@ -205,14 +221,35 @@ func qualifiedSourceRuns(e Engine, text string) ([]ObjectRef, bool) {
 				ref.Table = toks[i+2].Text
 			}
 		}
+		// A run of three or more parts: ClickHouse's SHOW COLUMNS / INDEX
+		// read it as (first part, LAST part); an expression reads it as
+		// (first, second) plus a column. Report the (first, last) reading
+		// first, then (first, second), so both are checked; a caller that
+		// only refuses errs toward refusing.
+		if ref.Exact {
+			j := i + 2
+			for j+2 < len(toks) && toks[j+1].TokenType == "DOT" {
+				last, ok := sourceNameValue(text, toks[j+2])
+				if !ok {
+					out = append(out, ObjectRef{DB: db, Table: toks[j+2].Text})
+					break
+				}
+				j += 2
+				if j+1 >= len(toks) || toks[j+1].TokenType != "DOT" {
+					out = append(out, ObjectRef{DB: db, Table: last, Exact: true})
+				}
+			}
+		}
 		out = append(out, ref)
 	}
 	return out, true
 }
 
-// sourceNameValue reads one token as a name from its source bytes: a bare
-// word ([A-Za-z_][A-Za-z0-9_$]*) as spelled, or a backtick / double-quoted
-// identifier decoded with ClickHouse's rules. Anything else is not a name.
+// sourceNameValue reads one token as a name from its source bytes, the way
+// ClickHouse's lexer reads an identifier: a bare word ([A-Za-z_][A-Za-z0-9_$]*)
+// as spelled, a backtick / double-quoted identifier decoded with ClickHouse's
+// rules, or a Unicode “…” identifier with its body verbatim. Anything else (a
+// string, a number, an operator) is not a name.
 func sourceNameValue(text string, tok rawToken) (string, bool) {
 	start, end := tok.Span.Start, tok.Span.End
 	if start < 0 || end > len(text) || start >= end {
@@ -222,6 +259,11 @@ func sourceNameValue(text string, tok rawToken) (string, bool) {
 	switch raw[0] {
 	case '`', '"':
 		return clickhouseUnquote(raw)
+	}
+	if strings.HasPrefix(raw, "“") {
+		// ClickHouse's lexer also reads “…” as a quoted identifier, with the
+		// body verbatim (no escapes); ‘…’ is a string, not a name.
+		return unicodeQuoted(raw, "“", "”")
 	}
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]

@@ -8,7 +8,8 @@ import (
 
 // systemTableScan reads every caller-input object reference of the
 // statement once (engine.CollectObjectRefs) and returns the first, in
-// document order, that names a system table outside the allowlist (spec
+// collector order (documented there), that names a system table outside the
+// allowlist (spec
 // 2026-09-26 §5, "The system database", step 1), or refused=false. siObject
 // reports that the statement also names a storage-integrity object — an SI
 // physical or reserved database, an Active SI table (qualified or through the
@@ -30,6 +31,8 @@ func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolv
 	ctx := dyn.GetUpstreamLogicalDatabaseInContext()
 	for _, ref := range refs {
 		if engine.IsSystemDatabase(ref.DB, ctx) {
+			// A pattern or a non-static name (Exact false) is never allowed,
+			// whatever its text.
 			if !refused && !(ref.Exact && nameresolve.SystemTableAllowed(ref.Table)) {
 				table, refused = ref.Table, true
 			}
@@ -56,7 +59,7 @@ func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolv
 	return table, refused, siObject, nil
 }
 
-// rejectSystemTable turns a SystemTableRefusal hit into resp's refusal:
+// rejectSystemTable turns a systemTableScan hit into resp's refusal:
 // UnsupportedStatement, nameresolve.SystemTableRefusedMessage, the system
 // table recorded as accessed (once), and no rewrite maps, so nothing of a
 // partial rewrite leaks.
@@ -77,9 +80,11 @@ func rejectSystemTable(resp *pb.RewriteSQLResponse, table string, sel nameresolv
 // 2026-09-26 §5: SI messages keep precedence), and the check runs on its
 // would-be Success, before the mid-statement drop gate. It runs on every
 // SI-active Success, so it is also the backstop for any path the preflight
-// did not see. It reports whether it refused resp. A collector error
-// refuses with the SI catch-all, like every other handler error under the
-// active surface.
+// did not see. It reports whether it refused resp; a refusal clears the
+// rewrite maps and keeps the original_accessed_tables the SI pipeline
+// recorded (with the system table added once). A collector error refuses
+// with the SI catch-all, like every other handler error under the active
+// surface.
 func RejectSystemTablesOnSuccess(e engine.Engine, ast engine.AST, sql string, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) bool {
 	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		return false
@@ -88,6 +93,9 @@ func RejectSystemTablesOnSuccess(e engine.Engine, ast engine.AST, sql string, se
 	if err != nil {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = nameresolve.StorageIntegrityUnmodelledMessage
+		resp.TableRewrites = nil
+		resp.DatabaseRewrites = nil
+		resp.PrivilegesDeltas = nil
 		resp.SqlAfterRewrite = sql
 		return true
 	}

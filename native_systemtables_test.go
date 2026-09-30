@@ -369,3 +369,115 @@ func TestSystemTables_RefusalReportsTheTable(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemTables_UnicodeQuotedNames: ClickHouse's lexer reads “…” as a
+// quoted identifier with a verbatim body (measured on 26.2 and 25.8:
+// DESCRIBE “system”.“processes” lists system.processes' columns), so the
+// command-text scan decodes it like `…` and "…" (review fix round 1,
+// Important 1).
+func TestSystemTables_UnicodeQuotedNames(t *testing.T) {
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, table string }{
+		{"DESCRIBE “system”.“processes”", "processes"},
+		{"DESCRIBE TABLE “system”.processes", "processes"},
+		{"DESC “system”.“query_log”", "query_log"},
+		{"DESCRIBE TABLE “system”.“processes” SETTINGS describe_include_subcolumns = 1", "processes"},
+		{"DESCRIBE system.“processes”", "processes"},
+		{"SHOW COLUMNS FROM “system”.“processes”", "processes"},
+		{"EXISTS TABLE “system”.“processes”", "processes"},
+		{"SHOW CREATE TABLE “system”.“processes”", "processes"},
+		{"RENAME TABLE “system”.“query_log” TO db1.x", "query_log"},
+	} {
+		cases = append(cases, sysRefused(c.sql, c.sql, c.table)...)
+	}
+	cases = append(cases, sysAllowed("allowed unicode-quoted", "DESCRIBE “system”.“tables”")...)
+	runTablerefCases(t, cases)
+}
+
+// TestSystemTables_MultiPartShowTargets: ClickHouse's SHOW COLUMNS / INDEX
+// read a target of three or more parts as (first part, last part) (measured
+// on 26.2 and 25.8: SHOW COLUMNS FROM system.tables.processes lists
+// system.processes). The scan checks that reading, and any multi-part target
+// left is refused fail-closed (review fix round 1, Important 2).
+func TestSystemTables_MultiPartShowTargets(t *testing.T) {
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, table string }{
+		{"SHOW COLUMNS FROM system.tables.processes", "processes"},
+		{"SHOW FULL COLUMNS FROM system.tables.query_log", "query_log"},
+		{"SHOW EXTENDED COLUMNS FROM system.tables.processes", "processes"},
+		{"SHOW COLUMNS FROM system.one.processes", "processes"},
+		{"SHOW COLUMNS FROM `system`.`tables`.`processes`", "processes"},
+		{"SHOW COLUMNS FROM system.tables.x.processes", "processes"},
+		{"SHOW INDEX FROM system.tables.processes", "processes"},
+		{"SHOW INDEXES IN system.one.processes", "processes"},
+		{"SHOW KEYS FROM system.columns.processes", "processes"},
+		// (first, last) is allowed, (first, second) is not: still refused.
+		{"SHOW COLUMNS FROM system.processes.tables", "processes"},
+	} {
+		cases = append(cases, sysRefused(c.sql, c.sql, c.table)...)
+	}
+	for _, sql := range []string{
+		"SHOW COLUMNS FROM system.one.tables",
+		"SHOW COLUMNS FROM db2.x.y",
+		"SHOW INDEX FROM default.x.y",
+		"SHOW COLUMNS FROM db2.x.y FROM db2",
+	} {
+		for _, si := range []bool{false, true} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+	}
+	cases = append(cases,
+		tablerefCase{name: "own db multi-part", sql: "SHOW COLUMNS FROM db1.x.y",
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
+		tablerefCase{name: "own db multi-part SI", sql: "SHOW COLUMNS FROM db1.x.y", si: true,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "storage-integrity logical database db1 is not directly addressable"},
+		tablerefCase{name: "two parts still pass", sql: "SHOW COLUMNS FROM db2.x", wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM db2.x"},
+	)
+	runTablerefCases(t, cases)
+}
+
+// TestSystemTables_CollectorOrder pins which refused table a statement with
+// several is named after: engine.CollectObjectRefs' collector order (write
+// targets, read sources in walker order, opaque texts, string lookups), not
+// strict document order (review fix round 1, Minor 2).
+func TestSystemTables_CollectorOrder(t *testing.T) {
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, table string }{
+		{"SELECT dictGet('system.aaa', 'x', 1) FROM system.processes", "processes"},
+		{"SELECT hasColumnInTable('system', 'aaa', 'x') FROM system.processes", "processes"},
+		{"SELECT joinGet('system.aaa', 'x', 1) FROM db1.o WHERE a IN (SELECT 1 FROM system.merges)", "merges"},
+		{"INSERT INTO system.query_log SELECT * FROM system.processes", "query_log"},
+		{"SELECT * FROM system.merges WHERE a IN (SELECT 1 FROM system.processes)", "merges"},
+		{"WITH x AS (SELECT * FROM system.processes) SELECT * FROM system.merges, x", "processes"},
+		{"SELECT (SELECT 1 FROM system.processes) FROM system.merges", "processes"},
+		{"SELECT * FROM system.merges JOIN system.processes USING (a)", "merges"},
+	} {
+		cases = append(cases, sysRefused(c.sql, c.sql, c.table)...)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestSystemTables_DeferredPrecedenceUnderSI pins the exact deferral rule:
+// with the SI surface active and an SI object named, the system-table check
+// runs only on the pipeline's would-be Success, so every refusal the rest of
+// the pipeline issues first (T6 in the preflight, T5 / R5 inside the SI
+// handlers) outranks it (review fix round 1, Minor 1). With the surface
+// inactive the system-table message wins.
+func TestSystemTables_DeferredPrecedenceUnderSI(t *testing.T) {
+	var cases []tablerefCase
+	for _, c := range []struct{ sql, siMsg string }{
+		{"SELECT joinGet('db1.o', 'a', 1) FROM db1.t JOIN system.processes USING (a)",
+			`joinGet target "db1.o" does not resolve through the caller's databases`},
+		{"SELECT * FROM db1.t JOIN system.processes USING (a) JOIN mysql('h:1', 'd', 't', 'u', 'p') USING (a)",
+			"table function mysql is not accepted"},
+		{"SELECT * FROM db1.t JOIN system.processes USING (a) SETTINGS additional_result_filter = '1'",
+			"table setting additional_result_filter is not accepted"},
+	} {
+		cases = append(cases,
+			tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: systemMsg("processes")},
+			tablerefCase{name: c.sql + " SI", sql: c.sql, si: true, wantMsg: c.siMsg,
+				wantCode: map[bool]pb.RewriteCode{true: pb.RewriteCode_InvalidRewriteRequest, false: pb.RewriteCode_UnsupportedStatement}[strings.HasPrefix(c.siMsg, "joinGet")]})
+	}
+	runTablerefCases(t, cases)
+}
