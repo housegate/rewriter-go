@@ -53,6 +53,10 @@ jobs:
       image: rust:1-bookworm
       volumes:
         - rewriter-go-ci-cache:/cache
+    # Container jobs default to `sh`; the steps use bash features.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
