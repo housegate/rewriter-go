@@ -3175,24 +3175,16 @@ func TestTableRef_ViewColumnListIsWalkedLikeATable(t *testing.T) {
 }
 
 // TestTableRef_ViewColumnListReadFreeShapesStayAccepted pins that a view
-// column list without a read keeps its answer: Success, as for the same
-// CREATE TABLE column list. The generated SQL is pinned as it is today:
-// Polyglot's generator drops a view column's DEFAULT / MATERIALIZED / ALIAS /
-// CODEC / COMMENT clauses (a documented residual, see AGENTS.md).
+// column list without a read keeps the same CREATE TABLE column list's
+// answer when Polyglot regenerates it faithfully: Success, generated SQL
+// pinned. A read-free column whose DEFAULT / MATERIALIZED / ALIAS / CODEC /
+// COMMENT the generator drops is refused instead, by the mid-statement drop
+// gate (see AGENTS.md), because forwarding the regenerated statement would
+// silently change what ClickHouse creates.
 func TestTableRef_ViewColumnListReadFreeShapesStayAccepted(t *testing.T) {
 	var cases []tablerefCase
 	for _, si := range []bool{false, true} {
 		for _, c := range []struct{ sql, want string }{
-			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT 1) ENGINE = Memory AS SELECT 1 AS a",
-				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8) ENGINE=Memory AS SELECT 1 AS a`},
-			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT (SELECT 1)) ENGINE = Memory AS SELECT 1 AS a",
-				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8) ENGINE=Memory AS SELECT 1 AS a`},
-			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8 MATERIALIZED 1 IN (1, 2)) ENGINE = Memory AS SELECT 1 AS a",
-				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8) ENGINE=Memory AS SELECT 1 AS a`},
-			{"CREATE MATERIALIZED VIEW db1.mv TO db1.o (a UInt8 ALIAS 1 IN tuple(1, 2), b UInt8 CODEC(ZSTD(1))) AS SELECT 1 AS a",
-				`CREATE MATERIALIZED VIEW phys."db1.mv" TO phys."db1.o" (a UInt8, b UInt8) AS SELECT 1 AS a`},
-			{"CREATE VIEW db1.v (a UInt8 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b",
-				`CREATE VIEW phys."db1.v" (a UInt8, b String) AS SELECT 1 AS a, 'b' AS b`},
 			{"CREATE VIEW db1.v (a, b) AS SELECT 1, 2",
 				`CREATE VIEW phys."db1.v" (a, b) AS SELECT 1, 2`},
 			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8, INDEX i a TYPE minmax) ENGINE = MergeTree ORDER BY a AS SELECT 1 AS a",
@@ -3203,6 +3195,15 @@ func TestTableRef_ViewColumnListReadFreeShapesStayAccepted(t *testing.T) {
 				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8, PRIMARY KEY a) ENGINE=MergeTree AS SELECT 1 AS a`},
 		} {
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+		for _, sql := range []string{
+			"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT 1) ENGINE = Memory AS SELECT 1 AS a",
+			"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT (SELECT 1)) ENGINE = Memory AS SELECT 1 AS a",
+			"CREATE MATERIALIZED VIEW db1.mv (a UInt8 MATERIALIZED 1 IN (1, 2)) ENGINE = Memory AS SELECT 1 AS a",
+			"CREATE MATERIALIZED VIEW db1.mv TO db1.o (a UInt8 ALIAS 1 IN tuple(1, 2), b UInt8 CODEC(ZSTD(1))) AS SELECT 1 AS a",
+			"CREATE VIEW db1.v (a UInt8 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"})
 		}
 	}
 	runTablerefCases(t, cases)
