@@ -1182,7 +1182,7 @@ func walkInsertObjects(body map[string]any, parent readSourceScope, visitor read
 				detail.ref.Source == NamespaceRefTableFunction && visitor.namespace != nil {
 				visitor.namespace(function, detail)
 			}
-			if err := walkExpression(function["args"], scope, visitor); err != nil {
+			if err := walkExpression(function["args"], tableFunctionArgScope(function, scope), visitor); err != nil {
 				return err
 			}
 			if err := rejectUnknownReadFields(function, fields("name", "args", "distinct",
@@ -1266,7 +1266,7 @@ func walkCreateTableFunctionSource(node any, scope readSourceScope, visitor read
 		detail.ref.Source == NamespaceRefTableFunction && visitor.namespace != nil {
 		visitor.namespace(function, detail)
 	}
-	return walkExpression(function["args"], scope, visitor)
+	return walkExpression(function["args"], tableFunctionArgScope(function, scope), visitor)
 }
 
 // CREATE adapters are deliberately the only place where engine and dictionary
@@ -1739,7 +1739,7 @@ func walkTableSource(node any, scope readSourceScope, visitor readSourceVisitor)
 					visitor.function(function, detail)
 				}
 			}
-			return walkExpression(function["args"], scope, visitor)
+			return walkExpression(function["args"], tableFunctionArgScope(function, scope), visitor)
 		}
 		if alias, ok := n["alias"].(map[string]any); ok {
 			return walkTableSource(alias["this"], scope, visitor)
@@ -1774,6 +1774,39 @@ func walkTableSource(node any, scope readSourceScope, visitor readSourceVisitor)
 	default:
 		return nil
 	}
+}
+
+// QueryBodiedTableFunction reports whether a table function's argument is an
+// independent query: view(SELECT …), viewIfPermitted(SELECT … ELSE …) and
+// viewExplain(…, (SELECT …)), matched case-insensitively as ClickHouse
+// resolves table-function names. ClickHouse 26.2 (analyzer on, the default)
+// resolves such a body as its own query: a CTE declared outside it never
+// binds a name inside it, at any depth, so `WITH t AS (…) SELECT * FROM
+// view(SELECT * FROM t)` reads the table t of the current database. An
+// ordinary subquery and a scalar argument of any other table function
+// (`numbers((SELECT count() FROM t))`) do see the outer CTE. Measured
+// 2026-09-30.
+func QueryBodiedTableFunction(name string) bool {
+	switch strings.ToLower(name) {
+	case "view", "viewifpermitted", "viewexplain":
+		return true
+	}
+	return false
+}
+
+// tableFunctionArgScope is the scope a source-role table function's arguments
+// are walked in: the enclosing scope for an ordinary table function, and an
+// empty one for a query-bodied one, so an outer CTE or alias can never hide a
+// table inside its body. A table the body names is then rewritten, reported
+// and storage-integrity checked like any other; where ClickHouse would in fact
+// bind the outer CTE (a CREATE VIEW / MATERIALIZED VIEW body, the legacy
+// analyzer) the rewrite is fail-safe: it reaches only the caller's own
+// governed table.
+func tableFunctionArgScope(function map[string]any, scope readSourceScope) readSourceScope {
+	if QueryBodiedTableFunction(nameOf(function)) {
+		return readSourceScope{}
+	}
+	return scope
 }
 
 func isTableRefPayload(node map[string]any) bool {
