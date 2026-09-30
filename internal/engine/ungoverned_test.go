@@ -46,9 +46,14 @@ func TestOpaqueTextIsUngoverned(t *testing.T) {
 		"ALTER TABLE db1.o UPDATE b = 1 WHERE 1, DELETE WHERE a IN db1.p":           true,
 		"ALTER TABLE db1.o UPDATE b = 1 WHERE 1, FETCH PARTITION tuple() FROM '/x'": true,
 		// MODIFY REFRESH … DEPENDS ON names tables (amendment 2026-10-01).
-		"MODIFY REFRESH EVERY 1 HOUR":                                                      false,
-		"MODIFY REFRESH EVERY 1 HOUR APPEND":                                               false,
-		"MODIFY COMMENT 'refresh depends on'":                                              false,
+		"MODIFY REFRESH EVERY 1 HOUR":         false,
+		"MODIFY REFRESH EVERY 1 HOUR APPEND":  false,
+		"MODIFY COMMENT 'refresh depends on'": false,
+		// An EXPLAIN subquery (fix round 1).
+		"MODIFY COLUMN b UInt8 DEFAULT (EXPLAIN AST INSERT INTO db1.p VALUES (1))":         true,
+		"DELETE WHERE a = ( explain ast SELECT 1)":                                         true,
+		"MODIFY COMMENT '(EXPLAIN'":                                                        false,
+		"MODIFY COLUMN explain UInt8":                                                      false,
 		"MODIFY REFRESH EVERY 1 HOUR DEPENDS ON db2.x":                                     true,
 		"MODIFY REFRESH AFTER 1 HOUR depends on `db2.x`":                                   true,
 		"MODIFY REFRESH EVERY 1 HOUR DEPENDS /* c */ ON db2.x":                             true,
@@ -361,6 +366,46 @@ func TestViewColumnListRawTextsFailsClosed(t *testing.T) {
 	} {
 		if got, err := ViewColumnListRawTexts(e, ast, sql); err == nil {
 			t.Errorf("ViewColumnListRawTexts(%q) = %q, want an error", sql, got)
+		}
+	}
+}
+
+func TestExpressionPositionHasReadsRefusesEmbeddedStatements(t *testing.T) {
+	e := newTestEngine(t)
+	for _, sql := range []string{
+		"CREATE TABLE db1.n (d Date, n UInt8) ENGINE = MergeTree(d, (EXPLAIN SELECT 1 FROM phys.x), 8192)",
+		"CREATE TABLE db1.n (n UInt8) ENGINE = MergeTree ORDER BY n PARTITION BY (EXPLAIN AST SELECT 1)",
+		"CREATE TABLE db1.n (n UInt8 DEFAULT (EXPLAIN SELECT 1)) ENGINE = Memory",
+		"ALTER TABLE db1.o ADD COLUMN c UInt8 DEFAULT (EXPLAIN SELECT 1)",
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", sql, err)
+		}
+		if _, err := ExpressionPositionHasReads(ast); err == nil {
+			t.Errorf("ExpressionPositionHasReads(%s): want an embedded-statement error", sql)
+		}
+	}
+}
+
+func TestDeclaredTypeTexts(t *testing.T) {
+	e := newTestEngine(t)
+	for sql, want := range map[string][]string{
+		"CREATE TABLE db1.n (n FixedString((SELECT 1 FROM db1.o))) ENGINE = Memory": {"FIXEDSTRING((SELECT 1 FROM db1.o))"},
+		"CREATE TABLE db1.n (n UInt8 CODEC(ZSTD(3))) ENGINE = Memory":               {"ZSTD(3)"},
+		"ALTER TABLE db1.o ADD COLUMN c Enum8('a' = 1)":                             {"Enum8('a' = 1)"},
+		"CREATE TABLE db1.n (n UInt8) ENGINE = Memory":                              nil,
+	} {
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", sql, err)
+		}
+		got, err := DeclaredTypeTexts(ast)
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("DeclaredTypeTexts(%s) = %q, want %q", sql, got, want)
 		}
 	}
 }

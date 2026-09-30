@@ -281,6 +281,18 @@ func rejectUngovernedReads(e engine.Engine, ast engine.AST, sql string, sel name
 		resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
 		return true, nil
 	}
+	// A column data type or CODEC is opaque text (fix round 1, L1): any
+	// read-bearing text there is refused, fail closed.
+	typeTexts, err := engine.DeclaredTypeTexts(ast)
+	if err != nil {
+		return false, err
+	}
+	for _, text := range typeTexts {
+		if engine.OpaqueTextIsUngoverned(e, text) {
+			resp.Code, resp.Message = pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage
+			return true, nil
+		}
+	}
 	if text, ok, ierr := engine.OpaqueInsertQueryText(ast); ierr != nil {
 		return false, ierr
 	} else if ok && engine.OpaqueInsertQueryIsUngoverned(e, text) {

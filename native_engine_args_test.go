@@ -48,6 +48,10 @@ var engineArgReads = []string{
 	"joinGet('db1.j', 'v', n)",
 	"dictGet('db1.dd', 'v', n)",
 	"hasColumnInTable('db1', 'o', 'n')",
+	// An EXPLAIN subquery: ClickHouse 25.8 turns it into viewExplain(…) over
+	// the named table (fix round 1, M1).
+	"(EXPLAIN SELECT 1 FROM phys.`db2.x`)",
+	"(EXPLAIN AST SELECT 1 FROM db1.o)",
 }
 
 // engineArgPlacements put one expression in an engine argument (left) and in

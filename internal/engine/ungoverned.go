@@ -2,19 +2,29 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
 
 // walkGenericExpression walks an expression-bearing subtree whose exact shape
 // the ordered walker does not model field by field: a CREATE TABLE / CREATE
-// VIEW column definition (DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL / TTL /
-// CODEC), a constraint (CHECK, INDEX … TYPE), a non-engine storage property
-// (PARTITION BY, ORDER BY, PRIMARY KEY, SAMPLE BY, TTL), or a structured
-// ALTER action. Every read-bearing node (a read query, an IN node, a function
-// call, a table payload) is handed to the ordinary walker, so T2 / T3 / T5 and
-// every collector see it exactly as they would in a SELECT; any other node is
-// descended generically (spec 2026-09-26 R2).
+// VIEW column definition (DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL / TTL;
+// its data type and CODEC are opaque text, DeclaredTypeTexts), a constraint
+// (CHECK, INDEX … TYPE), a storage property (the ENGINE clause and its
+// arguments, PARTITION BY, ORDER BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS),
+// or a structured ALTER action. Every read-bearing node (a read query, an IN
+// node, a function call, a table payload) is handed to the ordinary walker, so
+// T2 / T3 / T5 and every collector see it exactly as they would in a SELECT;
+// any other node is descended generically (spec 2026-09-26 R2).
+//
+// A subquery wrapper whose body is not a read query, and any command node, is
+// an error the caller seals as `statement is not supported` (the SI catch-all
+// with the surface active), exactly as walkExpression does in a SELECT: Polyglot
+// parses `(EXPLAIN …)` as a subquery around an opaque command node, whose names
+// no collector can see, and ClickHouse 25.8 executes it as viewExplain(…) over
+// the named table in an ENGINE argument, PARTITION BY or ORDER BY (spec
+// 2026-09-26 §13, fix round 1).
 func walkGenericExpression(node any, scope readSourceScope, visitor readSourceVisitor) error {
 	switch n := node.(type) {
 	case []any:
@@ -30,6 +40,12 @@ func walkGenericExpression(node any, scope readSourceScope, visitor readSourceVi
 		}
 		if handled, err := walkReadQuery(n, scope, visitor); handled {
 			return err
+		}
+		if _, ok := n[NodeCommand]; ok {
+			return errEmbeddedStatement
+		}
+		if subquery, ok := n["subquery"].(map[string]any); ok && subquery["this"] != nil {
+			return errEmbeddedStatement
 		}
 		if in, ok := n["in"].(map[string]any); ok && len(n) == 1 {
 			return walkInExpression(in, scope, visitor)
@@ -51,6 +67,10 @@ func walkGenericExpression(node any, scope readSourceScope, visitor readSourceVi
 		return nil
 	}
 }
+
+// errEmbeddedStatement is walkGenericExpression's refusal of a statement that
+// is not a read query nested in an expression position (an EXPLAIN subquery).
+var errEmbeddedStatement = errors.New("engine: ordered object walk: a statement that is not a read query is nested in an expression position")
 
 // ExpressionPositionHasReads reports whether a read source — a table, an
 // IN-table operand, a table function or a namespace carrier — occurs in a
@@ -123,6 +143,53 @@ func storageExpressionProperties(node any) []any {
 		out = append(out, pm)
 	}
 	return out
+}
+
+// DeclaredTypeTexts returns every column data type and CODEC that the pinned
+// Polyglot keeps as opaque text rather than as an expression: a parameterised
+// type (`FixedString(…)`, `Enum8('a' = …)`, `AggregateFunction(…)`,
+// `DateTime64(…)`, `JSON(…)`, `Tuple(…)`, …) is a {"data_type":"custom",
+// "name":"<text>"} node and a column CODEC is a plain "codec" string, in any
+// statement (a CREATE column list, a view's typed column list, ALTER … ADD
+// COLUMN, a CAST). The texts are Polyglot's rendering, not source spans, so
+// they are only good for a fail-closed scan: the caller refuses the statement
+// when OpaqueTextIsUngoverned finds a read-bearing text (fix round 1, L1;
+// ClickHouse 25.8 and 26.2 reject a query in these positions before
+// evaluating it, so no legitimate statement carries one).
+func DeclaredTypeTexts(ast AST) ([]string, error) {
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return nil, fmt.Errorf("engine: decode declared types: %w", err)
+	}
+	var texts []string
+	var walk func(node any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		case map[string]any:
+			if kind, ok := n["data_type"].(string); ok {
+				for _, key := range sortedMapKeys(n) {
+					if text, ok := n[key].(string); ok && key != "data_type" && key != "name" {
+						texts = append(texts, text)
+					}
+				}
+				if name, ok := n["name"].(string); ok && kind == "custom" {
+					texts = append(texts, name)
+				}
+			}
+			if codec, ok := n["codec"].(string); ok {
+				texts = append(texts, codec)
+			}
+			for _, key := range sortedMapKeys(n) {
+				walk(n[key])
+			}
+		}
+	}
+	walk(root)
+	return texts, nil
 }
 
 // OpaqueAlterTexts returns the opaque ALTER text polyglot does not structure
@@ -379,6 +446,14 @@ func OpaqueTextIsUngoverned(e Engine, text string) bool {
 	// splits a Raw action at a comma inside a bracket group, and the joined
 	// text makes the group whole again) without one action's shape — an ADD
 	// PROJECTION body — changing how another is scanned.
+	// An EXPLAIN subquery, `(EXPLAIN …)`, in any action: ClickHouse accepts one
+	// wherever a subquery is accepted and executes it as viewExplain(…), and an
+	// `EXPLAIN AST <statement>` need not carry a SELECT keyword (fix round 1).
+	for i := 1; i < len(toks); i++ {
+		if toks[i-1].TokenType == "L_PAREN" && opaqueKeyword(toks[i]) && strings.EqualFold(toks[i].Text, "EXPLAIN") {
+			return true
+		}
+	}
 	for _, segment := range opaqueActionSegments(toks) {
 		if opaqueProjectionBody(segment) {
 			if opaqueProjectionIsUngoverned(segment) {
