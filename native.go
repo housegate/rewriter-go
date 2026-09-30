@@ -70,12 +70,20 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 	resp.ExistenceClause = ec
 	resp.StorageIntegrityContractVersion = siVersion
 	if resp.GetCode() == pb.RewriteCode_Success {
-		if engine.CheckRegenerated(e, sql, ast) == nil {
-			return
+		// System tables with the SI surface active: when the statement also
+		// names a storage-integrity object the preflight deferred the
+		// allowlist check to the SI pipeline, so it runs here, on that
+		// pipeline's would-be Success, before the drop gate (spec 2026-09-26
+		// §5, "The system database"); for every other SI-active Success it
+		// is a backstop. With the surface inactive the preflight owns it.
+		if !handlers.RejectSystemTablesOnSuccess(e, ast, sql, sel, resp) {
+			if engine.CheckRegenerated(e, sql, ast) == nil {
+				return
+			}
+			resp.Code = pb.RewriteCode_UnsupportedStatement
+			resp.Message = engine.UnsupportedStatementMessage
+			resp.SqlAfterRewrite = sql
 		}
-		resp.Code = pb.RewriteCode_UnsupportedStatement
-		resp.Message = engine.UnsupportedStatementMessage
-		resp.SqlAfterRewrite = sql
 	}
 	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
 	if resp.GetSqlAfterRewrite() == "" {

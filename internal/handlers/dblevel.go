@@ -292,6 +292,18 @@ func showKindClass(kind string) showClass {
 	}
 }
 
+// rejectShowSystemTable refuses a SHOW form that reads a system table
+// outside the allowlist (spec 2026-09-26 §5, "The system database"). It runs
+// after the form's SI namespace check and its body check, so an SI message
+// and the body refusal keep precedence. Nothing is recorded as accessed: the
+// caller named no table.
+func rejectShowSystemTable(sql string, resp *pb.RewriteSQLResponse, table string) (*pb.RewriteSQLResponse, bool, error) {
+	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+	resp.SqlAfterRewrite = sql
+	rejectDBUnsupported(resp, nameresolve.SystemTableRefusedMessage(table))
+	return resp, true, nil
+}
+
 // recordAccessedStorageIntegrityPhysicalTable records one reserved-namespace
 // table access. It mirrors recordAccessedDatabase's storage-integrity branch
 // (physical = the reserved database itself, no logical name) with the table
@@ -330,6 +342,21 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if r, rejected := showBodyRejection(e, info, sql, dyn, resp); rejected {
 			return r, true, nil
 		}
+		if table, refused, _ := systemTableShowRefusal(info); refused {
+			return rejectShowSystemTable(sql, resp, table)
+		}
+		if info.ShowTableMultiPart {
+			// SHOW COLUMNS / INDEX FROM a.b.c: ClickHouse reads database a,
+			// table c (engine.DBLevelInfo.ShowTableMultiPart). The echo path
+			// below would forward it unmapped and unreported, so it is refused
+			// fail-closed; a refused system table in it was already named by
+			// the system-table check (spec 2026-09-26 §5, "The system
+			// database").
+			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+			resp.SqlAfterRewrite = sql
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
+		}
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
 		}
@@ -353,6 +380,9 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if r, rejected := showBodyRejection(e, info, sql, dyn, resp); rejected {
 			return r, true, nil
 		}
+		if table, refused, _ := systemTableShowRefusal(info); refused {
+			return rejectShowSystemTable(sql, resp, table)
+		}
 		return passthroughDB(e, ast, sql, resp)
 	case showUnknown:
 		if !nameresolve.StorageIntegritySurfaceActive(dyn) && engine.ShowBodyIsUngoverned(e, info, sql) {
@@ -364,6 +394,21 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 			// refusal. Re-stating that message here would duplicate the single
 			// source of it.
 			return nil, false, nil
+		}
+		// With the surface inactive a SHOW kind the SI surface does not model
+		// passes only when it reads an allowed system table (CHANGED SETTINGS,
+		// SETTING, PRIVILEGES); CURRENT / ENABLED ROLES and CURRENT QUOTA are
+		// refused with the table they read, and a kind in neither list reads
+		// an unknown system table and is refused (spec 2026-09-26 §5, "The
+		// system database").
+		switch table, refused, unknown := systemTableShowRefusal(info); {
+		case refused:
+			return rejectShowSystemTable(sql, resp, table)
+		case unknown:
+			resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED
+			resp.SqlAfterRewrite = sql
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
 		}
 		return passthroughDB(e, ast, sql, resp)
 	}

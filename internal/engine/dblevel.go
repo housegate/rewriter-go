@@ -18,6 +18,7 @@ const (
 type DBLevelInfo struct {
 	Kind              DBLevelKind
 	ShowWhat          string // SHOW: "TABLES"/"DATABASES"/"CLUSTERS"/... (uppercased); "" otherwise
+	ShowWhatNext      string // SHOW: the token after ShowWhat, uppercased (ROLES in SHOW CURRENT ROLES); "" when none
 	ShowExtended      bool   // SHOW carries the optional EXTENDED prefix (SHOW [EXTENDED] [FULL] COLUMNS ...)
 	ShowFull          bool   // SHOW carries the optional FULL prefix
 	ShowTemporary     bool   // SHOW carries the optional TEMPORARY prefix
@@ -42,6 +43,10 @@ type DBLevelInfo struct {
 	// semicolon: WHERE, LIMIT, FORMAT, SETTINGS, INTO OUTFILE or junk. A
 	// handler that synthesizes SQL from these fields would drop it.
 	Trailing bool
+	// ShowTableMultiPart reports a COLUMNS/INDEX family table clause of three
+	// or more dotted parts. ClickHouse reads it as DB = the first part and
+	// ShowTable = the last part, which is what DB / ShowTable then hold.
+	ShowTableMultiPart bool
 }
 
 // ParseDBLevel extracts USE/SHOW structure from the clickhouse Tokenize stream.
@@ -100,6 +105,9 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 			// ASTShowTablesQuery family (TABLES/CLUSTER/SETTINGS/...).
 			info.ShowWhat = strings.ToUpper(toks[i].Text)
 			i++
+			if i < len(toks) {
+				info.ShowWhatNext = strings.ToUpper(toks[i].Text)
+			}
 		}
 		// FROM/IN is a database clause only in this bounded grammar prefix,
 		// immediately after the SHOW kind. Never keep scanning for IN: later IN
@@ -205,6 +213,22 @@ func parseShowTableThenDatabase(e Engine, sql string, toks []rawToken, i int, in
 					info.ShowTable, info.ShowTableResolved = table, true
 					i += 3
 					tableConsumed = true
+					// ClickHouse's SHOW COLUMNS / INDEX parsers read a compound
+					// target of three or more parts as name_parts[0] (the
+					// database) and shortName(), the LAST part (the table):
+					// measured on 26.2 and 25.8, `SHOW COLUMNS FROM
+					// system.tables.processes` lists system.processes. Model that
+					// reading and flag it, so the handler can refuse it.
+					for i+1 < len(toks) && toks[i].TokenType == "DOT" {
+						info.ShowTableMultiPart = true
+						part, ok := parsedIdentifierAt(e, sql, toks[i+1])
+						if !ok || part == "" {
+							info.ShowTableResolved = false
+							break
+						}
+						info.ShowTable = part
+						i += 2
+					}
 				}
 			} else {
 				info.ShowTable, info.ShowTableResolved = name, true

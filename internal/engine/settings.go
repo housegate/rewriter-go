@@ -309,15 +309,26 @@ func showSettingsKeyword(toks []rawToken, i int) bool {
 
 // settingsListFollows reports whether the SETTINGS keyword toks[i] is
 // followed by what could start an assignment list: a setting-name token that
-// is not the LIKE / ILIKE of SHOW SETTINGS LIKE. `SHOW SETTINGS max_threads =
-// [1]` is then scanned like any other clause (review round 9: main refused
-// it, and an exemption must not turn a refusal into Success).
+// is not the LIKE / ILIKE of SHOW SETTINGS LIKE, nor the PROFILES of the
+// access-control form SHOW SETTINGS PROFILES (which the SHOW handler
+// refuses by the system table it reads). `SHOW SETTINGS max_threads = [1]`
+// and `SHOW SETTINGS profiles = 1` are then scanned like any other clause
+// (review round 9: main refused them, and an exemption must not turn a
+// refusal into Success).
 func settingsListFollows(toks []rawToken, i int) bool {
 	if i+1 >= len(toks) || !settingNameToken(toks[i+1]) {
 		return false
 	}
 	next := toks[i+1]
-	return !(opaqueKeyword(next) && (strings.EqualFold(next.Text, "LIKE") || strings.EqualFold(next.Text, "ILIKE")))
+	if opaqueKeyword(next) && (strings.EqualFold(next.Text, "LIKE") || strings.EqualFold(next.Text, "ILIKE")) {
+		return false
+	}
+	if strings.EqualFold(next.Text, "PROFILES") && i == 1 {
+		// SHOW SETTINGS PROFILES only: SHOW CHANGED SETTINGS PROFILES is
+		// no ClickHouse statement, so it stays a scanned (refused) clause.
+		return i+2 < len(toks) && toks[i+2].TokenType == "EQ"
+	}
+	return true
 }
 
 // SettingsEscapeBackstop is a token-level backstop for N11 / N14 / N17
