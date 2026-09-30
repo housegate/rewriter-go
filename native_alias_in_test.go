@@ -707,3 +707,67 @@ func TestTableRef_NameResolutionSettingsAreRefused(t *testing.T) {
 	}
 	runTablerefCases(t, cases)
 }
+
+// TestTableRef_EscapedSettingNamesAreRefused pins review round 7, N11.
+// ClickHouse 26.2 / 25.8 decode `\N` in a quoted identifier to nothing, so
+// `\Nenable_global_with_statement`, "\Ncompatibility" and
+// `enable\N_global_with_statement` name the refused setting. The paths that
+// forward setting text verbatim (a session SET, the opaque INSERT column-list
+// header, a command's SETTINGS tail) therefore refuse any setting name whose
+// spelling is not its plain text: one containing a backslash, or a quoted one
+// with a doubled quote. Structured positions are fail-safe (Polyglot
+// regenerates the backslash escaped and ClickHouse answers UNKNOWN_SETTING).
+func TestTableRef_EscapedSettingNamesAreRefused(t *testing.T) {
+	const unsupported = "statement is not supported"
+	var cases []tablerefCase
+	// Session SET (the carve-out exists only while the SI surface is
+	// inactive; with it active every SET is the SI catch-all).
+	for _, sql := range []string{
+		"SET `\\Nenable_global_with_statement` = 0",
+		"SET max_threads = 1, \"\\Ncompatibility\" = '20.8'",
+		"SET `enable\\N_global_with_statement` = 0, max_threads = 1",
+		"SET `impl\\Nicit_table_at_top_level` = 'other.z';",
+		"SET `\\Nmax_threads` = 1",
+		"SET `max``threads` = 1",
+		"SET \"max\"\"threads\" = 1",
+	} {
+		cases = append(cases,
+			tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql},
+			tablerefCase{name: "si/" + sql, sql: sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
+	}
+	for _, si := range []bool{false, true} {
+		// The opaque INSERT column-list header and a command's SETTINGS tail.
+		for _, sql := range []string{
+			"INSERT INTO db1.q (a) SETTINGS `\\Nimplicit_table_at_top_level` = 'hg_unsafe.db1__t' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS \"\\Nimplicit_table_at_top_level\" = 'hg_unsafe.db1__t' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS max_threads = 1, `impl\\Nicit_table_at_top_level` = 'phys.z' SELECT a",
+			"INSERT INTO db1.q (a) SETTINGS `\\Nenable_global_with_statement` = 0 SELECT a",
+			"DESCRIBE TABLE db1.o SETTINGS `\\Nenable_global_with_statement` = 0",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
+		}
+		// Plain and quoted names without escapes behave as before.
+		for _, c := range []struct{ sql, want string }{
+			{"INSERT INTO db1.q (a) SETTINGS `max_threads` = 1 SELECT a", `INSERT INTO phys."db1.q" (a) SETTINGS ` + "`max_threads`" + ` = 1 SELECT a`},
+			{"INSERT INTO db1.q (a) SETTINGS \"max_threads\" = 1, max_block_size = 10 SELECT a", `INSERT INTO phys."db1.q" (a) SETTINGS "max_threads" = 1, max_block_size = 10 SELECT a`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
+		}
+		// N12: the promql table names, defence in depth.
+		for _, n := range []string{"promql_table", "promql_database"} {
+			sql := "SELECT a FROM db1.o SETTINGS " + n + " = 'z'"
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting " + n + " is not accepted", wantSQL: sql})
+		}
+	}
+	for _, sql := range []string{"SET max_threads = 1", "SET `max_threads` = 1", "SET \"max_threads\" = 1, max_block_size = 10"} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_Success, wantSQL: sql})
+	}
+	for _, n := range []string{"promql_table", "promql_database"} {
+		sql := "SET " + n + " = 'z'"
+		cases = append(cases, tablerefCase{name: sql, sql: sql,
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "table setting " + n + " is not accepted", wantSQL: sql})
+	}
+	runTablerefCases(t, cases)
+}

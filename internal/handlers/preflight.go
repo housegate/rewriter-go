@@ -388,7 +388,9 @@ func settingsVerdict(assignments []engine.SettingAssignment) (pb.RewriteCode, st
 		if engine.SQLBearingSetting(a.Name) {
 			return pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(a.Name), true
 		}
-		if !a.PlainValue {
+		// A name ClickHouse would decode, on a path that forwards the text
+		// verbatim (review round 7, N11).
+		if a.EscapedName || !a.PlainValue {
 			return pb.RewriteCode_UnsupportedStatement, engine.UnsupportedStatementMessage, true
 		}
 	}

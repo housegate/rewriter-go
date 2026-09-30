@@ -1106,6 +1106,10 @@ type rawToken struct {
 		Start int `json:"start"`
 		End   int `json:"end"`
 	} `json:"span"`
+	// Source is the token's exact source text (sql[Span.Start:Span.End]),
+	// set by tokenizeRaw. Text is Polyglot's decoded spelling, which may
+	// differ (a quoted identifier's escapes).
+	Source string `json:"-"`
 }
 
 // tokenizeRaw runs the engine lexer over sql and decodes the token stream.
@@ -1126,6 +1130,7 @@ func tokenizeRaw(e Engine, sql string) ([]rawToken, error) {
 				toks[i].Span.Start, toks[i].Span.End, cursor.characters())
 		}
 		toks[i].Span.Start, toks[i].Span.End = start, end
+		toks[i].Source = sql[start:end]
 	}
 	return toks, nil
 }

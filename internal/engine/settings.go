@@ -42,6 +42,11 @@ var sqlBearingSettings = map[string]bool{
 	"enable_global_with_statement":        true,
 	"compatibility":                       true,
 	"implicit_table_at_top_level":         true,
+	// promql_table / promql_database name the TimeSeries table the promql
+	// dialect reads. They act only under dialect = 'promql', which is refused
+	// above; they are refused too as defence in depth (review round 7, N12).
+	"promql_table":    true,
+	"promql_database": true,
 }
 
 // SQLBearingSetting reports whether name is one of sqlBearingSettings or any
@@ -60,6 +65,12 @@ func SQLBearingSetting(name string) bool {
 type SettingAssignment struct {
 	Name       string
 	PlainValue bool
+	// EscapedName reports a name whose source spelling is not its plain text
+	// (settingNameVerbatim): ClickHouse would decode it, and the rewriter
+	// forwards the statement text verbatim, so it cannot tell which setting
+	// the name is (review round 7, N11: `\N` decodes to nothing, so
+	// `\Nenable_global_with_statement` is the refused setting).
+	EscapedName bool
 }
 
 // SessionSettingAssignments parses a `command` node's text as a session SET
@@ -113,7 +124,8 @@ func parseSettingAssignments(toks []rawToken, i int) ([]SettingAssignment, int, 
 		if len(value) == 0 {
 			return out, j, false
 		}
-		out = append(out, SettingAssignment{Name: name, PlainValue: plainSettingValueTokens(value)})
+		out = append(out, SettingAssignment{Name: name, PlainValue: plainSettingValueTokens(value),
+			EscapedName: !settingNameVerbatim(toks[i])})
 		if j < len(toks) && settingsListEnd(toks[j]) {
 			return out, j, true // an INSERT's query follows its SETTINGS list
 		}
@@ -170,6 +182,31 @@ func SettingsBackstop(e Engine, sql string) (name string, hit bool) {
 		}
 	}
 	return "", false
+}
+
+// settingNameVerbatim reports whether a setting-name token's source text is
+// exactly its name: a bare word, or a name in one pair of backticks or double
+// quotes with no escape sequence (no backslash) and no doubled quote. Any
+// other spelling needs decoding, and ClickHouse's decoding differs from
+// Polyglot's (`\N` is decoded to nothing by ClickHouse and kept by Polyglot),
+// so a path that forwards the text verbatim refuses it.
+func settingNameVerbatim(tok rawToken) bool {
+	src := tok.Source
+	if src == "" || strings.Contains(src, "\\") {
+		return false
+	}
+	if src == tok.Text {
+		return true
+	}
+	if len(src) < 2 {
+		return false
+	}
+	quote := src[0]
+	if (quote != '`' && quote != '"') || src[len(src)-1] != quote {
+		return false
+	}
+	inner := src[1 : len(src)-1]
+	return inner == tok.Text && !strings.ContainsRune(inner, rune(quote))
 }
 
 func settingNameToken(tok rawToken) bool {
