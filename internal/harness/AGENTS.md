@@ -100,7 +100,11 @@ POLYGLOT_SQL_FFI_PATH="$PWD/third_party/lib/libpolyglot_sql_ffi.$(uname | grep -
   go test ./internal/harness -run '^TestStorageIntegrityGolden$' -count=1
 ```
 
-The writer uses deterministic JSON encoding with HTML escaping disabled. After
+The writer uses deterministic JSON encoding with HTML escaping disabled.
+A pin that still describes an engine's output after
+`NormalizeSIIdentifierQuotes` keeps its spelling and shape, so a regeneration
+changes only stale pins; review it semantically (`jq -S`), since the writer
+re-serialises the whole file. After
 reviewing the regenerated pins, copy the file verbatim to rewriter-grpc,
 update `SICorpusFingerprint` / `SICorpusBytes` / `SICorpusCases` here and
 `kCorpusFingerprint` / `kCorpusBytes` / `kCorpusCases` there, then prove and
