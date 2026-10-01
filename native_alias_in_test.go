@@ -249,9 +249,9 @@ func TestTableRef_CorrelatedAliasInOperandPins(t *testing.T) {
 				wantSQL:  `SELECT * FROM phys."db1.o" AS t WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE a IN ` + tRead + `)`,
 				wantAcc:  []string{"db1.o", "db1.p", ".t"}},
 			tablerefCase{name: "same scope alias", si: si,
-				sql:      `SELECT * FROM db1.o AS "other.secret" WHERE a IN "other.secret" SETTINGS enable_analyzer = 0`,
+				sql:      `SELECT * FROM db1.o AS "other.secret" WHERE a IN "other.secret" SETTINGS enable_analyzer = 1`,
 				wantCode: pb.RewriteCode_Success,
-				wantSQL:  `SELECT * FROM phys."db1.o" AS "other.secret" WHERE a IN phys."db1.other.secret" SETTINGS enable_analyzer = 0`,
+				wantSQL:  `SELECT * FROM phys."db1.o" AS "other.secret" WHERE a IN phys."db1.other.secret" SETTINGS enable_analyzer = 1`,
 				wantAcc:  []string{"db1.o", ".other.secret"}},
 			tablerefCase{name: "outer projection alias", si: si,
 				sql:      `SELECT a, 1 AS t FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN t)`,
@@ -693,14 +693,15 @@ func TestTableRef_NameResolutionSettingsAreRefused(t *testing.T) {
 			tablerefCase{name: c.sql, sql: c.sql, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: msg(c.name), wantSQL: c.sql},
 			tablerefCase{name: "si/" + c.sql, sql: c.sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: StorageIntegrityUnmodelledMessage})
 	}
-	// Settings measured not to change binding stay accepted, including the
-	// analyzer switch: every binding rule was measured under both analyzers.
+	// Settings measured not to change binding stay accepted. The analyzer
+	// switch is accepted only when it keeps the new analyzer on: the old
+	// analyzer is refused (native_analyzer_settings_test.go).
 	for _, si := range []bool{false, true} {
 		for _, c := range []struct{ sql, want string }{
-			{"SELECT a FROM db1.o SETTINGS enable_analyzer = 0",
-				`SELECT a FROM phys."db1.o" "db1.o" SETTINGS enable_analyzer = 0`},
-			{"SELECT a FROM db1.o SETTINGS allow_experimental_analyzer = 0, enable_scopes_for_with_statement = 0, prefer_column_name_to_alias = 1",
-				`SELECT a FROM phys."db1.o" "db1.o" SETTINGS allow_experimental_analyzer = 0, enable_scopes_for_with_statement = 0, prefer_column_name_to_alias = 1`},
+			{"SELECT a FROM db1.o SETTINGS enable_analyzer = 1",
+				`SELECT a FROM phys."db1.o" "db1.o" SETTINGS enable_analyzer = 1`},
+			{"SELECT a FROM db1.o SETTINGS allow_experimental_analyzer = 1, enable_scopes_for_with_statement = 0, prefer_column_name_to_alias = 1",
+				`SELECT a FROM phys."db1.o" "db1.o" SETTINGS allow_experimental_analyzer = 1, enable_scopes_for_with_statement = 0, prefer_column_name_to_alias = 1`},
 		} {
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
 		}
