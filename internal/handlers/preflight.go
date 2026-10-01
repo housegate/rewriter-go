@@ -418,7 +418,7 @@ func rejectSQLBearingSettings(e engine.Engine, ast engine.AST, sql string, resp 
 // SQL-bearing name wins over a non-plain value of the same assignment.
 func settingsVerdict(assignments []engine.SettingAssignment) (pb.RewriteCode, string, bool) {
 	for _, a := range assignments {
-		if engine.SQLBearingSetting(a.Name) {
+		if engine.SettingRefused(a) {
 			return pb.RewriteCode_UnsupportedStatement, engine.TableSettingRefusedMessage(a.Name), true
 		}
 		// A name ClickHouse would decode, on a path that forwards the text

@@ -27,9 +27,22 @@ import (
 //   - implicit_table_at_top_level names the table a FROM-less SELECT reads
 //     (`SELECT a SETTINGS implicit_table_at_top_level = 'z'` reads phys.z).
 //
-// enable_analyzer / allow_experimental_analyzer stay accepted: every binding
-// rule was measured under both analyzers, and the sweep found no read the
-// rules do not already model.
+// The old analyzer is refused (user ruling 2026-10-01; rewriter-grpc I3
+// review C2 / C3, measured on 25.8.28 and 26.2.15): its rewrites turn an
+// operand the binding rules trust into a table read — the EXISTS rewrite
+// drops a projection alias (`SELECT EXISTS(SELECT 1) AS "db2.x" … WHERE a IN
+// "db2.x" SETTINGS enable_analyzer = 0` read phys."db2.x"), and
+// `legacy_column_name_of_tuple_literal = 1` defeats its name-based WITH
+// propagation of a tuple alias. Rather than model the old analyzer's binding,
+// enable_analyzer / allow_experimental_analyzer (aliases of one setting) are
+// refused unless their value is a literal ClickHouse reads as true
+// (analyzerSettings, TrueLiteralSpelling), and
+//
+//   - legacy_column_name_of_tuple_literal is refused whatever the value;
+//   - profile is refused whatever the value: `SET profile = '<name>'` applies
+//     a server settings profile to the session as a group, so a profile that
+//     carries enable_analyzer = 0 (or any refused setting) would bypass the
+//     list, like compatibility.
 var sqlBearingSettings = map[string]bool{
 	"additional_table_filters":            true,
 	"additional_result_filter":            true,
@@ -47,6 +60,56 @@ var sqlBearingSettings = map[string]bool{
 	// above; they are refused too as defence in depth (review round 7, N12).
 	"promql_table":    true,
 	"promql_database": true,
+	// The old analyzer's name resolution (see above).
+	"legacy_column_name_of_tuple_literal": true,
+	"profile":                             true,
+}
+
+// analyzerSettings switch the query analyzer; the second is an alias of the
+// first (system.settings alias_for). They are refused unless the value keeps
+// the new analyzer on (SettingRefused).
+var analyzerSettings = map[string]bool{
+	"enable_analyzer":             true,
+	"allow_experimental_analyzer": true,
+}
+
+// AnalyzerSetting reports whether name switches the query analyzer
+// (case-insensitively, like SQLBearingSetting).
+func AnalyzerSetting(name string) bool { return analyzerSettings[strings.ToLower(name)] }
+
+// TrueLiteralSpelling reports whether a value's raw source lexeme is one of
+// the closed list of spellings measured on ClickHouse 25.8 and 26.2 to set a
+// Bool setting to true: the number `1`, the keyword `true` and the strings
+// `'1'` / `'true'`, the words in any case. Other values ClickHouse also reads
+// as true (`0x1`, `+1`, `1.0`, `0.5`, `1e0`, `x'31'`, `$$true$$`, an escaped
+// string) are refused: the list is closed, and the raw lexeme is compared so
+// no decoding difference can turn a refused spelling into an admitted one.
+func TrueLiteralSpelling(source string) bool {
+	switch strings.ToLower(source) {
+	case "1", "true", "'1'", "'true'":
+		return true
+	}
+	return false
+}
+
+// SettingRefused reports whether a setting assignment is refused by R5 for
+// its name: a SQL-bearing, dialect or name-resolution setting whatever the
+// value, or an analyzer switch whose value is not a true literal.
+func SettingRefused(a SettingAssignment) bool {
+	return SQLBearingSetting(a.Name) || (AnalyzerSetting(a.Name) && !a.TrueLiteral)
+}
+
+// trueLiteralTokens reports a value made of exactly one token whose raw
+// source is a TrueLiteralSpelling.
+func trueLiteralTokens(value []rawToken) bool {
+	if len(value) != 1 {
+		return false
+	}
+	switch value[0].TokenType {
+	case "NUMBER", "TRUE", "STRING":
+		return TrueLiteralSpelling(value[0].Source)
+	}
+	return false
 }
 
 // SQLBearingSetting reports whether name is one of sqlBearingSettings or any
@@ -68,6 +131,9 @@ func SQLBearingSetting(name string) bool {
 type SettingAssignment struct {
 	Name       string
 	PlainValue bool
+	// TrueLiteral reports a value whose source spelling is one ClickHouse
+	// reads as true (TrueLiteralSpelling); it decides the analyzer switch.
+	TrueLiteral bool
 	// EscapedName reports a name whose source spelling is not its plain text
 	// (settingNameVerbatim): ClickHouse would decode it, and the rewriter
 	// forwards the statement text verbatim, so it cannot tell which setting
@@ -128,7 +194,7 @@ func parseSettingAssignments(toks []rawToken, i int) ([]SettingAssignment, int, 
 			return out, j, false
 		}
 		out = append(out, SettingAssignment{Name: name, PlainValue: plainSettingValueTokens(value),
-			EscapedName: !settingNameVerbatim(toks[i])})
+			TrueLiteral: trueLiteralTokens(value), EscapedName: !settingNameVerbatim(toks[i])})
 		if j < len(toks) && settingsListEnd(toks[j]) {
 			return out, j, true // an INSERT's query follows its SETTINGS list
 		}
@@ -183,8 +249,35 @@ func SettingsBackstop(e Engine, sql string) (name string, hit bool) {
 		if tok.TokenType != "STRING" && SQLBearingSetting(tok.Text) && i+1 < len(toks) && toks[i+1].TokenType == "EQ" {
 			return tok.Text, true
 		}
+		// An analyzer switch passes only with a true literal followed by
+		// the end of its assignment (fail closed on anything else).
+		if tok.TokenType != "STRING" && AnalyzerSetting(tok.Text) && i+1 < len(toks) && toks[i+1].TokenType == "EQ" &&
+			!(i+2 < len(toks) && trueLiteralTokens(toks[i+2:i+3]) && settingValueEnds(toks, i+3)) {
+			return tok.Text, true
+		}
 	}
 	return "", false
+}
+
+// settingValueEnds reports whether toks[j] ends a one-token setting value:
+// the end of the text, a comma, a semicolon or a closing parenthesis, or a
+// keyword that starts the next clause.
+func settingValueEnds(toks []rawToken, j int) bool {
+	if j >= len(toks) {
+		return true
+	}
+	switch toks[j].TokenType {
+	case "COMMA", "SEMICOLON", "R_PAREN":
+		return true
+	}
+	if !opaqueKeyword(toks[j]) {
+		return false
+	}
+	switch strings.ToUpper(toks[j].Text) {
+	case "FORMAT", "UNION", "EXCEPT", "INTERSECT", "INTO", "SELECT", "WITH", "VALUES", "SETTINGS":
+		return true
+	}
+	return false
 }
 
 // settingNameVerbatim reports whether a setting-name token's source text is
@@ -414,7 +507,36 @@ func decodeSettingAssignment(item any) SettingAssignment {
 			name = identName(left)
 		}
 	}
-	return SettingAssignment{Name: name, PlainValue: name != "" && plainSettingValueNode(eq["right"])}
+	return SettingAssignment{Name: name, PlainValue: name != "" && plainSettingValueNode(eq["right"]),
+		TrueLiteral: trueLiteralNode(eq["right"])}
+}
+
+// trueLiteralNode is trueLiteralTokens for a structured value: the boolean
+// true, the number literal 1 or a string literal '1' / 'true' (any case).
+// Polyglot's value is decoded, so the token backstop (SettingsBackstop),
+// which reads the raw lexeme, is the authority on spelling; this check only
+// keeps the structured path no wider than it.
+func trueLiteralNode(node any) bool {
+	m, ok := node.(map[string]any)
+	if !ok || len(m) != 1 {
+		return false
+	}
+	if b, ok := m["boolean"].(map[string]any); ok {
+		v, _ := b["value"].(bool)
+		return v
+	}
+	lit, ok := m["literal"].(map[string]any)
+	if !ok {
+		return false
+	}
+	value, _ := lit["value"].(string)
+	switch lit["literal_type"] {
+	case "number":
+		return value == "1"
+	case "string":
+		return strings.EqualFold(value, "1") || strings.EqualFold(value, "true")
+	}
+	return false
 }
 
 // plainSettingValueNode is plainSettingValueTokens for a structured value:
