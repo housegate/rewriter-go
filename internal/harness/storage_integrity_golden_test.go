@@ -137,16 +137,7 @@ func TestStorageIntegrityGolden(t *testing.T) {
 				if oerr != nil {
 					t.Fatalf("oracle: %v", oerr)
 				}
-				goSQL := NormalizeSIIdentifierQuotes(res.SQL)
-				cppSQL := NormalizeSIIdentifierQuotes(want.GetSqlAfterRewrite())
-				c.WantSQL, c.WantSQLGo, c.WantSQLCPP = "", "", ""
-				if goSQL == cppSQL {
-					c.AllowSQLDivergence = false
-					c.WantSQL = goSQL
-				} else {
-					c.AllowSQLDivergence = true
-					c.WantSQLGo, c.WantSQLCPP = goSQL, cppSQL
-				}
+				c.regenerateSQLPins(res.SQL, want.GetSqlAfterRewrite())
 				return
 			}
 			if want := c.wantContractAck(); res.StorageIntegrityContractVersion != want {
@@ -214,6 +205,84 @@ func TestStorageIntegrityGolden(t *testing.T) {
 			t.Fatal("regeneration failed; corpus was not rewritten")
 		}
 		writeSICorpus(t, cases)
+	}
+}
+
+// regenerateSQLPins sets a success case's SQL pins from both engines' output
+// (UPDATE_GOLDEN). Pins that still describe both outputs after normalization
+// keep their existing spelling and shape, and a still-valid Go pin keeps its
+// spelling, so a regeneration changes only stale pins.
+func (c *SICase) regenerateSQLPins(goOut, cppOut string) {
+	goSQL := NormalizeSIIdentifierQuotes(goOut)
+	cppSQL := NormalizeSIIdentifierQuotes(cppOut)
+	oldGo, oldCPP := c.WantSQL, c.WantSQL
+	if c.AllowSQLDivergence {
+		oldGo, oldCPP = c.WantSQLGo, c.WantSQLCPP
+	}
+	goCurrent := oldGo != "" && NormalizeSIIdentifierQuotes(oldGo) == goSQL
+	if goCurrent && oldCPP != "" && NormalizeSIIdentifierQuotes(oldCPP) == cppSQL {
+		return
+	}
+	agree := goSQL == cppSQL
+	if goCurrent {
+		goSQL = oldGo
+	}
+	c.WantSQL, c.WantSQLGo, c.WantSQLCPP = "", "", ""
+	if agree {
+		c.AllowSQLDivergence = false
+		c.WantSQL = goSQL
+	} else {
+		c.AllowSQLDivergence = true
+		c.WantSQLGo, c.WantSQLCPP = goSQL, cppSQL
+	}
+}
+
+func TestRegenerateSQLPinsChangesOnlyStalePins(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		in     SICase
+		goOut  string
+		cppOut string
+		want   SICase
+	}{
+		{
+			name:  "agreeing pin keeps its backtick spelling",
+			in:    SICase{WantSQL: "SELECT 1 FROM phys.`db1.t`"},
+			goOut: `SELECT 1 FROM phys."db1.t"`, cppOut: "SELECT 1 FROM phys.`db1.t`",
+			want: SICase{WantSQL: "SELECT 1 FROM phys.`db1.t`"},
+		},
+		{
+			name:  "identical per-engine pins keep their shape",
+			in:    SICase{AllowSQLDivergence: true, WantSQLGo: "SELECT 1", WantSQLCPP: "SELECT 1"},
+			goOut: "SELECT 1", cppOut: "SELECT 1",
+			want: SICase{AllowSQLDivergence: true, WantSQLGo: "SELECT 1", WantSQLCPP: "SELECT 1"},
+		},
+		{
+			name:  "new divergence keeps the Go spelling and pins the C++ output",
+			in:    SICase{WantSQL: "SELECT * FROM phys.`db1.o`"},
+			goOut: `SELECT * FROM phys."db1.o"`, cppOut: "SELECT * FROM `db1.o` FROM phys",
+			want: SICase{AllowSQLDivergence: true, WantSQLGo: "SELECT * FROM phys.`db1.o`", WantSQLCPP: `SELECT * FROM "db1.o" FROM phys`},
+		},
+		{
+			name:  "resolved divergence collapses to one pin",
+			in:    SICase{AllowSQLDivergence: true, WantSQLGo: "SELECT 1 FROM phys.`db1.t`", WantSQLCPP: "SELECT (1)"},
+			goOut: `SELECT 1 FROM phys."db1.t"`, cppOut: `SELECT 1 FROM phys."db1.t"`,
+			want: SICase{WantSQL: "SELECT 1 FROM phys.`db1.t`"},
+		},
+		{
+			name:  "stale Go pin is replaced",
+			in:    SICase{WantSQL: "SELECT 2"},
+			goOut: "SELECT 1", cppOut: "SELECT 1",
+			want: SICase{WantSQL: "SELECT 1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in
+			got.regenerateSQLPins(tc.goOut, tc.cppOut)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("pins = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
