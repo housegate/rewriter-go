@@ -133,13 +133,17 @@ func TestCheckRegenerated(t *testing.T) {
 		// regenerate faithfully; a statement whose calls of one kind are
 		// spelled two ways keeps Polyglot's respelling and is refused.
 		{"char length keeps its spelling", "SELECT CHAR_LENGTH(s) FROM db1.o", ""},
-		{"char length beside length", "SELECT CHAR_LENGTH(s), length(s) FROM db1.o",
-			"engine: generate: the regenerated statement differs from the input: lost [CHAR_LENGTH], added [LENGTH]"},
+		{"char length beside length", "SELECT CHAR_LENGTH(s), length(s) FROM db1.o", differs + "a function call's spelling could not be restored"},
 		{"group_concat separator", "SELECT group_concat(s, '-') FROM db1.o",
 			"engine: generate: the regenerated statement differs from the input: lost nothing, added [CONCAT]"},
 		{"startswith keeps its spelling", "SELECT startsWith(s, 'x') FROM db1.o", ""},
-		{"startswith spelled two ways", "SELECT startsWith(s, 'x') OR STARTSWITH(s, 'y') FROM db1.o",
-			"engine: generate: the regenerated statement differs from the input: lost [STARTSWITH STARTSWITH], added [STARTS_WITH STARTS_WITH]"},
+		{"startswith spelled two ways", "SELECT startsWith(s, 'x') OR STARTSWITH(s, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		// A quoted call name is a spelling of its own (fix round 1, L1).
+		{"quoted startswith beside startswith", "SELECT `STARTSWITH`(a, 'x'), startsWith(b, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"quoted match beside match", "SELECT `MATCH`(a, 'x'), match(b, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"quoted match alone", "SELECT `match`(a, 'x') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"match spelled two ways", "SELECT match(a, 'x'), MATCH(b, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"cume_dist spelled two ways", "SELECT cume_dist() OVER (), CUME_DIST() OVER () FROM db1.o", differs + "a function call's spelling could not be restored"},
 		{"max_by is not on every 26.x", "SELECT max_by(a, b) FROM db1.o",
 			"engine: generate: the regenerated statement differs from the input: lost [MAX_BY], added [ARGMAX]"},
 		{"first_value drops an argument", "SELECT first_value(a, b) FROM db1.o",
@@ -206,10 +210,10 @@ func TestCheckRegenerated(t *testing.T) {
 		{"format column list hides limit by", "INSERT INTO db1.o (format) SELECT a FROM db1.p LIMIT 1 BY a LIMIT 2", differs + "lost [1 LIMIT], added nothing"},
 		{"format column hides a cast", "INSERT INTO db1.o SELECT format, a::String FROM db1.p", differs + "lost nothing, added [NULLABLE]"},
 		{"format column beside char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = 1", ""},
-		{"format column hides char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = LENGTH(s)", differs + "lost [CHAR_LENGTH], added [LENGTH]"},
+		{"format column hides char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = LENGTH(s)", differs + "a function call's spelling could not be restored"},
 		{"format alias hides from", "INSERT INTO db1.o SELECT format x FROM db1.p", differs + "lost [FROM DB1.P], added nothing"},
 		{"format column beside startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x')", ""},
-		{"format column hides startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x') AND STARTS_WITH(s, 'y')", differs + "lost [STARTSWITH], added [STARTS_WITH]"},
+		{"format column hides startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x') AND STARTS_WITH(s, 'y')", differs + "a function call's spelling could not be restored"},
 
 		// Fix round 2 (re-review N1): a balanced CASE … END lower bound does
 		// not hide the AND of its BETWEEN; the regeneration regroups

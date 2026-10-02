@@ -32,6 +32,9 @@ func TestViewCommentKeepsTheStatementsAnswer(t *testing.T) {
 	} {
 		i := strings.LastIndex(sql, " COMMENT ")
 		stripped, comment := sql[:i], strings.TrimRight(sql[i+len(" COMMENT "):], ";")
+		// The comment is re-emitted as a canonical literal built from its
+		// decoded value: a doubled quote becomes \'.
+		comment = strings.ReplaceAll(comment, "''", `\'`)
 		for _, si := range []bool{false, true} {
 			for name, opts := range map[string][]*pb.RewriteOption{
 				"dynamic":    tablerefOpts(si),

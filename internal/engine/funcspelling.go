@@ -271,6 +271,15 @@ func restoreFunctionSpellings(e Engine, sql string, ast AST) (AST, error) {
 		rule := typedFunctionSpellings[kind]
 		spelling, ok := sharedSpelling(calls, rule)
 		if !ok {
+			if needsRestoring(calls, rule) {
+				for _, wrapper := range nodes {
+					body, _ := wrapper[kind].(map[string]any)
+					if _, shaped := rule.args(rule.restorable[0], body); shaped {
+						body[UnrestoredSpellingKey] = true
+						changed = true
+					}
+				}
+			}
 			continue
 		}
 		for _, wrapper := range nodes {
@@ -288,6 +297,12 @@ func restoreFunctionSpellings(e Engine, sql string, ast AST) (AST, error) {
 		rule := genericFunctionSpellings[name]
 		spelling, ok := sharedSpelling(calls, rule)
 		if !ok {
+			if needsRestoring(calls, rule) {
+				for _, body := range bodies {
+					body[UnrestoredSpellingKey] = true
+					changed = true
+				}
+			}
 			continue
 		}
 		for _, body := range bodies {
@@ -311,26 +326,73 @@ func restoreFunctionSpellings(e Engine, sql string, ast AST) (AST, error) {
 	return AST(bytes.TrimRight(buf.Bytes(), "\n")), nil
 }
 
-// callSpellings maps each upper-cased call name in sql (a bare word token
-// directly followed by "(") to the set of its source spellings.
+// callSpellings maps each upper-cased call name in sql (a token directly
+// followed by "(") to the set of its source spellings. A bare word is keyed
+// by its own text. A quoted identifier is keyed by the name ClickHouse reads
+// from it, and its spelling is the quoted source lexeme: Polyglot parses
+// `STARTSWITH`(a, 'x') into the same node kind as startsWith(a, 'x'), so the
+// quoted call is a second spelling that blocks restoration (no quoted
+// spelling is restorable), and the drop gate, which folds case and reads a
+// quoted identifier by its name, could not see a restoration to the other
+// call's spelling.
 func callSpellings(e Engine, sql string) (map[string]map[string]bool, error) {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
 		return nil, err
 	}
 	calls := map[string]map[string]bool{}
-	for i := 0; i+1 < len(toks); i++ {
-		tk := toks[i]
-		if toks[i+1].TokenType != "L_PAREN" || isQuotedLexeme(tk.TokenType) || tk.Source == "" || !isWordStart(tk.Source) {
-			continue
-		}
-		u := strings.ToUpper(tk.Source)
+	add := func(name, spelling string) {
+		u := strings.ToUpper(name)
 		if calls[u] == nil {
 			calls[u] = map[string]bool{}
 		}
-		calls[u][tk.Source] = true
+		calls[u][spelling] = true
+	}
+	for i := 0; i+1 < len(toks); i++ {
+		tk := toks[i]
+		if toks[i+1].TokenType != "L_PAREN" || tk.Source == "" {
+			continue
+		}
+		switch {
+		case isQuotedLexeme(tk.TokenType) && isQuotedIdentifier(tk.Source):
+			name, ok := clickhouseUnquote(tk.Source)
+			if !ok {
+				name = tk.Text
+			}
+			add(name, tk.Source)
+		case !isQuotedLexeme(tk.TokenType) && isWordStart(tk.Source):
+			add(tk.Source, tk.Source)
+		}
 	}
 	return calls, nil
+}
+
+// UnrestoredSpellingKey marks a node of a rule's kind that the client wrote
+// with a spelling restoreFunctionSpellings would put back, but could not
+// restore: its calls of that kind are spelled two ways, or one is a quoted
+// call name. Polyglot's own spelling of such a node can differ from the
+// client's in case only (MATCH, CUME_DIST), which the drop gate's comparison
+// folds, or name another call than the one the client wrote for that node
+// (`STARTSWITH`(a, 'x') beside startsWith(b, 'y')), so CheckRegenerated
+// refuses any statement that carries the mark. Polyglot ignores the field.
+const UnrestoredSpellingKey = "_rewriter_go_unrestored_spelling"
+
+// needsRestoring reports whether a call parsed into the rule's kind is
+// spelled in a way the rule restores, or is a quoted call name.
+func needsRestoring(calls map[string]map[string]bool, rule functionSpellingRule) bool {
+	for _, name := range rule.parsedFrom {
+		for s := range calls[name] {
+			if isQuotedIdentifier(s) {
+				return true
+			}
+			for _, r := range rule.restorable {
+				if strings.ToUpper(s) == r {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // sharedSpelling returns the one spelling every call parsed into the rule's

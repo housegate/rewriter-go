@@ -7,7 +7,7 @@ import "strings"
 // (chx buildCreateViewSQL). The pinned Polyglot's create_view grammar stops
 // before a trailing view COMMENT, so the whole-statement parse gate refuses
 // the statement. It returns sql without the COMMENT clause and the clause's
-// string literal exactly as written, so the ordinary pipeline, every gate and
+// string literal re-quoted from its decoded value (clickhouseQuote), so the ordinary pipeline, every gate and
 // policy check included, runs on the statement without its comment and
 // AppendViewComment puts the literal back on a rewritten Success. ok=false,
 // with sql unchanged, for every other statement.
@@ -83,7 +83,17 @@ func StripViewComment(e Engine, sql string) (stripped, comment string, ok bool) 
 	if berr != nil || kind != NodeCreateView || body == nil || body["query_parenthesized"] != true {
 		return sql, "", false
 	}
-	return candidate, sql[lit.Span.Start:lit.Span.End], true
+	// The literal is re-emitted from the value ClickHouse reads from it, as a
+	// canonical single-quoted literal (clickhouseQuote), never as source
+	// text: the comment appended to the rewritten SQL then cannot depend on
+	// Polyglot's tokenizer and ClickHouse agreeing on where the source
+	// literal ends. A literal ClickHouse would not decode to one value is
+	// left to the parse gate.
+	value, ok := clickhouseUnquote(lit.Source)
+	if !ok {
+		return sql, "", false
+	}
+	return candidate, clickhouseQuote(value), true
 }
 
 // createViewHeader reports whether toks start CREATE [OR REPLACE]

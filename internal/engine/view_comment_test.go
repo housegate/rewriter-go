@@ -12,6 +12,15 @@ func TestStripViewComment(t *testing.T) {
 		{"CREATE MATERIALIZED VIEW d.mv TO d.t (a String) AS (SELECT * FROM d.s) COMMENT 'c' ; ",
 			"CREATE MATERIALIZED VIEW d.mv TO d.t (a String) AS (SELECT * FROM d.s)", "'c'"},
 		{"create view d.v as (select 1) comment 'it\\'s'", "create view d.v as (select 1)", "'it\\'s'"},
+		// The literal is re-emitted canonically from its decoded value
+		// (fix round 1, I3): a doubled quote, an escaped backslash, a hex
+		// escape and an escaped tab.
+		{"CREATE VIEW d.v AS (SELECT 1) COMMENT 'a''b'", "CREATE VIEW d.v AS (SELECT 1)", `'a\'b'`},
+		{"CREATE VIEW d.v AS (SELECT 1) COMMENT 'a\\\\'", "CREATE VIEW d.v AS (SELECT 1)", `'a\\'`},
+		{"CREATE VIEW d.v AS (SELECT 1) COMMENT '\\x41\\x42'", "CREATE VIEW d.v AS (SELECT 1)", `'AB'`},
+		{"CREATE VIEW d.v AS (SELECT 1) COMMENT 'a\\tb'", "CREATE VIEW d.v AS (SELECT 1)", "'a\tb'"},
+		// A literal ClickHouse does not decode to one value is not taken.
+		{"CREATE VIEW d.v AS (SELECT 1) COMMENT '\\x4'", "", ""},
 		{"CREATE VIEW d.v AS SELECT 1 COMMENT 'c'", "", ""},
 		{"CREATE VIEW d.v AS SELECT f(1) COMMENT 'c'", "", ""},
 		{"CREATE VIEW d.v AS (SELECT 1) COMMENT \"c\"", "", ""},

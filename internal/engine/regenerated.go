@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -64,6 +65,9 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 	kind, err := NodeKind(ast)
 	if err != nil {
 		return err
+	}
+	if bytes.Contains(ast, []byte(`"`+UnrestoredSpellingKey+`":true`)) {
+		return fmt.Errorf("%w: a function call's spelling could not be restored", ErrNotRegeneratedFaithfully)
 	}
 	gen, err := regeneratedText(e, kind, ast)
 	if err != nil {

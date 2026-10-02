@@ -60,8 +60,9 @@ func TestRestoreFunctionSpellings(t *testing.T) {
 
 // TestRestoreFunctionSpellingsLeavesAmbiguousCalls pins the cases in which the
 // spelling is not restored, so Polyglot's respelling stays and the drop gate
-// refuses: two spellings of one kind, a spelling that is not ClickHouse's,
-// and a node shape the rule does not model.
+// refuses: two spellings of one kind (a quoted call name counts as one),
+// and a spelling that is not ClickHouse's. Where Polyglot's spelling differs
+// in case only (MATCH), the UnrestoredSpellingKey mark makes the gate refuse.
 func TestRestoreFunctionSpellingsLeavesAmbiguousCalls(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct{ sql, gen string }{
@@ -70,6 +71,8 @@ func TestRestoreFunctionSpellingsLeavesAmbiguousCalls(t *testing.T) {
 		{"SELECT instr(s, 'x'), locate('x', s) FROM db1.o", "SELECT POSITION(s, 'x'), POSITION(s, 'x') FROM db1.o"},
 		{"SELECT CHAR_LENGTH(s), length(s) FROM db1.o", "SELECT LENGTH(s), LENGTH(s) FROM db1.o"},
 		{"SELECT match(s, 'x'), MATCH(s, 'y') FROM db1.o", "SELECT MATCH(s, 'x'), MATCH(s, 'y') FROM db1.o"},
+		{"SELECT `STARTSWITH`(a, 'x'), startsWith(b, 'y') FROM db1.o", "SELECT STARTS_WITH(a, 'x'), STARTS_WITH(b, 'y') FROM db1.o"},
+		{"SELECT `MATCH`(a, 'x'), match(b, 'y') FROM db1.o", "SELECT MATCH(a, 'x'), MATCH(b, 'y') FROM db1.o"},
 		{"SELECT group_concat(s, '-') FROM db1.o", "SELECT GROUP_CONCAT(CONCAT(s, '-')) FROM db1.o"},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
@@ -84,10 +87,10 @@ func TestRestoreFunctionSpellingsLeavesAmbiguousCalls(t *testing.T) {
 			if got != tc.gen {
 				t.Fatalf("generated %q, want %q", got, tc.gen)
 			}
-			if !strings.EqualFold(got, tc.sql) {
-				if err := CheckRegenerated(e, tc.sql, ast); err == nil {
-					t.Fatal("CheckRegenerated passed a respelled statement")
-				}
+			// starts_with is no ClickHouse spelling: nothing is restored, and
+			// the regeneration spells the input, so the gate passes it.
+			if err := CheckRegenerated(e, tc.sql, ast); (err == nil) != (tc.sql == "SELECT starts_with(s, 'x') FROM db1.o") {
+				t.Fatalf("CheckRegenerated = %v", err)
 			}
 		})
 	}
