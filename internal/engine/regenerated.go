@@ -96,7 +96,13 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 	// prints it from the tokens, dropping a quoted identifier's quotes, so
 	// there a quoted identifier is spelled apart from a bare word.
 	quoted := kind == NodeCommand || kind == NodeRaw
-	lost, added := spellingDiff(fidelitySpellings(sql, in, true, operatorsKept(out), quoted), fidelitySpellings(gen, out, false, nil, quoted))
+	// A bare keyword the AST reads as a column is a single-token operand to
+	// the precedence helpers (keywordColumnsAsNames).
+	operands := in
+	if !quoted {
+		operands = keywordColumnsAsNames(sql, in, ast)
+	}
+	lost, added := spellingDiff(fidelitySpellings(sql, operands, true, operatorsKept(out), quoted), fidelitySpellings(gen, out, false, nil, quoted))
 	if len(lost) != 0 || len(added) != 0 {
 		return fmt.Errorf("%w: lost %s, added %s", ErrNotRegeneratedFaithfully, spellingList(lost), spellingList(added))
 	}
@@ -477,7 +483,10 @@ func readsInput(toks []rawToken) bool {
 // difference: CHAR_LENGTH → LENGTH (characters → bytes), instr → POSITION
 // (case-insensitive → case-sensitive), toStartOfDay → dateTrunc('DAY', …)
 // (DateTime64 / Date32 results differ), startsWith → STARTS_WITH and
-// toTypeName → TYPEOF (no such functions).
+// toTypeName → TYPEOF (no such functions). restoreFunctionSpellings puts the
+// client's spelling of these back before any comparison when it can; a call
+// it leaves alone is refused here. max_by / min_by → argMax / argMin is an
+// alias on 26.8 but not on 26.2 (no such function there), so it is not folded.
 var spellingClass = map[string]string{
 	"BOOLEAN":    "BOOL",
 	"INT":        "INT32",

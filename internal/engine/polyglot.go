@@ -42,7 +42,21 @@ func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
 	// Every quoted identifier leaves the engine carrying the name ClickHouse
 	// resolves (decodeASTIdentifiers), so no caller compares Polyglot's
 	// partially decoded spelling.
-	return decodeASTIdentifiers(e, sql, AST(ast))
+	decoded, err := decodeASTIdentifiers(e, sql, AST(ast))
+	if err != nil {
+		return nil, err
+	}
+	// A function call Polyglot would print under another name keeps the
+	// client's spelling (restoreFunctionSpellings), so every generator and
+	// every fidelity gate sees the call ClickHouse will execute.
+	restored, err := restoreFunctionSpellings(e, sql, decoded)
+	if err != nil {
+		return nil, err
+	}
+	// A view column's COMMENT, which Polyglot's view-column parser drops, is
+	// recorded on its column_def (restoreViewColumnComments) and printed
+	// back by Generate.
+	return restoreViewColumnComments(e, sql, restored)
 }
 
 func (e *polyglotEngine) ParseGeneric(sql string) (AST, error) {
@@ -67,7 +81,7 @@ func (e *polyglotEngine) Generate(ast AST) (string, error) {
 	if len(out) == 0 {
 		return "", fmt.Errorf("engine: generate returned no statements")
 	}
-	return out[0], nil
+	return appendViewColumnComments(e, ast, out[0])
 }
 
 // RenameTables applies the table-name mapping. The polyglot SDK expects and

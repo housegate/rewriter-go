@@ -39,11 +39,12 @@ func TestMidStatementDropGate(t *testing.T) {
 			"CREATE TABLE db1.n (a Int32 STATISTICS(tdigest)) ENGINE = MergeTree ORDER BY a",
 			"CREATE VIEW db1.v AS SELECT a FROM db1.o LIMIT 2 BY a LIMIT 3",
 			"SELECT a::String FROM db1.o",
-			"SELECT CHAR_LENGTH(s) FROM db1.o",
-			"SELECT instr(s, 'x') FROM db1.o",
-			"SELECT toStartOfDay(t) FROM db1.o",
 			"SELECT group_concat(s, '-') FROM db1.o",
-			"SELECT startsWith(s, 'x') FROM db1.o",
+			// A respelled function call whose spelling cannot be restored
+			// (restoreFunctionSpellings): two spellings of one kind.
+			"SELECT startsWith(s, 'x') OR STARTSWITH(s, 'y') FROM db1.o",
+			"SELECT instr(s, 'x'), locate('x', s) FROM db1.o",
+			"SELECT max_by(a, b) FROM db1.o",
 			// Column modifiers reordered (final review Minor 1).
 			"CREATE TABLE db1.n (a Int32 CODEC(ZSTD) COMMENT 'x') ENGINE = Memory",
 			"ALTER TABLE db1.o ADD COLUMN a Int32 CODEC(ZSTD) COMMENT 'x'",
@@ -80,6 +81,18 @@ func TestMidStatementDropGate(t *testing.T) {
 			"INSERT INTO TABLE db1.o (a) VALUES (1)",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_Success})
+		}
+		// Function calls Polyglot used to respell keep the client's
+		// spelling (restoreFunctionSpellings) and are forwarded as written.
+		for _, c := range []struct{ sql, want string }{
+			{"SELECT CHAR_LENGTH(s) FROM db1.o", `SELECT CHAR_LENGTH(s) FROM phys."db1.o" "db1.o"`},
+			{"SELECT instr(s, 'x') FROM db1.o", `SELECT instr(s, 'x') FROM phys."db1.o" "db1.o"`},
+			{"SELECT locate('x', s, 2) FROM db1.o", `SELECT locate('x', s, 2) FROM phys."db1.o" "db1.o"`},
+			{"SELECT toStartOfDay(t) FROM db1.o", `SELECT toStartOfDay(t) FROM phys."db1.o" "db1.o"`},
+			{"SELECT startsWith(s, 'x') FROM db1.o", `SELECT startsWith(s, 'x') FROM phys."db1.o" "db1.o"`},
+			{"SELECT toTypeName(a), trim(s, 'x'), match(s, 'y') FROM db1.o", `SELECT toTypeName(a), trim(s, 'x'), match(s, 'y') FROM phys."db1.o" "db1.o"`},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
 		}
 		if !si {
 			// The active surface refuses a structured DELETE for its own reasons.
@@ -528,9 +541,9 @@ func TestMaterializeRefusesStatementNotRegeneratedFaithfully(t *testing.T) {
 	for _, sql := range []string{
 		"INSERT INTO db1.o SELECT now(), a FROM db1.p ORDER BY a LIMIT 1 WITH TIES FORMAT JSON",
 		"INSERT INTO db1.o SELECT now(), a::String FROM db1.p",
-		// startsWith is regenerated as STARTS_WITH, which is not a ClickHouse
-		// function: a known conservative refusal for now() beside it.
-		"INSERT INTO db1.o SELECT now(), startsWith(s, 'x') FROM db1.p",
+		// group_concat(s, sep) is regenerated as GROUP_CONCAT(CONCAT(s, sep)):
+		// a known conservative refusal for now() beside it.
+		"INSERT INTO db1.o SELECT now(), group_concat(s, '-') FROM db1.p",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			resp, err := doMaterializeSQL(e, &pb.MaterializeSQLRequest{Sql: sql,
@@ -549,6 +562,14 @@ func TestMaterializeRefusesStatementNotRegeneratedFaithfully(t *testing.T) {
 		Inputs: &pb.MaterializationInputs{NowUnixNs: &now}})
 	if err != nil || resp.GetCode() != pb.MaterializeCode_MaterializeSuccess || len(resp.GetReplacements()) != 1 {
 		t.Fatalf("a faithful statement still materializes: resp = %+v, err = %v", resp, err)
+	}
+	// startsWith keeps its spelling now (restoreFunctionSpellings), so now()
+	// beside it materializes and the call is signed as the client wrote it.
+	resp, err = doMaterializeSQL(e, &pb.MaterializeSQLRequest{Sql: "INSERT INTO db1.o SELECT now(), startsWith(s, 'x') FROM db1.p",
+		Inputs: &pb.MaterializationInputs{NowUnixNs: &now}})
+	if err != nil || resp.GetCode() != pb.MaterializeCode_MaterializeSuccess || len(resp.GetReplacements()) != 1 ||
+		!strings.Contains(resp.GetSqlAfterMaterialization(), "startsWith(s, 'x')") {
+		t.Fatalf("startsWith beside now(): resp = %+v, err = %v", resp, err)
 	}
 }
 

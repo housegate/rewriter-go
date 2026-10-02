@@ -1,5 +1,10 @@
 package engine
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // This file holds CheckRegenerated's precedence helpers: where a respelling
 // that changes an operator's precedence class cannot regroup its operands.
 
@@ -330,4 +335,125 @@ func ternaryColon(toks []rawToken, q int) int {
 		return -1
 	}
 	return colon
+}
+
+// keywordNameTokens are the keyword token types the pinned tokenizer gives a
+// bare word that ClickHouse also reads as a plain identifier in an operand
+// position. Measured on ClickHouse 26.8 for every single-word entry of
+// system.keywords whose Polyglot token type is not VAR, as the left and the
+// right operand of NOT LIKE in sixteen positions (WHERE, AND, OR, PREWHERE,
+// HAVING, WHEN, a SELECT item, a parenthesis, a function argument, ORDER BY
+// … DESC, after DISTINCT, before AS): wherever ClickHouse accepts
+// `k NOT LIKE 'x'` and Polyglot parses it in full, ClickHouse reads k as an
+// identifier there and reads Polyglot's `NOT k LIKE 'x'` as NOT (k LIKE 'x').
+// Left out: ALL and THEN, which ClickHouse rejects in some of those positions
+// (so a respelling could turn a rejected statement into an accepted one),
+// INTERVAL, which Polyglot regenerates as another expression, EXISTS, which
+// Polyglot does not read as a column, and BETWEEN, IN, ILIKE, REGEXP and TOP,
+// which the spelling comparison reads as the operator (NOT between is spelled
+// NOT BETWEEN) or as LIMIT (TOP), so the respelling cannot match anyway.
+var keywordNameTokens = map[string]bool{
+	"ADD": true, "AFTER": true, "ALTER": true, "AND": true, "ANTI": true, "ANY": true, "APPLY": true,
+	"AS": true, "ASC": true, "AS_OF": true, "AUTO_INCREMENT": true, "BY": true,
+	"CASCADE": true, "CHECK": true, "CLUSTER": true, "COLLATE": true, "COLUMN": true, "COMMENT": true,
+	"COMMIT": true, "CONSTRAINT": true, "COPY": true, "CREATE": true, "CROSS": true, "CUBE": true,
+	"CURRENT": true, "DATABASE": true, "DATE": true, "DEFAULT": true, "DELETE": true, "DESC": true,
+	"DESCRIBE": true, "DISTINCT": true, "DROP": true, "ELSE": true, "END": true, "ESCAPE": true,
+	"EXCEPT": true, "EXECUTE": true, "FETCH": true, "FILTER": true, "FINAL": true,
+	"FIRST": true, "FOLLOWING": true, "FOR": true, "FOREIGN_KEY": true, "FORMAT": true, "FROM": true,
+	"FULL": true, "FUNCTION": true, "GRANT": true, "GROUPS": true, "HAVING": true,
+	"INDEX": true, "INNER": true, "INTERSECT": true, "JOIN": true, "KEY": true,
+	"KILL": true, "LANGUAGE": true, "LAST": true, "LEFT": true, "LIMIT": true, "LOCAL": true,
+	"MATCH": true, "MATERIALIZED": true, "NATURAL": true, "NEXT": true, "NULLS": true, "OFFSET": true,
+	"ON": true, "ONLY": true, "OR": true, "OUTER": true, "OVER": true, "PARTITION": true, "PLACING": true,
+	"PRECEDING": true, "PREPARE": true, "PREWHERE": true, "PRIMARY_KEY": true, "QUALIFY": true,
+	"RANGE": true, "RECURSIVE": true, "REFERENCES": true, "REFRESH": true, "RENAME": true,
+	"REPLACE": true, "RESTRICT": true, "RETURNS": true, "REVOKE": true, "RIGHT": true, "ROLLBACK": true,
+	"ROLLUP": true, "ROW": true, "ROWS": true, "SAMPLE": true, "SELECT": true,
+	"SEMI": true, "SET": true, "SETTINGS": true, "SHOW": true, "SOME": true, "SYSTEM": true,
+	"TABLE": true, "TEMPORARY": true, "TIMESTAMP": true, "TO": true, "TRANSACTION": true,
+	"TRIGGER": true, "TRUNCATE": true, "TYPE": true, "UNBOUNDED": true, "UNION": true, "UNIQUE": true,
+	"UPDATE": true, "USE": true, "VALUES": true, "VIEW": true, "WHEN": true, "WHERE": true,
+	"WINDOW": true, "WITH": true,
+}
+
+// keywordColumnsAsNames returns toks with every bare keyword token that the
+// statement's AST reads as (part of) a column reference retyped VAR, so the
+// precedence helpers treat it as the single-token operand it is: the pinned
+// tokenizer types a bare `cluster` CLUSTER, and without this
+// `cluster NOT LIKE 'all-%'` (the Sentio driver's cluster probe) could not
+// take the measured NOT LIKE respelling. Only a token whose type is in
+// keywordNameTokens and whose span is exactly the span of an unquoted
+// identifier inside a column node is retyped; a keyword Polyglot reads as
+// anything else (a clause, an operator, DATE '…' as a typed literal) keeps
+// its type, and the precedence helpers keep refusing it. The input slice is
+// not modified.
+func keywordColumnsAsNames(sql string, toks []rawToken, ast AST) []rawToken {
+	candidate := false
+	for _, tk := range toks {
+		if keywordNameTokens[tk.TokenType] && tk.Source != "" && isWordStart(tk.Source) {
+			candidate = true
+			break
+		}
+	}
+	if !candidate {
+		return toks
+	}
+	dec := json.NewDecoder(bytes.NewReader(ast))
+	dec.UseNumber()
+	var root any
+	if dec.Decode(&root) != nil {
+		return toks
+	}
+	stream := newTokenStream(sql)
+	spans := map[[2]int]bool{}
+	addName := func(n any) {
+		id, _ := n.(map[string]any)
+		if id == nil || id["quoted"] != false {
+			return
+		}
+		span, _ := id["span"].(map[string]any)
+		start, sok := jsonInt(span["start"])
+		end, eok := jsonInt(span["end"])
+		if !sok || !eok {
+			return
+		}
+		if b0, b1, ok := stream.byteRange(start, end); ok {
+			spans[[2]int{b0, b1}] = true
+		}
+	}
+	var walk func(any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case map[string]any:
+			if col, ok := v["column"].(map[string]any); ok && len(v) == 1 {
+				addName(col["name"])
+				addName(col["table"])
+			}
+			for _, child := range v {
+				walk(child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	if len(spans) == 0 {
+		return toks
+	}
+	out := toks
+	copied := false
+	for i, tk := range toks {
+		if !keywordNameTokens[tk.TokenType] || !spans[[2]int{tk.Span.Start, tk.Span.End}] || !isWordStart(tk.Source) {
+			continue
+		}
+		if !copied {
+			out = append([]rawToken(nil), toks...)
+			copied = true
+		}
+		out[i].TokenType = "VAR"
+	}
+	return out
 }

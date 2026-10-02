@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 
@@ -168,6 +169,9 @@ const StorageIntegrityContractMessage = "storage-integrity contract version V1 o
 // which polyglot cannot parse, and the keyword is put back into the result;
 // a rejection echoes the caller's SQL (spec 2026-09-26 §5).
 func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
+	if stripped, comment, ok := engine.StripViewComment(e, sql); ok {
+		return rewriteViewComment(e, sql, stripped, comment, opts)
+	}
 	stripped, empty, stripErr := engine.StripCreateTableEmpty(e, sql)
 	if stripErr == nil && !empty {
 		return rewriteStatement(e, sql, opts)
@@ -195,11 +199,39 @@ func doRewrite(e engine.Engine, sql string, opts []*pb.RewriteOption) (*pb.Rewri
 	return sealCreateTableEmpty(resp, sql, opts, stripErr)
 }
 
+// rewriteViewComment rewrites `CREATE [OR REPLACE] [MATERIALIZED] VIEW … AS
+// (<query>) COMMENT '<text>'` without its trailing COMMENT clause, which the
+// pinned Polyglot cannot parse (engine.StripViewComment), and puts the
+// clause's literal back on a Success. Every gate and policy check runs on the
+// statement without the comment, which names nothing. A rejection echoes the
+// caller's SQL; a Success whose rewritten text does not end in the view
+// query's ")" is refused like an EMPTY that cannot be put back.
+func rewriteViewComment(e engine.Engine, sql, stripped, comment string, opts []*pb.RewriteOption) (*pb.RewriteSQLResponse, error) {
+	resp, err := rewriteStatement(e, stripped, opts)
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetCode() != pb.RewriteCode_Success {
+		resp.SqlAfterRewrite = sql // a rejection echoes the caller's SQL
+		return resp, nil
+	}
+	if out, ok := engine.AppendViewComment(resp.GetSqlAfterRewrite(), comment); ok {
+		resp.SqlAfterRewrite = out
+		return resp, nil
+	}
+	return sealCreateTableEmpty(resp, sql, opts, errViewCommentNotRestored)
+}
+
+// errViewCommentNotRestored is the static / no-rewrite error for a view
+// whose COMMENT clause could not be put back.
+var errViewCommentNotRestored = errors.New("rewriter: the view COMMENT clause cannot be restored on the rewritten statement")
+
 // sealCreateTableEmpty refuses a CREATE TABLE … EMPTY AS SELECT whose EMPTY
 // keyword could not be located or put back, instead of forwarding a statement
 // without its body (spec 2026-09-26 §5: an engine-internal limit is a coded
-// UnsupportedStatement in dynamic mode). Static and no-rewrite requests keep
-// the legacy Go-error channel.
+// UnsupportedStatement in dynamic mode), and likewise a view whose COMMENT
+// clause could not be put back (rewriteViewComment). Static and no-rewrite
+// requests keep the legacy Go-error channel.
 func sealCreateTableEmpty(resp *pb.RewriteSQLResponse, sql string, opts []*pb.RewriteOption, cause error) (*pb.RewriteSQLResponse, error) {
 	if nameresolve.FindActive(opts).Mode != nameresolve.ModeDynamic {
 		return nil, cause
