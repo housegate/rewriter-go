@@ -3278,6 +3278,9 @@ func TestTableRef_ViewColumnListReadFreeShapesStayAccepted(t *testing.T) {
 				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8, b UInt8, PROJECTION p (SELECT a, b ORDER BY a)) ENGINE=MergeTree ORDER BY a AS SELECT 1 AS a, 2 AS b`},
 			{"CREATE MATERIALIZED VIEW db1.mv (a UInt8, PRIMARY KEY a) ENGINE = MergeTree AS SELECT 1 AS a",
 				`CREATE MATERIALIZED VIEW phys."db1.mv" (a UInt8, PRIMARY KEY a) ENGINE=MergeTree AS SELECT 1 AS a`},
+			// A column COMMENT is put back (restoreViewColumnComments).
+			{"CREATE VIEW db1.v (a UInt8 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b",
+				`CREATE VIEW phys."db1.v" (a UInt8 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b`},
 		} {
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si, wantCode: pb.RewriteCode_Success, wantSQL: c.want})
 		}
@@ -3286,7 +3289,10 @@ func TestTableRef_ViewColumnListReadFreeShapesStayAccepted(t *testing.T) {
 			"CREATE MATERIALIZED VIEW db1.mv (a UInt8 DEFAULT (SELECT 1)) ENGINE = Memory AS SELECT 1 AS a",
 			"CREATE MATERIALIZED VIEW db1.mv (a UInt8 MATERIALIZED 1 IN (1, 2)) ENGINE = Memory AS SELECT 1 AS a",
 			"CREATE MATERIALIZED VIEW db1.mv TO db1.o (a UInt8 ALIAS 1 IN tuple(1, 2), b UInt8 CODEC(ZSTD(1))) AS SELECT 1 AS a",
-			"CREATE VIEW db1.v (a UInt8 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b",
+			// Only the comment is put back: a DEFAULT / CODEC beside it is
+			// still dropped by the generator and refused.
+			"CREATE VIEW db1.v (a UInt8 DEFAULT 1 COMMENT 'x', b String) AS SELECT 1 AS a, 'b' AS b",
+			"CREATE VIEW db1.v (a UInt8 COMMENT 'x' CODEC(ZSTD(1)), b String) AS SELECT 1 AS a, 'b' AS b",
 		} {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"})
 		}

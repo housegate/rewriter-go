@@ -129,12 +129,27 @@ func TestCheckRegenerated(t *testing.T) {
 			"engine: generate: the regenerated statement differs from the input: lost [1 EQ MAX_THREADS SETTINGS], added nothing"},
 		{"cast gains nullable", "SELECT a::String FROM db1.o",
 			"engine: generate: the regenerated statement differs from the input: lost nothing, added [NULLABLE]"},
-		{"char length is not length", "SELECT CHAR_LENGTH(s) FROM db1.o",
-			"engine: generate: the regenerated statement differs from the input: lost [CHAR_LENGTH], added [LENGTH]"},
+		// restoreFunctionSpellings puts the client's spelling back, so these
+		// regenerate faithfully; a statement whose calls of one kind are
+		// spelled two ways keeps Polyglot's respelling and is refused.
+		{"char length keeps its spelling", "SELECT CHAR_LENGTH(s) FROM db1.o", ""},
+		{"char length beside length", "SELECT CHAR_LENGTH(s), length(s) FROM db1.o", differs + "a function call's spelling could not be restored"},
 		{"group_concat separator", "SELECT group_concat(s, '-') FROM db1.o",
 			"engine: generate: the regenerated statement differs from the input: lost nothing, added [CONCAT]"},
-		{"no such function", "SELECT startsWith(s, 'x') FROM db1.o",
-			"engine: generate: the regenerated statement differs from the input: lost [STARTSWITH], added [STARTS_WITH]"},
+		{"startswith keeps its spelling", "SELECT startsWith(s, 'x') FROM db1.o", ""},
+		{"startswith spelled two ways", "SELECT startsWith(s, 'x') OR STARTSWITH(s, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		// A quoted call name is a spelling of its own (fix round 1, L1).
+		{"quoted startswith beside startswith", "SELECT `STARTSWITH`(a, 'x'), startsWith(b, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"quoted match beside match", "SELECT `MATCH`(a, 'x'), match(b, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"quoted match alone", "SELECT `match`(a, 'x') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"match spelled two ways", "SELECT match(a, 'x'), MATCH(b, 'y') FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"cume_dist spelled two ways", "SELECT cume_dist() OVER (), CUME_DIST() OVER () FROM db1.o", differs + "a function call's spelling could not be restored"},
+		{"max_by is not on every 26.x", "SELECT max_by(a, b) FROM db1.o",
+			"engine: generate: the regenerated statement differs from the input: lost [MAX_BY], added [ARGMAX]"},
+		{"first_value drops an argument", "SELECT first_value(a, b) FROM db1.o",
+			"engine: generate: the regenerated statement differs from the input: lost [B], added nothing"},
+		{"json_query gains a path", "SELECT JSON_QUERY(s) FROM db1.o",
+			"engine: generate: the regenerated statement differs from the input: lost nothing, added [$]"},
 		{"live view becomes a view", "CREATE DEFINER=alice LIVE VIEW db1.v AS SELECT 1",
 			"engine: generate: the regenerated statement differs from the input: lost [ALICE LIVE], added [ALICELIVE]"},
 
@@ -178,13 +193,27 @@ func TestCheckRegenerated(t *testing.T) {
 		{"ternary with an implicit alias", "SELECT a ? b : c x FROM db1.o", differs + "lost [COLON PARAMETER], added [IF]"},
 		{"not like under =", "SELECT a NOT LIKE b = c FROM db1.o", differs + "lost [NOT LIKE], added [NOT]"},
 
+		// A bare keyword the AST reads as a column is a single-token operand
+		// (keywordColumnsAsNames): the Sentio driver's cluster probe.
+		{"keyword column not like", "SELECT cluster FROM system.clusters WHERE cluster not like 'all-%'", ""},
+		{"keyword column not ilike", "SELECT a FROM db1.o WHERE format NOT ILIKE 'x' AND key NOT LIKE 'y'", ""},
+		{"qualified keyword column not like", "SELECT a FROM db1.o AS t WHERE t.cluster NOT LIKE 'x'", ""},
+		{"keyword column regexp", "SELECT a FROM db1.o WHERE table REGEXP 'x'", ""},
+		{"keyword column null-safe equality", "SELECT a FROM db1.o WHERE cluster <=> 1", ""},
+		{"keyword column div", "SELECT a FROM db1.o WHERE date DIV 2 = 1", differs + "lost [DIV], added [INTDIV]"},
+		{"keyword column not like under =", "SELECT cluster NOT LIKE b = c FROM db1.o", differs + "lost [NOT LIKE], added [NOT]"},
+		{"typed literal is not a keyword column", "SELECT a FROM db1.o WHERE DATE '2020-01-01' NOT LIKE 'x'", differs + "lost [NOT LIKE], added [NOT]"},
+		{"interval is not a keyword column", "SELECT a FROM db1.o WHERE interval NOT LIKE 'x'", differs + "lost nothing, added [PLUS INTERVAL]"},
+
 		// Fix round 1 (review I3): a column named format is not a FORMAT clause.
 		{"format column hides limit by", "INSERT INTO db1.o SELECT format FROM db1.p LIMIT 1 BY a LIMIT 2", differs + "lost [1 LIMIT], added nothing"},
 		{"format column list hides limit by", "INSERT INTO db1.o (format) SELECT a FROM db1.p LIMIT 1 BY a LIMIT 2", differs + "lost [1 LIMIT], added nothing"},
 		{"format column hides a cast", "INSERT INTO db1.o SELECT format, a::String FROM db1.p", differs + "lost nothing, added [NULLABLE]"},
-		{"format column hides char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = 1", differs + "lost [CHAR_LENGTH], added [LENGTH]"},
+		{"format column beside char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = 1", ""},
+		{"format column hides char_length", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND CHAR_LENGTH(s) = LENGTH(s)", differs + "a function call's spelling could not be restored"},
 		{"format alias hides from", "INSERT INTO db1.o SELECT format x FROM db1.p", differs + "lost [FROM DB1.P], added nothing"},
-		{"format column hides startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x')", differs + "lost [STARTSWITH], added [STARTS_WITH]"},
+		{"format column beside startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x')", ""},
+		{"format column hides startswith", "INSERT INTO db1.o SELECT a FROM db1.p WHERE format = 1 AND startsWith(s, 'x') AND STARTS_WITH(s, 'y')", differs + "a function call's spelling could not be restored"},
 
 		// Fix round 2 (re-review N1): a balanced CASE … END lower bound does
 		// not hide the AND of its BETWEEN; the regeneration regroups
@@ -708,6 +737,64 @@ func TestPolyglotCommandSQLKeepsPolyglotText(t *testing.T) {
 			if err := CheckRegenerated(e, tc.sql, ast); !errors.Is(err, ErrNotRegeneratedFaithfully) {
 				t.Fatalf("CheckRegenerated(%q) = %v, want ErrNotRegeneratedFaithfully", tc.sql, err)
 			}
+		}
+	}
+}
+
+// TestKeywordColumnOperands pins the measured keyword-name operands
+// (keywordNameTokens): each word, which the tokenizer types as a keyword,
+// is read by Polyglot as a column in `<word> NOT LIKE 'x'`, the drop gate
+// accepts the NOT LIKE respelling for it, and the regeneration is the one
+// measured equivalent on ClickHouse 26.8 (NOT (<word> LIKE 'x'), the word an
+// identifier there). The words keywordNameTokens leaves out keep the
+// refusal.
+func TestKeywordColumnOperands(t *testing.T) {
+	e := newTestEngine(t)
+	words := strings.Fields(`add after alter and anti any apply as asc asof auto_increment by cascade check cluster collate column
+		comment commit constraint copy create cross cube current database date default delete desc describe distinct
+		drop else end escape except execute fetch filter final first following for foreign format from full function
+		grant groups having index inner intersect join key kill language last left limit local match materialized
+		natural next nulls offset on only or outer over partition placing preceding prepare prewhere primary qualify
+		range recursive references refresh rename replace restrict returns revoke right rollback rollup row rows
+		sample select semi set settings show some system table temporary timestamp to transaction trigger truncate
+		type unbounded union unique update use values view when where window with`)
+	if len(words) != len(keywordNameTokens) {
+		t.Fatalf("%d words for %d keyword token types", len(words), len(keywordNameTokens))
+	}
+	seen := map[string]bool{}
+	for _, w := range words {
+		toks, err := tokenizeRaw(e, w)
+		if err != nil || len(toks) != 1 || !keywordNameTokens[toks[0].TokenType] {
+			t.Fatalf("%s: token %+v is not a keyword name token", w, toks)
+		}
+		seen[toks[0].TokenType] = true
+		sql := "SELECT a FROM db1.o WHERE " + w + " NOT LIKE 'x'"
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		gen, err := e.Generate(ast)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "SELECT a FROM db1.o WHERE NOT " + w + " LIKE 'x'"; gen != want {
+			t.Fatalf("generated %q, want %q", gen, want)
+		}
+		if err := CheckRegenerated(e, sql, ast); err != nil {
+			t.Errorf("%s: %v", sql, err)
+		}
+	}
+	if len(seen) != len(keywordNameTokens) {
+		t.Fatalf("words cover %d of %d keyword token types", len(seen), len(keywordNameTokens))
+	}
+	for _, w := range []string{"all", "then", "between", "exists", "ilike", "in", "regexp", "top"} {
+		sql := "SELECT a FROM db1.o WHERE " + w + " NOT LIKE 'x'"
+		ast, err := e.ParseOne(sql)
+		if err != nil {
+			continue
+		}
+		if CheckRegenerated(e, sql, ast) == nil {
+			t.Fatalf("%s: the drop gate passed an unmeasured keyword operand", sql)
 		}
 	}
 }
