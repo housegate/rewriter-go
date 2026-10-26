@@ -22,7 +22,7 @@ jobs:
           submodules: true
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26.10'
       - run: go build ./...
       - run: go vet ./...
       - run: env SNAPSHOT_QUERY_ORDINARY=1 go test ./...
@@ -67,7 +67,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26.10'
       - name: build or reuse the polyglot FFI library
         run: |
           set -euo pipefail

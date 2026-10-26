@@ -56,7 +56,7 @@ jobs:
           submodules: true
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26.10'
       - uses: dtolnay/rust-toolchain@stable
       # Same cache key scheme as ci.yml, so the linux lane reuses its cache.
       - id: polyglot
