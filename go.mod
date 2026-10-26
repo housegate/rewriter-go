@@ -5,7 +5,7 @@ go 1.26.10
 require (
 	github.com/ebitengine/purego v0.10.0
 	github.com/housegate/rewriter-proto v0.4.0
-	github.com/tobilg/polyglot/packages/go v0.13.3
+	github.com/tobilg/polyglot/packages/go v0.13.4
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.11
