@@ -13,7 +13,7 @@ diffs their responses.
 
 **Phase 0 complete** (engine + harness + fidelity spike). Verdict: **GO** for full parity
 via a **dual-dialect + raw-SQL** architecture — see the
-[fidelity report](docs/superpowers/reports/2026-06-03-phase0-fidelity.md). Phases 1–5
+fidelity report (internal design doc `2026-06-03-phase0-fidelity`). Phases 1–5
 (the statement handlers) land on `feat/*` branches via PR.
 
 **Phase 1 complete** (SELECT handler, branch `feat/phase-1-select`). Implemented:
@@ -48,7 +48,7 @@ table keys and unknown read modes before acknowledging the contract.
 
 ### Table-reference policy
 
-A dynamic rewrite request also enforces the table-reference hardening policy (spec 2026-09-26 §5, housegate repo `docs/superpowers/specs/2026-09-26-table-reference-hardening-design.md`) before any statement handler runs: no query parameter may occupy a database or table position, no protected database (any `database_map` value, any `protected_databases` entry, and, while the storage-integrity surface is active, every storage-integrity physical or reserved database) may be named directly by caller SQL, every table-function/table-engine/table-setting carrier is checked against an explicit allowlist, and every joinGet/dictGet/hasColumnInTable-family string lookup is either resolved through the same logical→physical policy an ordinary table reference gets or refused. A statement class this repo does not model at all (an opaque command whose text the tokenizer cannot even lex, or a source-role position no handler classifies) rejects rather than passing SQL through unexamined. This policy adds exactly five rejection message families, one per message constant: `engine.IdentifierParameterMessage` (a query parameter in a database or table position), `nameresolve.ProtectedDatabaseRejectMessage` (a protected database), the table-function / table-engine / table-setting allowlist messages in `internal/engine/allowlists.go` (`… is not accepted` / `… is not recognised`), the string-lookup message (`<fn> target "<arg>" does not resolve through the caller's databases`), and `engine.UnsupportedStatementMessage` (`statement is not supported`: an unmodelled statement class, a read in a position the rewriter does not rewrite, a setting value that is not a plain literal or identifier, or an internal error). With the storage-integrity surface active an unmodelled class is refused with the storage-integrity catch-all instead. See the table-reference section of `AGENTS.md` for the precedence.
+A dynamic rewrite request also enforces the table-reference hardening policy (spec 2026-09-26 §5, internal design doc `2026-09-26-table-reference-hardening-design`) before any statement handler runs: no query parameter may occupy a database or table position, no protected database (any `database_map` value, any `protected_databases` entry, and, while the storage-integrity surface is active, every storage-integrity physical or reserved database) may be named directly by caller SQL, every table-function/table-engine/table-setting carrier is checked against an explicit allowlist, and every joinGet/dictGet/hasColumnInTable-family string lookup is either resolved through the same logical→physical policy an ordinary table reference gets or refused. A statement class this repo does not model at all (an opaque command whose text the tokenizer cannot even lex, or a source-role position no handler classifies) rejects rather than passing SQL through unexamined. This policy adds exactly five rejection message families, one per message constant: `engine.IdentifierParameterMessage` (a query parameter in a database or table position), `nameresolve.ProtectedDatabaseRejectMessage` (a protected database), the table-function / table-engine / table-setting allowlist messages in `internal/engine/allowlists.go` (`… is not accepted` / `… is not recognised`), the string-lookup message (`<fn> target "<arg>" does not resolve through the caller's databases`), and `engine.UnsupportedStatementMessage` (`statement is not supported`: an unmodelled statement class, a read in a position the rewriter does not rewrite, a setting value that is not a plain literal or identifier, or an internal error). With the storage-integrity surface active an unmodelled class is refused with the storage-integrity catch-all instead. See the table-reference section of `AGENTS.md` for the precedence.
 
 ## Layout
 
@@ -141,8 +141,7 @@ db-qualifier (a C++-internal inconsistency, flagged for review).
 
 ## Design
 
-See [`docs/superpowers/specs/2026-06-03-native-go-rewriter-design.md`](docs/superpowers/specs/2026-06-03-native-go-rewriter-design.md)
+See `2026-06-03-native-go-rewriter-design` (internal design doc)
 for the full design: architecture, the polyglot engine seam (incl. the dual-dialect parse
 strategy, §3.1), the parity risk register, the differential-harness validation strategy, and
-the phased build plan. The Phase 0 implementation plan is in
-[`docs/superpowers/plans/`](docs/superpowers/plans/).
+the phased build plan. The phase implementation plans are internal design docs as well.

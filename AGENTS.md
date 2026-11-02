@@ -257,3 +257,11 @@ go test ./internal/harness -run x -fuzz FuzzRewrite -fuzztime 30s
 - CI has a fast pure-Go lane and a full FFI lane; both check out submodules.
 - Release artifacts are the built FFI libraries plus `SHA256SUMS`; release tags are annotated because version calculation reads tag creator dates.
 - `cmd/` has no child `AGENTS.md` and no dedicated CLI test harness in this snapshot; root guidance covers both command packages.
+
+## DESIGN DOCS
+
+Design specs, implementation plans, rollout plans and reports for this project are maintained in the maintainers' internal design-docs repository, not in this repo. Maintainers: the location is in your global agent instructions and in `CLAUDE.local.md` when present.
+
+- Do not add specs or plans under `docs/` (no `docs/superpowers/specs`, `docs/superpowers/plans`, `docs/specs`, `docs/plans`). When a workflow skill (brainstorming, writing-plans, …) would save a spec or plan into this repo, save it to the internal design-docs location instead.
+- Cite a design in code comments, docs and commit messages by its name or date (`internal design doc 2026-04-28-two-port-server-mode`, `spec 2026-09-26 §5`), never by a file path.
+- What stays here: user / operator docs that describe current behavior and are in the README.
