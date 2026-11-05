@@ -278,8 +278,8 @@ func TestCheckRegenerated(t *testing.T) {
 		// Fix round 2 (re-review N3): ClickHouse reads a number only with each
 		// _ between two digits (measured on 26.2: 1e_3, 0x_1F, 1_e3, 1__0,
 		// 0x1F_ and 1_ are identifiers, 1._5 and 1.5a syntax errors).
-		{"underscore after exponent", "SELECT 1e_3", differs + "lost [1e_3], added [1e3]"},
-		{"underscore after exponent in delete", "DELETE FROM db1.o WHERE a = 1e_3", differs + "lost [1e_3], added [1e3]"},
+		{"underscore after exponent", "SELECT 1e_3", differs + "lost [1e_3], added [1e_3]"},
+		{"underscore after exponent in delete", "DELETE FROM db1.o WHERE a = 1e_3", differs + "lost [1e_3], added [1e_3]"},
 		{"underscore after hex prefix", "SELECT 0x_1F", differs + "lost [0x_1F], added [0x1F]"},
 		{"underscore before exponent", "SELECT 1_e3", differs + "lost [1_e3], added [1_e3]"},
 		{"double underscore", "SELECT 1__0", differs + "lost [1__0], added [1__0]"},
