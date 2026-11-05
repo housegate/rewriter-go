@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-go/internal/reverse"
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
@@ -62,11 +63,24 @@ func (s *Service) RewriteErrorMessage(_ context.Context, req *pb.RewriteErrorMes
 	if msg == "" || req.GetSql() == "" {
 		return out, nil
 	}
-	resp, err := doRewrite(s.engine, req.GetSql(), req.GetOptions())
-	if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+	withhold := func(reason string) (*pb.RewriteErrorMessageResponse, error) {
+		out.ErrorAfterRewrite = reverse.WithheldMessage
+		out.Message = reverse.WithheldReasonMessage(reason)
 		return out, nil
 	}
-	out.ErrorAfterRewrite = reverse.Invert(msg, req.GetSql(), resp.GetSqlAfterRewrite(), resp.GetTableRewrites(), resp.GetDatabaseRewrites())
+	// Fail closed, as rewriter-grpc does: the text was produced for the
+	// rewritten statement and can name physical databases, tables and remote
+	// hosts, so it is returned only once inverted and free of them.
+	resp, err := doRewrite(s.engine, req.GetSql(), req.GetOptions())
+	if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+		return withhold("rewrite failed")
+	}
+	inverted := reverse.Invert(msg, req.GetSql(), resp.GetSqlAfterRewrite(), resp.GetTableRewrites(), resp.GetDatabaseRewrites())
+	identifiers, literals := nameresolve.HiddenNames(req.GetOptions())
+	if reverse.MentionsHidden(inverted, identifiers, literals) {
+		return withhold("physical name remained")
+	}
+	out.ErrorAfterRewrite = inverted
 	return out, nil
 }
 

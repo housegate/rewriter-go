@@ -83,7 +83,7 @@ rewriter-go/
 - Storage-integrity (Spec G) goldens live in `internal/harness/testdata/storage_integrity_cases.json`; the C++ repo carries a byte-identical copy. The frozen schema, exact-SQL rules, paired-copy procedure, and `UPDATE_GOLDEN` commands live in `internal/harness/AGENTS.md` under **STORAGE-INTEGRITY CORPUS CONTRACT**.
 - Storage-integrity lookup precedence selects a physical surface but does not authorize it: logical SI databases (including INSERT targets) must be present in `database_map`. Every database containing a configured safe/unsafe table is protocol-owned; table nodes/functions, current-db context, DB-level DDL/DCL, and USE/SHOW must reject direct access with SI-classified metadata.
 - Prefer semantic SQL equality through polyglot AST diff where output formatting can differ from ClickHouse formatting. The storage-integrity corpus is the deliberate exception: every successful case is pinned exactly after its shared literal-aware identifier-quote normalization, with per-engine pins for declared divergences.
-- `NativeRewriter` is per-connection and stashes the last successful rewrite for error inversion. `Service` is stateless and re-derives forward maps from the request for `RewriteErrorMessage`.
+- `NativeRewriter` is per-connection and stashes the last rewrite (with its options) for error inversion. `Service` is stateless and re-derives forward maps from the request for `RewriteErrorMessage`. Both fail closed like rewriter-grpc: after a rewrite that did not succeed, or when the inverted text still names the request's physical routing (`nameresolve.HiddenNames`: physical and protocol databases as case-sensitive whole identifiers, minus names the caller may write; remote addresses, hosts and passwords as substrings), they return `reverse.WithheldMessage` (`Service` also sets `message` to `error message withheld: <reason>`).
 - `doRewrite` owns dispatch order and reject normalization: writes, DB-level, DESCRIBE, EXISTS/SHOW CREATE, GRANT/REVOKE, SELECT, then pass-through.
 
 ## Table-reference policy (spec 2026-09-26)
@@ -228,7 +228,7 @@ View column lists: Polyglot's view-column parser drops a column's `COMMENT '…'
 - Do not let `internal/nameresolve` import `internal/engine`, handlers, or the polyglot SDK.
 - Do not copy or regenerate protobuf definitions here; make contract changes in `github.com/housegate/rewriter-proto` and update the pinned module version.
 - Do not treat `go test ./...` as proof of FFI-backed parity unless `POLYGLOT_SQL_FFI_PATH` is set.
-- Do not make `RewriteErrorMessage` inversion failures break exception handling. `Service.RewriteErrorMessage` is best-effort and returns pass-through output with nil error on failure or empty input.
+- Do not make `RewriteErrorMessage` inversion failures break exception handling, and do not return the raw text either. `Service.RewriteErrorMessage` returns nil error and `Success` on every input: the inverted text, the input when it is empty, or `reverse.WithheldMessage` when the text cannot be inverted safely.
 - Do not move statement dispatch out of `doRewrite` without checking reject normalization, `existence_clause`, and `statement_type` parity.
 - Do not treat oracle divergences as harmless unless they are explicitly allow-listed in the relevant harness corpus/test.
 - Do not mutate `third_party/polyglot-src` except through submodule bump workflows.

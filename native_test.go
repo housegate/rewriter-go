@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-go/internal/reverse"
 	"github.com/housegate/rewriter-proto/gen/pb"
 	"google.golang.org/protobuf/proto"
 )
@@ -814,13 +815,23 @@ func TestRewriteErrorMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("after a reject → unchanged (last code != Success)", func(t *testing.T) {
+	t.Run("after a reject → withheld (last code != Success)", func(t *testing.T) {
 		if _, err := r.Rewrite(ctx, "GRANT SELECT ON *.* TO u", "acct"); err != nil {
 			t.Fatal(err)
 		}
 		inv, _ := r.RewriteErrorMessage(ctx, "Database phys1 does not exist")
-		if inv != "Database phys1 does not exist" {
-			t.Errorf("reject should not invert: %q", inv)
+		if inv != reverse.WithheldMessage {
+			t.Errorf("a reject has nothing to invert; the text must be withheld: %q", inv)
+		}
+	})
+
+	t.Run("physical name left after inversion → withheld", func(t *testing.T) {
+		if _, err := r.Rewrite(ctx, "SELECT 1", "acct"); err != nil {
+			t.Fatal(err)
+		}
+		inv, _ := r.RewriteErrorMessage(ctx, "Database phys1 does not exist")
+		if inv != reverse.WithheldMessage {
+			t.Errorf("phys1 was not mapped by this statement; the text must be withheld: %q", inv)
 		}
 	})
 
