@@ -33,10 +33,11 @@ type callContext struct {
 	sqlAfterRewrite  string
 	tableRewrites    map[string]string
 	databaseRewrites map[string]string
+	options          []*pb.RewriteOption
 }
 
 // stash records the just-finished Rewrite as the per-connection last-call context.
-func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse) {
+func (r *NativeRewriter) stash(sql, account string, opts []*pb.RewriteOption, resp *pb.RewriteSQLResponse) {
 	r.mu.Lock()
 	r.last = &callContext{
 		sql: sql, account: account,
@@ -44,6 +45,7 @@ func (r *NativeRewriter) stash(sql, account string, resp *pb.RewriteSQLResponse)
 		sqlAfterRewrite:  resp.GetSqlAfterRewrite(),
 		tableRewrites:    resp.GetTableRewrites(),
 		databaseRewrites: resp.GetDatabaseRewrites(),
+		options:          opts,
 	}
 	r.mu.Unlock()
 }
@@ -453,23 +455,33 @@ func (r *NativeRewriter) Rewrite(_ context.Context, sql, account string) (Rewrit
 	if err != nil {
 		return RewriteResult{}, err // static/no-rewrite internal failure → legacy Go error
 	}
-	r.stash(sql, account, resp)
+	r.stash(sql, account, opts, resp)
 	return resultFromPB(resp), nil
 }
 
 // RewriteErrorMessage inverts physical table/database names in a ClickHouse error
 // message back to the logical names the client used, using the maps stashed from
-// the most recent successful Rewrite on this connection. Returns the message
-// unchanged when there's no prior successful rewrite (nil context or a non-Success
-// last call) — mirroring doRewriteErrorMessage's non-Success passthrough.
+// the most recent Rewrite on this connection. Returns the message unchanged when
+// no Rewrite ran yet. It fails closed like rewriter-grpc's doRewriteErrorMessage:
+// after a non-Success Rewrite, or when the inverted text still names the
+// request's physical routing (nameresolve.HiddenNames), it returns
+// reverse.WithheldMessage instead.
 func (r *NativeRewriter) RewriteErrorMessage(_ context.Context, message string) (string, error) {
 	r.mu.Lock()
 	last := r.last
 	r.mu.Unlock()
-	if message == "" || last == nil || last.code != pb.RewriteCode_Success {
+	if message == "" || last == nil {
 		return message, nil
 	}
-	return reverse.Invert(message, last.sql, last.sqlAfterRewrite, last.tableRewrites, last.databaseRewrites), nil
+	if last.code != pb.RewriteCode_Success {
+		return reverse.WithheldMessage, nil
+	}
+	inverted := reverse.Invert(message, last.sql, last.sqlAfterRewrite, last.tableRewrites, last.databaseRewrites)
+	identifiers, literals := nameresolve.HiddenNames(last.options)
+	if reverse.MentionsHidden(inverted, identifiers, literals) {
+		return reverse.WithheldMessage, nil
+	}
+	return inverted, nil
 }
 
 func (r *NativeRewriter) Close() error {

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/housegate/rewriter-go/internal/reverse"
 	"github.com/housegate/rewriter-proto/gen/pb"
 	"google.golang.org/protobuf/proto"
 )
@@ -112,7 +113,8 @@ func TestNewServiceLoadsAndCloses(t *testing.T) {
 
 // TestServiceRewriteErrorMessage: physical names in an error message are
 // inverted back to logical ones using maps re-derived from sql+options;
-// unparseable SQL (non-Success forward rewrite) passes through unchanged.
+// unparseable SQL (non-Success forward rewrite) and a text still naming a
+// physical database are withheld, as rewriter-grpc withholds them.
 func TestServiceRewriteErrorMessage(t *testing.T) {
 	e := newEngine(t)
 	svc := &Service{engine: e}
@@ -139,10 +141,24 @@ func TestServiceRewriteErrorMessage(t *testing.T) {
 		Options:      opts,
 	})
 	if err != nil {
-		t.Fatalf("RewriteErrorMessage(passthrough): %v", err)
+		t.Fatalf("RewriteErrorMessage(rewrite failed): %v", err)
 	}
-	if resp2.GetErrorAfterRewrite() != "boom" {
-		t.Errorf("passthrough = %q, want \"boom\"", resp2.GetErrorAfterRewrite())
+	if resp2.GetCode() != pb.RewriteCode_Success || resp2.GetErrorAfterRewrite() != reverse.WithheldMessage ||
+		resp2.GetMessage() != "error message withheld: rewrite failed" {
+		t.Errorf("rewrite failed = %+v, want the withheld text", resp2)
+	}
+
+	resp3, err := svc.RewriteErrorMessage(context.Background(), &pb.RewriteErrorMessageRequest{
+		Sql:          "SELECT 1",
+		ErrorMessage: "Database phys does not exist",
+		Options:      opts,
+	})
+	if err != nil {
+		t.Fatalf("RewriteErrorMessage(leftover): %v", err)
+	}
+	if resp3.GetErrorAfterRewrite() != reverse.WithheldMessage ||
+		resp3.GetMessage() != "error message withheld: physical name remained" {
+		t.Errorf("leftover = %+v, want the withheld text", resp3)
 	}
 }
 
