@@ -467,8 +467,8 @@ func TestTableRef_KeywordPins(t *testing.T) {
 				`WITH now() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE a IN s)`},
 			{"WITH PI() AS s SELECT a FROM db1.o WHERE in(a, s)",
 				`WITH PI() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE in(a, s)`},
-			{"WITH (current_user()) AS s SELECT a FROM db1.o AS s WHERE a IN s",
-				`WITH (current_user()) AS s SELECT a FROM phys."db1.o" AS s WHERE a IN s`},
+			{"WITH (timezone()) AS s SELECT a FROM db1.o AS s WHERE a IN s",
+				`WITH (timezone()) AS s SELECT a FROM phys."db1.o" AS s WHERE a IN s`},
 			{"SELECT a FROM db1.o WHERE a IN NOW()",
 				`SELECT a FROM phys."db1.o" "db1.o" WHERE a IN NOW()`},
 		} {

@@ -79,11 +79,28 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 		// is a backstop. With the surface inactive the preflight owns it.
 		if !handlers.RejectSystemTablesOnSuccess(e, ast, sql, sel, resp) {
 			if engine.CheckRegenerated(e, sql, ast) == nil {
-				return
+				// Last, in dynamic mode: a call that reveals the shared
+				// deployment (the physical session database, the shared
+				// user, the host) is refused in both SI states, as
+				// rewriter-grpc refuses it after its other gates.
+				if sel.Mode != nameresolve.ModeDynamic {
+					return
+				}
+				name, found, err := engine.FirstDeploymentIdentityCall(e, sql)
+				if err == nil && !found {
+					return
+				}
+				resp.Code = pb.RewriteCode_UnsupportedStatement
+				resp.Message = engine.UnsupportedStatementMessage
+				if found {
+					resp.Message = engine.FunctionNotAccessibleMessage(name)
+				}
+				resp.SqlAfterRewrite = sql
+			} else {
+				resp.Code = pb.RewriteCode_UnsupportedStatement
+				resp.Message = engine.UnsupportedStatementMessage
+				resp.SqlAfterRewrite = sql
 			}
-			resp.Code = pb.RewriteCode_UnsupportedStatement
-			resp.Message = engine.UnsupportedStatementMessage
-			resp.SqlAfterRewrite = sql
 		}
 	}
 	resp.StatementType = pb.StatementType_STATEMENT_TYPE_UNSPECIFIED

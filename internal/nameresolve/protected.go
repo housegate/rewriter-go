@@ -2,6 +2,7 @@ package nameresolve
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -68,5 +69,25 @@ func ValidateProtectedDatabases(a *pb.RewriteTableDynamicArgs) error {
 			return fmt.Errorf("protected_databases entry %q must be a simple identifier", db)
 		}
 	}
+	// A logical database routed to a ClickHouse metadata database would turn
+	// every table of it into a metadata table: the system-table allowlist
+	// only sees `system.<name>` when the caller writes it. Checked in key
+	// order so the message is stable (rewriter-grpc does the same).
+	logicals := make([]string, 0, len(a.GetDatabaseMap()))
+	for logical := range a.GetDatabaseMap() {
+		logicals = append(logicals, logical)
+	}
+	sort.Strings(logicals)
+	for _, logical := range logicals {
+		if physical := a.GetDatabaseMap()[logical]; metadataDatabase(physical) {
+			return fmt.Errorf("database_map entry %q maps to the metadata database %q", logical, physical)
+		}
+	}
 	return nil
+}
+
+// metadataDatabase reports whether db is one of ClickHouse's built-in
+// metadata databases, in the spellings ClickHouse accepts.
+func metadataDatabase(db string) bool {
+	return db == "system" || db == "information_schema" || db == "INFORMATION_SCHEMA"
 }

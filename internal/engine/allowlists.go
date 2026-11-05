@@ -124,3 +124,60 @@ func TableEngineUnknownMessage(name string) string {
 func TableSettingRefusedMessage(name string) string {
 	return "table setting " + name + " is not accepted"
 }
+
+// deploymentIdentityFunctions name the shared ClickHouse deployment behind
+// housegate rather than the caller's own view of it: the physical session
+// database, the shared ClickHouse user, the host, the server UUID and its
+// macros. Matched case-insensitively. version(), displayName() and
+// timezone() are not here: the server hello already gives them to the client.
+var deploymentIdentityFunctions = map[string]bool{
+	"currentdatabase": true, "database": true, "current_database": true, "current_schemas": true,
+	"currentuser": true, "user": true, "current_user": true, "session_user": true,
+	"hostname": true, "fqdn": true, "serveruuid": true, "getmacro": true,
+}
+
+// DeploymentIdentityFunction reports whether a call of name reveals the
+// shared deployment (deploymentIdentityFunctions).
+func DeploymentIdentityFunction(name string) bool {
+	return deploymentIdentityFunctions[strings.ToLower(name)]
+}
+
+// FunctionNotAccessibleMessage is the refusal of a deployment-identity call.
+func FunctionNotAccessibleMessage(name string) string {
+	return "function " + name + " is not accessible"
+}
+
+// FirstDeploymentIdentityCall returns the name of the first call in sql, in
+// text order, of a deployment-identity function: a bare word or a quoted
+// identifier directly followed by "(" (the call shape callSpellings reads).
+// A quoted name is returned unquoted. ok is false when there is none.
+func FirstDeploymentIdentityCall(e Engine, sql string) (name string, ok bool, err error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return "", false, err
+	}
+	for i := 0; i+1 < len(toks); i++ {
+		tk := toks[i]
+		if toks[i+1].TokenType != "L_PAREN" || tk.Source == "" {
+			continue
+		}
+		if i > 0 && toks[i-1].TokenType == "DOT" {
+			continue
+		}
+		switch {
+		case isQuotedLexeme(tk.TokenType) && isQuotedIdentifier(tk.Source):
+			unquoted, ok := clickhouseUnquote(tk.Source)
+			if !ok {
+				unquoted = tk.Text
+			}
+			if DeploymentIdentityFunction(unquoted) {
+				return unquoted, true, nil
+			}
+		case !isQuotedLexeme(tk.TokenType) && isWordStart(tk.Source):
+			if DeploymentIdentityFunction(tk.Source) {
+				return tk.Source, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}

@@ -165,7 +165,7 @@ func TestStorageIntegrityLiveViewClassifierErrorFailsClosedOnlyForStructuredCrea
 		e := &fakeEngine{
 			parseAST:    engine.AST(`{"select":{}}`),
 			tokenizeErr: tokenErr,
-			tokenizeOK:  3, // the whole-statement parse gate and the regeneration check
+			tokenizeOK:  4, // the whole-statement parse gate, the regeneration check and the deployment-identity scan
 		}
 		resp, err := doRewrite(e, "SELECT 1", opts)
 		if err != nil {
@@ -1452,5 +1452,60 @@ func TestNativeRewrite_StaticInOperandsDecodeLikeFrom(t *testing.T) {
 		if res.Code != pb.RewriteCode_Success || res.SQL != want {
 			t.Errorf("%s: code=%v sql=%q, want Success %q", sql, res.Code, res.SQL, want)
 		}
+	}
+}
+
+// TestDeploymentIdentityCallsAreRefusedInDynamicMode: a call that reveals the
+// shared deployment (the physical session database, the shared ClickHouse
+// user, the host) is refused last, in dynamic mode and both SI states, with
+// the call's own spelling; version() stays allowed (the hello carries it).
+func TestDeploymentIdentityCallsAreRefusedInDynamicMode(t *testing.T) {
+	e := newEngine(t)
+	dyn := &pb.RewriteTableDynamicArgs{
+		DatabaseMap:                      map[string]string{"tenant1": "physical_db_1"},
+		UpstreamLogicalDatabaseInContext: "tenant1",
+	}
+	opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
+	for sql, name := range map[string]string{
+		"SELECT currentDatabase()":                         "currentDatabase",
+		"SELECT CURRENTDATABASE()":                         "CURRENTDATABASE",
+		"SELECT database()":                                "database",
+		"SELECT currentUser()":                             "currentUser",
+		"SELECT user()":                                    "user",
+		"SELECT hostName()":                                "hostName",
+		"SELECT FQDN()":                                    "FQDN",
+		"SELECT serverUUID()":                              "serverUUID",
+		"SELECT getMacro('shard')":                         "getMacro",
+		"SELECT * FROM tenant1.t WHERE a = hostName()":     "hostName",
+		"WITH m AS (SELECT currentUser()) SELECT * FROM m": "currentUser",
+	} {
+		resp, err := doRewrite(e, sql, opts)
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "function "+name+" is not accessible" {
+			t.Errorf("%s: code=%v message=%q", sql, resp.GetCode(), resp.GetMessage())
+		}
+	}
+	for _, sql := range []string{
+		"SELECT version()",
+		"SELECT 'hostName()' AS s",
+		"SELECT user FROM tenant1.t",
+		"SELECT timezone()",
+	} {
+		resp, err := doRewrite(e, sql, opts)
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		if resp.GetCode() != pb.RewriteCode_Success {
+			t.Errorf("%s: code=%v message=%q, want Success", sql, resp.GetCode(), resp.GetMessage())
+		}
+	}
+	// Static mode keeps its legacy surface.
+	static := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			StaticArgs: &pb.RewriteTableStaticArgs{}}}}}
+	if resp, err := doRewrite(e, "SELECT hostName()", static); err != nil || resp.GetCode() != pb.RewriteCode_Success {
+		t.Errorf("static hostName(): resp=%v err=%v", resp, err)
 	}
 }
