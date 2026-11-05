@@ -1,6 +1,7 @@
 package nameresolve
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,31 +23,38 @@ func HiddenNames(opts []*pb.RewriteOption) (identifiers, literals []string) {
 	switch sel.Mode {
 	case ModeDynamic:
 		a := sel.Dynamic
-		protected := map[string]bool{}
+		// Candidates, kept only when the table-reference policy protects
+		// them (ProtectedDatabase): the SI databases count while the surface
+		// is active, and reserved_databases only under contract V2.
+		candidates := map[string]bool{}
 		for _, db := range a.GetProtectedDatabases() {
-			protected[db] = true
+			candidates[db] = true
 		}
 		for logical, db := range a.GetDatabaseMap() {
 			visible[logical] = true
-			protected[db] = true
+			candidates[db] = true
 		}
 		si := a.GetStorageIntegrity()
 		for _, db := range si.GetReservedDatabases() {
-			protected[db] = true
+			candidates[db] = true
 		}
 		for _, table := range si.GetTables() {
-			protected[databasePart(table.GetSafeTable())] = true
-			protected[databasePart(table.GetUnsafeTable())] = true
+			candidates[databasePart(table.GetSafeTable())] = true
+			candidates[databasePart(table.GetUnsafeTable())] = true
+		}
+		for db := range candidates {
+			if ProtectedDatabase(db, a) {
+				physical[db] = true
+			}
 		}
 		for _, db := range a.GetKnownPhysicalDatabases() {
-			if !protected[db] {
+			if !physical[db] {
 				visible[db] = true
 			}
 		}
 		if ctx := a.GetUpstreamLogicalDatabaseInContext(); ctx != "" {
 			visible[ctx] = true
 		}
-		physical = protected
 		for _, key := range sortedKeys(a.GetRemoteUpstreams()) {
 			upstream := a.GetRemoteUpstreams()[key]
 			literals = appendRemoteAddress(literals, upstream.GetAddr())
@@ -94,15 +102,29 @@ func databasePart(qualified string) string {
 	return ""
 }
 
-// appendRemoteAddress adds a remote address and, when it carries a port, its
-// host (an IPv6 literal is kept whole).
+// appendRemoteAddress adds a remote address as configured and every host it
+// names: ClickHouse's remote() takes a comma-separated list of shards and
+// `|`-separated replicas, each host, host:port, [ipv6] or [ipv6]:port. An
+// error may name a host without the rest of the address. Mirrors
+// rewriter-grpc addRemoteAddress.
 func appendRemoteAddress(literals []string, addr string) []string {
-	if len(addr) >= minHiddenLiteral {
-		literals = append(literals, addr)
+	add := func(v string) {
+		v = strings.Trim(v, " \t")
+		if len(v) >= minHiddenLiteral && !slices.Contains(literals, v) {
+			literals = append(literals, v)
+		}
 	}
-	colon := strings.LastIndexByte(addr, ':')
-	if colon >= minHiddenLiteral && !strings.Contains(addr, "]") && strings.IndexByte(addr, ':') == colon {
-		literals = append(literals, addr[:colon])
+	add(addr)
+	for _, part := range strings.FieldsFunc(addr, func(r rune) bool { return r == ',' || r == '|' }) {
+		part = strings.TrimLeft(part, " \t")
+		add(part)
+		if strings.HasPrefix(part, "[") {
+			if end := strings.IndexByte(part, ']'); end >= 0 {
+				add(part[1:end])
+			}
+		} else if colon := strings.IndexByte(part, ':'); colon >= 0 && strings.LastIndexByte(part, ':') == colon {
+			add(part[:colon])
+		}
 	}
 	return literals
 }

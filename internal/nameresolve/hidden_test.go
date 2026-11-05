@@ -19,18 +19,21 @@ func TestHiddenNamesDynamic(t *testing.T) {
 		ProtectedDatabases:               []string{"hg_promote"},
 		UpstreamLogicalDatabaseInContext: "tenant1",
 		StorageIntegrity: &pb.StorageIntegrityArgs{
+			ContractVersion:   pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2,
 			ReservedDatabases: []string{"hg_unsafe"},
 			Tables:            map[string]*pb.StorageIntegrityArgs_Table{"tenant1.t": {SafeTable: "hg_safe.tenant1__t", UnsafeTable: "hg_unsafe.tenant1__t"}},
 		},
 		RemoteUpstreams: map[string]*pb.RewriteTableDynamicArgs_RemoteUpstream{
 			"us": {Addr: "ch-remote-1.internal:9000", User: "viewer", Password: "s3cret-pass"},
-			"x":  {Addr: "[::1]:9000", Password: "abc"},
+			"x":  {Addr: "ch-a.internal:9000|ch-b.internal:9000, [fd00::12]:9440", Password: "abc"},
 		},
 	}))
 	if want := []string{"hg_promote", "hg_safe", "hg_unsafe", "physical_db_1", "physical_db_2"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("identifiers = %v, want %v", ids, want)
 	}
-	if want := []string{"ch-remote-1.internal:9000", "ch-remote-1.internal", "s3cret-pass", "[::1]:9000"}; !reflect.DeepEqual(lits, want) {
+	if want := []string{"ch-remote-1.internal:9000", "ch-remote-1.internal", "s3cret-pass",
+		"ch-a.internal:9000|ch-b.internal:9000, [fd00::12]:9440", "ch-a.internal:9000", "ch-a.internal",
+		"ch-b.internal:9000", "ch-b.internal", "[fd00::12]:9440", "fd00::12"}; !reflect.DeepEqual(lits, want) {
 		t.Errorf("literals = %v, want %v", lits, want)
 	}
 }
@@ -46,5 +49,17 @@ func TestHiddenNamesStatic(t *testing.T) {
 	}
 	if want := []string{"chain-b:9000", "chain-b"}; !reflect.DeepEqual(lits, want) {
 		t.Errorf("literals = %v, want %v", lits, want)
+	}
+}
+
+// Outside contract V2 reserved_databases is ignored by the policy
+// (ProtectedDatabase), so the caller may name it and it is not hidden.
+func TestHiddenNamesIgnoreReservedOutsideV2(t *testing.T) {
+	ids, _ := HiddenNames(dynamicOption(&pb.RewriteTableDynamicArgs{
+		DatabaseMap:      map[string]string{"tenant1": "physical_db_1"},
+		StorageIntegrity: &pb.StorageIntegrityArgs{ReservedDatabases: []string{"hg_unsafe"}},
+	}))
+	if want := []string{"physical_db_1"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("identifiers = %v, want %v", ids, want)
 	}
 }
