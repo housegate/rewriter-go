@@ -146,6 +146,12 @@ var deploymentIdentityFunctions = map[string]bool{
 	"hostname": true, "fqdn": true, "fullhostname": true, "serveruuid": true, "getmacro": true,
 }
 
+// tableNameIntroducers are the words after which a name followed by "(" is a
+// table and its column list rather than a call.
+var tableNameIntroducers = map[string]bool{
+	"into": true, "table": true, "exists": true, "view": true, "dictionary": true, "to": true,
+}
+
 // bareDeploymentIdentityNames are the deployment-identity functions
 // ClickHouse's analyzer also resolves without parentheses (they allow
 // omitting them) when no column or alias of that name is in scope, spelled
@@ -183,6 +189,12 @@ func FirstDeploymentIdentityCall(e Engine, sql string) (name string, ok bool, er
 			continue
 		}
 		if i > 0 && toks[i-1].TokenType == "DOT" {
+			continue
+		}
+		// A table name before its column list (`INSERT INTO user (a)`,
+		// `CREATE TABLE IF NOT EXISTS schema (…)`, an MV's `TO database (…)`)
+		// is not a call, as in rewriter-grpc.
+		if i > 0 && !isQuotedLexeme(toks[i-1].TokenType) && tableNameIntroducers[strings.ToLower(toks[i-1].Source)] {
 			continue
 		}
 		switch {

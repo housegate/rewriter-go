@@ -1512,6 +1512,10 @@ func TestDeploymentIdentityCallsAreRefusedInDynamicMode(t *testing.T) {
 		"SELECT t.currentUser FROM tenant1.t",
 		"SELECT user, database FROM tenant1.t",
 		"GRANT SELECT ON tenant1.t TO CURRENT_USER",
+		"INSERT INTO user (a) VALUES (1)",
+		"INSERT INTO TABLE database (a) VALUES (1)",
+		"CREATE TABLE schema (a UInt64) ENGINE = MergeTree ORDER BY a",
+		"CREATE TABLE IF NOT EXISTS hostName (a UInt64) ENGINE = MergeTree ORDER BY a",
 	} {
 		resp, err := doRewrite(e, sql, opts)
 		if err != nil {
