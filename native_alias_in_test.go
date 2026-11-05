@@ -408,10 +408,17 @@ func TestTableRef_KeywordPins(t *testing.T) {
 				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.NOW"`,
 				wantAcc:  []string{".NOW", "db1.o"}},
 			tablerefCase{name: "direct keyword operand parenthesised", si: si,
-				sql:      "SELECT a FROM db1.o WHERE a IN (current_user)",
+				sql:      "SELECT a FROM db1.o WHERE a IN (current_date)",
 				wantCode: pb.RewriteCode_Success,
-				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (phys."db1.current_user")`,
-				wantAcc:  []string{".current_user", "db1.o"}},
+				wantSQL:  `SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (phys."db1.current_date")`,
+				wantAcc:  []string{".current_date", "db1.o"}},
+			// A bare current_user is a deployment-identity name, refused last
+			// even where ClickHouse would read it as a table operand (a table
+			// of that name is not worth the ambiguity).
+			tablerefCase{name: "direct identity-named operand parenthesised", si: si,
+				sql:      "SELECT a FROM db1.o WHERE a IN (current_user)",
+				wantCode: pb.RewriteCode_UnsupportedStatement,
+				wantMsg:  "function current_user is not accessible"},
 			tablerefCase{name: "direct keyword operand callable nested", si: si,
 				sql:      "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE globalIn(a, CURRENT_DATE))",
 				wantCode: pb.RewriteCode_Success,
@@ -467,8 +474,8 @@ func TestTableRef_KeywordPins(t *testing.T) {
 				`WITH now() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE a IN (SELECT a FROM phys."db1.p" "db1.p" WHERE a IN s)`},
 			{"WITH PI() AS s SELECT a FROM db1.o WHERE in(a, s)",
 				`WITH PI() AS s SELECT a FROM phys."db1.o" "db1.o" WHERE in(a, s)`},
-			{"WITH (current_user()) AS s SELECT a FROM db1.o AS s WHERE a IN s",
-				`WITH (current_user()) AS s SELECT a FROM phys."db1.o" AS s WHERE a IN s`},
+			{"WITH (timezone()) AS s SELECT a FROM db1.o AS s WHERE a IN s",
+				`WITH (timezone()) AS s SELECT a FROM phys."db1.o" AS s WHERE a IN s`},
 			{"SELECT a FROM db1.o WHERE a IN NOW()",
 				`SELECT a FROM phys."db1.o" "db1.o" WHERE a IN NOW()`},
 		} {

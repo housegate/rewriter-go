@@ -86,6 +86,23 @@ func TestValidateProtectedDatabases(t *testing.T) {
 	}
 }
 
+func TestValidateProtectedDatabasesRefusesMetadataTargets(t *testing.T) {
+	for _, physical := range []string{"system", "information_schema", "INFORMATION_SCHEMA"} {
+		a := protectedArgs()
+		a.DatabaseMap = map[string]string{"b_db": physical, "a_db": "phys"}
+		want := `database_map entry "b_db" maps to the metadata database "` + physical + `"`
+		if err := ValidateProtectedDatabases(a); err == nil || err.Error() != want {
+			t.Fatalf("%s: err = %v, want %q", physical, err, want)
+		}
+	}
+	// ClickHouse database names are case-sensitive: `System` is an ordinary name.
+	a := protectedArgs()
+	a.DatabaseMap = map[string]string{"x": "System"}
+	if err := ValidateProtectedDatabases(a); err != nil {
+		t.Fatalf("System rejected: %v", err)
+	}
+}
+
 func TestProtectedDatabaseRejectMessage(t *testing.T) {
 	if got := ProtectedDatabaseRejectMessage("phys"); got != "protected database phys is not addressable" {
 		t.Fatalf("message = %q", got)
