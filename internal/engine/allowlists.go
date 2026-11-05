@@ -1,6 +1,11 @@
 package engine
 
-import "strings"
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+)
 
 // TableFunctionClass is the spec 2026-09-26 T5 classification of a
 // source-role table function.
@@ -130,10 +135,26 @@ func TableSettingRefusedMessage(name string) string {
 // database, the shared ClickHouse user, the host, the server UUID and its
 // macros. Matched case-insensitively. version(), displayName() and
 // timezone() are not here: the server hello already gives them to the client.
+// The names are ClickHouse 26.3's registrations and aliases (DATABASE,
+// SCHEMA and current_database for currentDatabase; currentSchemas and
+// current_schemas; user and current_user for currentUser; fullHostName for
+// FQDN).
 var deploymentIdentityFunctions = map[string]bool{
-	"currentdatabase": true, "database": true, "current_database": true, "current_schemas": true,
+	"currentdatabase": true, "database": true, "schema": true, "current_database": true,
+	"currentschemas": true, "current_schemas": true,
 	"currentuser": true, "user": true, "current_user": true, "session_user": true,
-	"hostname": true, "fqdn": true, "serveruuid": true, "getmacro": true,
+	"hostname": true, "fqdn": true, "fullhostname": true, "serveruuid": true, "getmacro": true,
+}
+
+// bareDeploymentIdentityNames are the deployment-identity functions
+// ClickHouse's analyzer also resolves without parentheses (they allow
+// omitting them) when no column or alias of that name is in scope, spelled
+// so that an ordinary column is unlikely to carry the name. The aliases
+// user, DATABASE and SCHEMA resolve the same way but are ordinary column
+// names, so a bare one is left alone (a known residual: it reaches the
+// function only when the statement has no such column).
+var bareDeploymentIdentityNames = map[string]bool{
+	"currentdatabase": true, "current_database": true, "currentuser": true, "current_user": true,
 }
 
 // DeploymentIdentityFunction reports whether a call of name reveals the
@@ -180,4 +201,60 @@ func FirstDeploymentIdentityCall(e Engine, sql string) (name string, ok bool, er
 		}
 	}
 	return "", false, nil
+}
+
+// FirstDeploymentIdentityName returns the first deployment-identity reference
+// in a statement: a call (FirstDeploymentIdentityCall) or else an unqualified
+// bare name of bareDeploymentIdentityNames in an expression of ast (a column
+// reference without a table, or Polyglot's parenthesis-free function node),
+// found in a fixed walk order. Mirrors rewriter-grpc
+// firstDeploymentIdentityCall / firstBareDeploymentIdentityName.
+func FirstDeploymentIdentityName(e Engine, ast AST, sql string) (name string, ok bool, err error) {
+	if name, ok, err = FirstDeploymentIdentityCall(e, sql); err != nil || ok {
+		return name, ok, err
+	}
+	if len(ast) == 0 {
+		return "", false, nil
+	}
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return "", false, fmt.Errorf("engine: decode: %w", err)
+	}
+	name, ok = firstBareIdentityName(root)
+	return name, ok, nil
+}
+
+func firstBareIdentityName(node any) (string, bool) {
+	switch n := node.(type) {
+	case []any:
+		for _, item := range n {
+			if name, ok := firstBareIdentityName(item); ok {
+				return name, true
+			}
+		}
+	case map[string]any:
+		if col, ok := n["column"].(map[string]any); ok && col["table"] == nil {
+			if nm, ok := col["name"].(map[string]any); ok {
+				if s, ok := nm["name"].(string); ok && bareDeploymentIdentityNames[strings.ToLower(s)] {
+					return s, true
+				}
+			}
+		}
+		if fn, ok := n["function"].(map[string]any); ok && fn["no_parens"] == true {
+			if s, ok := fn["name"].(string); ok && bareDeploymentIdentityNames[strings.ToLower(s)] {
+				return s, true
+			}
+		}
+		keys := make([]string, 0, len(n))
+		for k := range n {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if name, ok := firstBareIdentityName(n[k]); ok {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }

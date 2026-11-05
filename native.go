@@ -86,7 +86,7 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 				if sel.Mode != nameresolve.ModeDynamic {
 					return
 				}
-				name, found, err := engine.FirstDeploymentIdentityCall(e, sql)
+				name, found, err := engine.FirstDeploymentIdentityName(e, ast, sql)
 				if err == nil && !found {
 					return
 				}

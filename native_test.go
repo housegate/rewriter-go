@@ -1467,17 +1467,23 @@ func TestDeploymentIdentityCallsAreRefusedInDynamicMode(t *testing.T) {
 	}
 	opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
 	for sql, name := range map[string]string{
-		"SELECT currentDatabase()":                         "currentDatabase",
-		"SELECT CURRENTDATABASE()":                         "CURRENTDATABASE",
-		"SELECT database()":                                "database",
-		"SELECT currentUser()":                             "currentUser",
-		"SELECT user()":                                    "user",
-		"SELECT hostName()":                                "hostName",
-		"SELECT FQDN()":                                    "FQDN",
-		"SELECT serverUUID()":                              "serverUUID",
-		"SELECT getMacro('shard')":                         "getMacro",
-		"SELECT * FROM tenant1.t WHERE a = hostName()":     "hostName",
-		"WITH m AS (SELECT currentUser()) SELECT * FROM m": "currentUser",
+		"SELECT currentDatabase()":                           "currentDatabase",
+		"SELECT CURRENTDATABASE()":                           "CURRENTDATABASE",
+		"SELECT database()":                                  "database",
+		"SELECT currentUser()":                               "currentUser",
+		"SELECT user()":                                      "user",
+		"SELECT hostName()":                                  "hostName",
+		"SELECT FQDN()":                                      "FQDN",
+		"SELECT serverUUID()":                                "serverUUID",
+		"SELECT getMacro('shard')":                           "getMacro",
+		"SELECT * FROM tenant1.t WHERE a = hostName()":       "hostName",
+		"WITH m AS (SELECT currentUser()) SELECT * FROM m":   "currentUser",
+		"SELECT SCHEMA()":                                    "SCHEMA",
+		"SELECT currentSchemas(true)":                        "currentSchemas",
+		"SELECT fullHostName()":                              "fullHostName",
+		"SELECT currentDatabase":                             "currentDatabase",
+		"SELECT current_user":                                "current_user",
+		"SELECT a FROM tenant1.t WHERE b = CURRENT_DATABASE": "CURRENT_DATABASE",
 	} {
 		resp, err := doRewrite(e, sql, opts)
 		if err != nil {
@@ -1492,6 +1498,9 @@ func TestDeploymentIdentityCallsAreRefusedInDynamicMode(t *testing.T) {
 		"SELECT 'hostName()' AS s",
 		"SELECT user FROM tenant1.t",
 		"SELECT timezone()",
+		"SELECT t.currentUser FROM tenant1.t",
+		"SELECT user, database FROM tenant1.t",
+		"GRANT SELECT ON tenant1.t TO CURRENT_USER",
 	} {
 		resp, err := doRewrite(e, sql, opts)
 		if err != nil {
