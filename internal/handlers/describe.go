@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strings"
+
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -104,16 +106,21 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 			return resp, true, nil
 		}
 	}
-	if sel.Mode == nameresolve.ModeDynamic && t.Shape == engine.ObjectTargetName && tt.DB == "" {
-		// Spec 2026-09-26 R7: an unqualified target (dotted or not) resolves
-		// exactly like FROM, in the session's logical database, as EXISTS /
-		// SHOW CREATE already do — passed through, ClickHouse would bind it
-		// in the physical database. A qualified ordinary target still passes
-		// through unchanged (it names a logical database ClickHouse does not
-		// have); a protected one was refused by the preflight.
+	if sel.Mode == nameresolve.ModeDynamic && t.Shape == engine.ObjectTargetName && !nameresolve.IsMetadataDatabase(tt.DB) {
+		// Spec 2026-09-26 R7, amended 2026-11-07: the target resolves as
+		// EXISTS / SHOW CREATE resolve theirs. An unqualified one (dotted or
+		// not) resolves in the session's logical database; a qualified one
+		// names a logical (or known physical) database and is mapped the same
+		// way. Passed through, ClickHouse would bind the logical name as a
+		// physical database (another tenant's, or `default`) while the
+		// accessed-table record told the caller it was the mapped one. Only
+		// ClickHouse's metadata databases pass through: the preflight's
+		// system-table allowlist judged their tables; a protected database was
+		// refused by the preflight.
 		resp.OriginalAccessedTables = nil
 		d, ok := decideWriteTarget(tt, "DESCRIBE TABLE", sel, resp)
 		if !ok {
+			alignUnmappedLogicalMessage(resp, "DESCRIBE")
 			return resp, true, nil
 		}
 		if rejectsRerender(t, d) {
@@ -129,6 +136,22 @@ func RewriteDescribe(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rew
 	}
 	resp.SqlAfterRewrite = sql // a table-function target (T5-classified by the preflight) or static mode
 	return resp, true, nil
+}
+
+// alignUnmappedLogicalMessage rewrites nameresolve's unmapped-logical
+// rejection into rewriter-grpc's applyDynamicRewrite wording for kind, so the
+// DESCRIBE and SHOW COLUMNS / INDEX paths answer the same text in both engines
+// (spec 2026-09-26 R7, amended 2026-11-07; shared corpus
+// si_tr_*_qualified_unmapped_rejected). Any other rejection is left alone.
+func alignUnmappedLogicalMessage(resp *pb.RewriteSQLResponse, kind string) {
+	const prefix, suffix = "logical db ", " not in database_map and not a known physical database"
+	m := resp.GetMessage()
+	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest || !strings.HasPrefix(m, prefix) || !strings.HasSuffix(m, suffix) {
+		return
+	}
+	logical := strings.TrimSuffix(strings.TrimPrefix(m, prefix), suffix)
+	resp.Message = kind + " target references logical database '" + logical +
+		"' which is not in database_map and not a known physical database; user does not have this database"
 }
 
 // describeSubqueryStorageIntegrityTable reports the first table of a

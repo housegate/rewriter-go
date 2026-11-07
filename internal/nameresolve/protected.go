@@ -91,3 +91,9 @@ func ValidateProtectedDatabases(a *pb.RewriteTableDynamicArgs) error {
 func metadataDatabase(db string) bool {
 	return db == "system" || db == "information_schema" || db == "INFORMATION_SCHEMA"
 }
+
+// IsMetadataDatabase reports whether db is one of ClickHouse's built-in
+// metadata databases. Their tables are judged by the system-table allowlist,
+// not by the logical-to-physical mapping (rewriter-grpc
+// isClickHouseMetadataDatabase).
+func IsMetadataDatabase(db string) bool { return metadataDatabase(db) }

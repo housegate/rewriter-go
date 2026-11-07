@@ -432,7 +432,12 @@ func TestSystemTables_MultiPartShowTargets(t *testing.T) {
 			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
 		tablerefCase{name: "own db multi-part SI", sql: "SHOW COLUMNS FROM db1.x.y", si: true,
 			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "storage-integrity logical database db1 is not directly addressable"},
-		tablerefCase{name: "two parts still pass", sql: "SHOW COLUMNS FROM db2.x", wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM db2.x"},
+		// Spec 2026-09-26 R7, amended 2026-11-07: a two-part target is
+		// mapped like an EXISTS target, so an unmapped database is refused.
+		tablerefCase{name: "two parts resolve", sql: "SHOW COLUMNS FROM db2.x",
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: "not in database_map and not a known physical database"},
+		tablerefCase{name: "two parts own db", sql: "SHOW COLUMNS FROM db1.x",
+			wantCode: pb.RewriteCode_Success, wantSQL: "SHOW COLUMNS FROM phys.`db1.x`", wantAcc: []string{"db1.x"}},
 	)
 	runTablerefCases(t, cases)
 }

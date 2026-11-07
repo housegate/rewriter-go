@@ -50,14 +50,17 @@ func TestRewriteDescribe_useDefaultDatabase(t *testing.T) {
 	}
 }
 
-func TestRewriteDescribe_nonSIPassesThrough(t *testing.T) {
+// A non-SI qualified target is mapped like an EXISTS target (spec 2026-09-26
+// R7, amended 2026-11-07); it used to be echoed verbatim, which made
+// ClickHouse read the logical name as a physical database.
+func TestRewriteDescribe_nonSIQualifiedIsMapped(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("DESCRIBE TABLE other.u")
 	resp, handled, err := RewriteDescribe(e, ast, "DESCRIBE TABLE other.u", dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE)))
 	if err != nil || !handled {
 		t.Fatalf("handled=%v err=%v", handled, err)
 	}
-	if resp.StatementType != pb.StatementType_STATEMENT_TYPE_DESCRIBE || resp.SqlAfterRewrite != "DESCRIBE TABLE other.u" {
-		t.Fatalf("stmt=%v sql=%q (G-minimal: non-SI DESCRIBE passes through until Spec E D6)", resp.StatementType, resp.SqlAfterRewrite)
+	if resp.StatementType != pb.StatementType_STATEMENT_TYPE_DESCRIBE || resp.SqlAfterRewrite != "DESCRIBE TABLE phys.`other.u`" {
+		t.Fatalf("stmt=%v sql=%q", resp.StatementType, resp.SqlAfterRewrite)
 	}
 }

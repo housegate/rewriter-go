@@ -1291,6 +1291,53 @@ func TestTableRef_DescribeAndShowTargets(t *testing.T) {
 	runTablerefCases(t, cases)
 }
 
+// TestTableRef_QualifiedObjectTargetsResolve pins spec 2026-09-26 R7 as
+// amended 2026-11-07: a qualified DESCRIBE / SHOW COLUMNS target is mapped
+// like an EXISTS target. Before, it was forwarded verbatim while the
+// accessed-table record reported the mapped database, so ClickHouse read the
+// logical name as a physical database (another tenant's, or `default`). A
+// database the caller does not have is refused; ClickHouse's metadata
+// databases still pass through (the system-table allowlist judged them);
+// this engine refuses a `system` DESCRIBE target as an unmodelled shape, as it
+// did before, so only SHOW COLUMNS pins that pass-through here.
+func TestTableRef_QualifiedObjectTargetsResolve(t *testing.T) {
+	const notMapped = "not in database_map and not a known physical database"
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range []struct{ sql, want, acc string }{
+			{"DESCRIBE TABLE db1.o", "DESCRIBE TABLE phys.`db1.o`", "db1.o"},
+			{"DESC db1.`db2.x`", "DESCRIBE TABLE phys.`db1.db2.x`", "db1.db2.x"},
+		} {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{c.acc}})
+		}
+		for _, sql := range []string{"DESCRIBE TABLE db2.x", "DESC other.x"} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: notMapped})
+		}
+	}
+	// SHOW COLUMNS under an active SI surface is refused by the SI handler
+	// first when it names db1 (which owns an SI table), so it is pinned with
+	// the surface inactive.
+	for _, c := range []struct{ sql, want string }{
+		{"SHOW COLUMNS FROM db1.o", "SHOW COLUMNS FROM phys.`db1.o`"},
+		{"SHOW COLUMNS FROM o FROM db1", "SHOW COLUMNS FROM phys.`db1.o`"},
+		{"SHOW FULL COLUMNS FROM o IN db1 LIKE 'a%'", "SHOW FULL COLUMNS FROM phys.`db1.o` LIKE 'a%'"},
+		{"SHOW INDEX FROM db1.o", "SHOW INDEX FROM phys.`db1.o`"},
+	} {
+		cases = append(cases, tablerefCase{name: c.sql, sql: c.sql,
+			wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: []string{"db1.o"}})
+	}
+	for _, sql := range []string{"SHOW COLUMNS FROM x FROM default", "SHOW INDEX FROM default.x", "SHOW FULL COLUMNS FROM x IN other"} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: notMapped})
+	}
+	for _, sql := range []string{"SHOW COLUMNS FROM tables FROM system", "SHOW COLUMNS FROM system.tables"} {
+		cases = append(cases, tablerefCase{name: sql, sql: sql, wantCode: pb.RewriteCode_Success, wantSQL: sql})
+	}
+	runTablerefCases(t, cases)
+}
+
 // TestTableRef_CommandPrecedence pins spec 2026-09-26 R8 (final review
 // Important 1): for a command node the T2 scan of the whole text runs first,
 // then the unmodelled-class refusal, then the protected-database check. With

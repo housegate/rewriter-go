@@ -360,16 +360,20 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		if info.ShowWhat == "DICTIONARIES" && (info.ShowFull || info.ShowTemporary) {
 			return passthroughOriginalDB(sql, resp)
 		}
-		if info.HasTableClause && info.ShowTableResolved && !info.HasDBClause && info.ShowWhat != "DICTIONARIES" {
-			// Spec 2026-09-26 R7: an unqualified table (dotted or not) resolves
-			// exactly like FROM, in the session's logical database — passed
-			// through, ClickHouse would bind it in the physical database.
-			return dispatchShowUnqualifiedTable(e, sql, info, dyn, resp)
+		if info.HasTableClause && info.ShowTableResolved && info.ShowWhat != "DICTIONARIES" &&
+			(!info.HasDBClause || (info.DBResolved && !nameresolve.IsMetadataDatabase(info.DB))) {
+			// Spec 2026-09-26 R7, amended 2026-11-07: the table resolves as an
+			// EXISTS target. An unqualified one (dotted or not) resolves in the
+			// session's logical database; an explicit database (`FROM db.t` or
+			// `FROM t {FROM|IN} db`) is mapped the same way. Passed through,
+			// ClickHouse would read the name as a physical database (another
+			// tenant's, or `default`).
+			return dispatchShowTableTarget(e, sql, info, dyn, resp)
 		}
 		if info.HasTableClause {
-			// Echo the original text once the namespace is proved ordinary, as
-			// SHOW FULL DICTIONARIES already does. Polyglot's Generate happens to
-			// round-trip this family byte-for-byte today, but ClickHouse's own
+			// A metadata-database target (the system-table allowlist judged it):
+			// echo the original text. Polyglot's Generate happens to round-trip
+			// this family byte-for-byte today, but ClickHouse's own
 			// ASTShowColumnsQuery / ASTShowIndexesQuery formatter does not, so
 			// echoing is what keeps the two engines equal on every spelling
 			// rather than only on the canonical ones the corpus pins.
@@ -625,7 +629,7 @@ func buildLikeClause(info engine.DBLevelInfo) string {
 }
 
 // escapeSQLLiteral makes s safe to embed inside a single-quoted ClickHouse
-// string literal. ClickHouse honours BOTH '' and \' as an escaped quote inside
+// string literal. ClickHouse honours BOTH ” and \' as an escaped quote inside
 // a single-quoted literal, so a value ending in a backslash would otherwise
 // escape the closing quote and swallow whatever follows. Backslashes are
 // therefore doubled BEFORE quotes are doubled (Spec I D4).
@@ -633,17 +637,23 @@ func escapeSQLLiteral(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
 }
 
-// dispatchShowUnqualifiedTable resolves the unqualified table of a SHOW
-// COLUMNS / INDEX family statement through decideWriteTarget, like EXISTS /
-// SHOW CREATE / DESCRIBE, and splices the physical name into the original text.
-func dispatchShowUnqualifiedTable(e engine.Engine, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
+// dispatchShowTableTarget resolves the table of a SHOW COLUMNS / INDEX family
+// statement (unqualified, or with the database the statement names) through
+// decideWriteTarget, like EXISTS / SHOW CREATE / DESCRIBE, and splices the
+// qualified physical name into the original text in place of the table and
+// database clauses.
+func dispatchShowTableTarget(e engine.Engine, sql string, info engine.DBLevelInfo, dyn *pb.RewriteTableDynamicArgs, resp *pb.RewriteSQLResponse) (*pb.RewriteSQLResponse, bool, error) {
 	sel := nameresolve.Selection{Mode: nameresolve.ModeDynamic, Dynamic: dyn}
 	if resp.TableRewrites == nil {
 		resp.TableRewrites = map[string]string{}
 	}
 	tt := engine.TableTarget{Table: info.ShowTable}
+	if info.HasDBClause {
+		tt.DB = info.DB
+	}
 	d, ok := decideWriteTarget(tt, "SHOW "+info.ShowWhat, sel, resp)
 	if !ok {
+		alignUnmappedLogicalMessage(resp, "SHOW COLUMNS")
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
