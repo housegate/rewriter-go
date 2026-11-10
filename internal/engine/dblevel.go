@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,13 @@ type DBLevelInfo struct {
 	// semicolon: WHERE, LIMIT, FORMAT, SETTINGS, INTO OUTFILE or junk. A
 	// handler that synthesizes SQL from these fields would drop it.
 	Trailing bool
+	// TrailingLimit is the canonical decimal value n when the only tokens
+	// after the head (and its optional LIKE clause) are `LIMIT n` with n a
+	// plain unsigned decimal literal (no sign, leading zero, exponent, hex or
+	// underscore), followed at most by semicolons. Trailing stays true for
+	// such a statement; only a handler that renders the limit (SHOW TABLES)
+	// may accept it. "" otherwise.
+	TrailingLimit string
 	// ShowTableMultiPart reports a COLUMNS/INDEX family table clause of three
 	// or more dotted parts. ClickHouse reads it as DB = the first part and
 	// ShowTable = the last part, which is what DB / ShowTable then hold.
@@ -138,7 +146,11 @@ func ParseDBLevel(e Engine, sql string) (DBLevelInfo, error) {
 				}
 			}
 		}
-		info.Trailing = tokensRemain(toks, afterLikeClause(toks, i))
+		afterLike := afterLikeClause(toks, i)
+		info.Trailing = tokensRemain(toks, afterLike)
+		if info.Trailing {
+			info.TrailingLimit = trailingLimit(toks, afterLike)
+		}
 		for i < len(toks) {
 			tt := toks[i].TokenType
 			switch {
@@ -448,6 +460,32 @@ func tokensRemain(toks []rawToken, from int) bool {
 		}
 	}
 	return false
+}
+
+// trailingLimit returns the canonical decimal n when toks[i:] is exactly
+// `LIMIT n` (then only semicolons), n a plain unsigned decimal literal that
+// fits a UInt64, and "" otherwise. A leading zero, sign, exponent, hex,
+// binary or underscore spelling is not taken, so the value the rewrite
+// renders is the one ClickHouse reads.
+func trailingLimit(toks []rawToken, i int) string {
+	if i+1 >= len(toks) || toks[i].TokenType != "LIMIT" || toks[i+1].TokenType != "NUMBER" ||
+		tokensRemain(toks, i+2) {
+		return ""
+	}
+	n := toks[i+1].Text
+	if n == "" || (len(n) > 1 && n[0] == '0') {
+		return ""
+	}
+	for j := 0; j < len(n); j++ {
+		if n[j] < '0' || n[j] > '9' {
+			return ""
+		}
+	}
+	v, err := strconv.ParseUint(n, 10, 64)
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatUint(v, 10)
 }
 
 // afterLikeClause returns the index after one `[NOT] (I)LIKE '<pattern>'`

@@ -192,6 +192,15 @@ func decodeQuotedString(raw string) (string, quotedDecode) {
 	return decodeQuotedBody(raw, '\'')
 }
 
+// DecodeStringLiteral returns the value ClickHouse reads from a single-quoted
+// string literal given its exact source lexeme (`'d\_%'` keeps the backslash
+// before `_`, as ClickHouse does for LIKE patterns). ok is false when
+// ClickHouse would reject the lexeme or the value is not valid UTF-8.
+func DecodeStringLiteral(raw string) (string, bool) {
+	v, st := decodeQuotedString(raw)
+	return v, st == decodedExact
+}
+
 // decodeQuotedBody decodes raw = q … q with SQL-style doubled quotes and the
 // ClickHouse escape rule. The closing quote must be the last byte.
 func decodeQuotedBody(raw string, q byte) (string, quotedDecode) {
