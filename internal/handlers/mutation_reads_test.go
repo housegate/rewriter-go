@@ -21,7 +21,7 @@ func TestRewriteWrite_StorageIntegrityMutationReads(t *testing.T) {
 		{
 			name:      "update_assignment_logical",
 			sql:       "UPDATE other.u SET x = (SELECT count() FROM db1.t) WHERE id = 1",
-			message:   "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message:   siReferenceMsg,
 			accessDB:  "db1",
 			accessTbl: "t",
 		},
@@ -42,7 +42,7 @@ func TestRewriteWrite_StorageIntegrityMutationReads(t *testing.T) {
 		{
 			name:      "alter_update_assignment_logical",
 			sql:       "ALTER TABLE other.u UPDATE x = (SELECT count() FROM db1.t) WHERE id = 1",
-			message:   "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message:   siReferenceMsg,
 			accessDB:  "db1",
 			accessTbl: "t",
 		},
@@ -56,7 +56,7 @@ func TestRewriteWrite_StorageIntegrityMutationReads(t *testing.T) {
 		{
 			name:      "alter_delete_predicate_logical",
 			sql:       "ALTER TABLE other.u DELETE WHERE id IN (SELECT id FROM db1.t)",
-			message:   "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message:   siReferenceMsg,
 			accessDB:  "db1",
 			accessTbl: "t",
 		},
@@ -94,7 +94,7 @@ func TestRewriteWrite_StorageIntegrityMutationAssignmentWinsPredicate(t *testing
 	if err != nil || !handled {
 		t.Fatalf("handled=%v err=%v", handled, err)
 	}
-	wantMessage := "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	wantMessage := siReferenceMsg
 	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != wantMessage {
 		t.Fatalf("code=%v message=%q, want assignment reject %q", resp.GetCode(), resp.GetMessage(), wantMessage)
 	}

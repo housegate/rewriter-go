@@ -48,15 +48,49 @@ func NameRefs(e Engine, sql string) ([]NameRef, error) {
 // shared finalize path uses it so structured embedded SELECTs are never parsed
 // a second time; opaque command grammar still comes from the tokenizer below.
 func NameRefsFromAST(e Engine, ast AST, sql string) ([]NameRef, error) {
-	toks, err := tokenizeRaw(e, sql)
+	refs, _, err := nameRefsFromAST(e, ast, sql)
 	if err != nil {
 		return nil, err
 	}
+	return dedupeNameRefs(refs), nil
+}
+
+// NameRefRolesFromAST is NameRefsFromAST plus, for each returned reference,
+// whether the statement only reads it: true for a source of CREATE LIVE VIEW's
+// embedded query, false for a statement target. A name proven both as a
+// target and as a read keeps its first (target) role, as in NameRefsFromAST.
+func NameRefRolesFromAST(e Engine, ast AST, sql string) ([]NameRef, []bool, error) {
+	refs, readFrom, err := nameRefsFromAST(e, ast, sql)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen := make(map[NameRef]bool, len(refs))
+	out := make([]NameRef, 0, len(refs))
+	reads := make([]bool, 0, len(refs))
+	for i, ref := range refs {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+		reads = append(reads, i >= readFrom)
+	}
+	return out, reads, nil
+}
+
+// nameRefsFromAST returns the undeduplicated references and the index at
+// which the read-only references begin (len(refs) when there are none).
+func nameRefsFromAST(e Engine, ast AST, sql string) ([]NameRef, int, error) {
+	toks, err := tokenizeRaw(e, sql)
+	if err != nil {
+		return nil, 0, err
+	}
 	if len(toks) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	var refs []NameRef
+	readFrom := -1
 	switch {
 	case keywordAt(toks, 0, "SYSTEM"):
 		refs = systemNameRefs(e, sql, toks)
@@ -78,13 +112,16 @@ func NameRefsFromAST(e Engine, ast AST, sql string) ([]NameRef, error) {
 	case keywordsAt(toks, 0, "DROP", "DICTIONARY"):
 		refs = dropDictionaryNameRefs(e, sql, toks)
 	case keywordAt(toks, 0, "CREATE") || keywordAt(toks, 0, "ATTACH"):
-		refs, err = createLiveViewNameRefs(e, ast, sql, toks)
+		refs, readFrom, err = createLiveViewNameRefs(e, ast, sql, toks)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
-	return dedupeNameRefs(refs), nil
+	if readFrom < 0 {
+		readFrom = len(refs)
+	}
+	return refs, readFrom, nil
 }
 
 // PrewhereTargets binds each real PREWHERE keyword to the FIRST table of the
@@ -1663,21 +1700,24 @@ func liveViewIsSecurityValue(toks []rawToken, i int) bool {
 	return i >= 2 && keywordsAt(toks, i-2, "SQL", "SECURITY")
 }
 
-func createLiveViewNameRefs(e Engine, _ AST, sql string, toks []rawToken) ([]NameRef, error) {
+// createLiveViewNameRefs returns the view's targets followed by its embedded
+// query's read sources, and the index at which the read sources begin.
+func createLiveViewNameRefs(e Engine, _ AST, sql string, toks []rawToken) ([]NameRef, int, error) {
 	grammar, ok := parseLiveViewGrammar(e, sql, toks)
 	if !ok {
-		return nil, nil
+		return nil, -1, nil
 	}
 	refs := grammar.refs
+	readFrom := len(refs)
 
 	// The independently parsed exact query tail is the only source authority.
 	// A visitor error invalidates D2 attribution instead of falling back to a
 	// lossy target-only annotation.
 	sources, err := CollectEmbeddedReadSources(grammar.queryAST)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return append(refs, readSourceNameRefs(e, sources)...), nil
+	return append(refs, readSourceNameRefs(e, sources)...), readFrom, nil
 }
 
 // parseLiveViewGrammar mirrors pinned ClickHouse v25.8.32.4 order:

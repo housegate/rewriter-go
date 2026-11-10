@@ -72,7 +72,6 @@ func TestStorageIntegrityContractV2_DropTableSucceeds(t *testing.T) {
 
 func TestStorageIntegrityContractV2_DropRejections(t *testing.T) {
 	e := newEngine(t)
-	signedLane := "storage-integrity table db1.t accepts writes only through the signed statement lane"
 	cases := []struct {
 		name     string
 		version  pb.StorageIntegrityContractVersion
@@ -80,19 +79,19 @@ func TestStorageIntegrityContractV2_DropRejections(t *testing.T) {
 		wantCode pb.RewriteCode
 		wantMsg  string
 	}{
-		{"v2 truncate", siV2, "TRUNCATE TABLE db1.t", pb.RewriteCode_UnsupportedStatement, signedLane},
+		{"v2 truncate", siV2, "TRUNCATE TABLE db1.t", pb.RewriteCode_UnsupportedStatement, siAppendOnlyV2Msg},
 		{"v2 physical target", siV2, "DROP TABLE hg_safe.db1__t", pb.RewriteCode_UnsupportedStatement,
 			"storage-integrity physical table hg_safe.db1__t is not directly addressable"},
-		{"v2 on cluster", siV2, "DROP TABLE db1.t ON CLUSTER c", pb.RewriteCode_UnsupportedStatement, signedLane},
-		{"v2 multi on cluster", siV2, "DROP TABLE other.u, db1.t ON CLUSTER c", pb.RewriteCode_UnsupportedStatement, signedLane},
+		{"v2 on cluster", siV2, "DROP TABLE db1.t ON CLUSTER c", pb.RewriteCode_UnsupportedStatement, siAppendOnlyV2Msg},
+		{"v2 multi on cluster", siV2, "DROP TABLE other.u, db1.t ON CLUSTER c", pb.RewriteCode_UnsupportedStatement, siAppendOnlyV2Msg},
 		{"v2 ordinary multi on cluster", siV2, "DROP TABLE other.u, other.v ON CLUSTER c", pb.RewriteCode_UnsupportedStatement,
 			"multi-table DROP/TRUNCATE is not supported"},
-		{"v2 if empty", siV2, "DROP TABLE IF EMPTY db1.t", pb.RewriteCode_UnsupportedStatement, signedLane},
-		{"v2 drop view", siV2, "DROP VIEW db1.t", pb.RewriteCode_UnsupportedStatement, signedLane},
-		{"v2 drop dictionary", siV2, "DROP DICTIONARY db1.t", pb.RewriteCode_UnsupportedStatement, signedLane},
-		{"v1 drop", siV1, "DROP TABLE db1.t", pb.RewriteCode_UnsupportedStatement, signedLane},
-		{"v1 drop if exists sync", siV1, "DROP TABLE IF EXISTS db1.t SYNC", pb.RewriteCode_UnsupportedStatement, signedLane},
-		{"v1 multi", siV1, "DROP TABLE db1.t, other.u", pb.RewriteCode_UnsupportedStatement, signedLane},
+		{"v2 if empty", siV2, "DROP TABLE IF EMPTY db1.t", pb.RewriteCode_UnsupportedStatement, siAppendOnlyV2Msg},
+		{"v2 drop view", siV2, "DROP VIEW db1.t", pb.RewriteCode_UnsupportedStatement, siAppendOnlyV2Msg},
+		{"v2 drop dictionary", siV2, "DROP DICTIONARY db1.t", pb.RewriteCode_UnsupportedStatement, siAppendOnlyV2Msg},
+		{"v1 drop", siV1, "DROP TABLE db1.t", pb.RewriteCode_UnsupportedStatement, siAppendOnlyMsg},
+		{"v1 drop if exists sync", siV1, "DROP TABLE IF EXISTS db1.t SYNC", pb.RewriteCode_UnsupportedStatement, siAppendOnlyMsg},
+		{"v1 multi", siV1, "DROP TABLE db1.t, other.u", pb.RewriteCode_UnsupportedStatement, siAppendOnlyMsg},
 		{"v1 ordinary multi", siV1, "DROP TABLE other.u, other.v", pb.RewriteCode_UnsupportedStatement,
 			"multi-table DROP/TRUNCATE is not supported"},
 	}
@@ -162,7 +161,7 @@ func TestStorageIntegrityContractV2_DropResolvesUnqualifiedTargetThroughContext(
 		t.Fatalf("doRewrite: %v", err)
 	}
 	if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
-		resp.GetMessage() != "storage-integrity table db1.t accepts writes only through the signed statement lane" {
+		resp.GetMessage() != siAppendOnlyV2Msg {
 		t.Fatalf("resp = %+v, want DROP TEMPORARY TABLE refused", resp)
 	}
 }

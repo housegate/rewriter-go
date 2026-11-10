@@ -44,7 +44,13 @@ func TestAnnotateStorageIntegrityReject_ProvenD2Targets(t *testing.T) {
 		{"escaped backslash physical table", "SYSTEM START MERGES hg_safe.`x\\\\y`",
 			"storage-integrity physical table hg_safe.x\\y is not directly addressable"},
 		{"logical table", "CHECK TABLE db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siAppendOnlyMsg},
+		// A live view's own names are targets; only its query's sources are
+		// references (housegate/housegate#323).
+		{"live view TO logical target is a target", "CREATE LIVE VIEW other.v TO db1.t AS SELECT * FROM other.u",
+			siAppendOnlyMsg},
+		{"live view named after a logical table that it also reads is a target", "CREATE LIVE VIEW db1.t AS SELECT * FROM db1.t",
+			siAppendOnlyMsg},
 		{"physical database", "TRUNCATE DATABASE hg_safe",
 			"storage-integrity physical database hg_safe is not directly addressable"},
 		{"physical database after IF EMPTY", "TRUNCATE DATABASE IF EMPTY hg_safe",
@@ -64,7 +70,7 @@ func TestAnnotateStorageIntegrityReject_ProvenD2Targets(t *testing.T) {
 		{"leading opaque flush target does not mask later physical target", "SYSTEM FLUSH LOGS {target:Identifier}, hg_safe.db1__t",
 			"storage-integrity physical table hg_safe.db1__t is not directly addressable"},
 		{"later async insert queue logical target is not masked", "SYSTEM FLUSH ASYNC INSERT QUEUE other.u, db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siAppendOnlyMsg},
 		{"keyword physical table target", "SYSTEM START MERGES hg_safe.select",
 			"storage-integrity physical table hg_safe.select is not directly addressable"},
 		{"keyword physical target keeps list position", "SYSTEM FLUSH LOGS other.u, hg_safe.select, db1.t",
@@ -74,9 +80,9 @@ func TestAnnotateStorageIntegrityReject_ProvenD2Targets(t *testing.T) {
 		{"physical table precedes logical table", "CREATE LIVE VIEW other.v AS SELECT * FROM hg_unsafe.x JOIN db1.t ON 1",
 			"storage-integrity physical table hg_unsafe.x is not directly addressable"},
 		{"logical table precedes physical table", "CREATE LIVE VIEW other.v AS SELECT * FROM db1.t JOIN hg_safe.x ON 1",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 		{"decoy cannot mask later logical table", "CREATE LIVE VIEW other.v AS SELECT hg_safe, count(hg_unsafe) FROM other.u JOIN db1.t ON 1",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 		{"string decoy cannot reorder physical source", "CREATE LIVE VIEW other.v AS SELECT 'db1.t' AS decoy FROM hg_unsafe.x JOIN db1.t ON 1",
 			"storage-integrity physical table hg_unsafe.x is not directly addressable"},
 		{"column decoy cannot reorder physical source", "CREATE LIVE VIEW other.v AS SELECT db1.t FROM hg_unsafe.x JOIN db1.t AS db1 ON 1",
@@ -90,11 +96,11 @@ func TestAnnotateStorageIntegrityReject_ProvenD2Targets(t *testing.T) {
 		{"test view set fake time keeps its physical target", "SYSTEM TEST VIEW hg_safe.v SET FAKE TIME '2025-01-02 03:04:05'",
 			"storage-integrity physical table hg_safe.v is not directly addressable"},
 		{"test view unset fake time keeps its logical target", "SYSTEM TEST VIEW db1.t UNSET FAKE TIME",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siAppendOnlyMsg},
 		{"CASE condition source precedes result and else", "CREATE LIVE VIEW other.v AS SELECT CASE WHEN EXISTS(SELECT 1 FROM hg_unsafe.x) THEN (SELECT 1 FROM db1.t) ELSE (SELECT 1 FROM hg_safe.y) END",
 			"storage-integrity physical table hg_unsafe.x is not directly addressable"},
 		{"reserved row id has no Task2 precedence", "CREATE LIVE VIEW other.v AS SELECT _hg_row_id FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 		{"column default subquery physical table", "CREATE TABLE other.n (a UInt64 DEFAULT (SELECT max(a) FROM hg_safe.db1__t)) ENGINE = Memory",
 			"storage-integrity physical table hg_safe.db1__t is not directly addressable"},
 		{"materialized column IN physical table", "CREATE TABLE other.n (a UInt64 MATERIALIZED a IN hg_unsafe.db1__t) ENGINE = Memory",
@@ -165,19 +171,19 @@ func TestAnnotateStorageIntegrityReject_LiveViewInTableOperands(t *testing.T) {
 	e := newEngine(t)
 	for _, tc := range []struct{ name, sql, want string }{
 		{"infix logical", "CREATE LIVE VIEW other.v AS SELECT id IN db1.t FROM other.u",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 		{"GLOBAL IN physical", "CREATE LIVE VIEW other.v AS SELECT id GLOBAL IN hg_safe.x FROM db1.t",
 			"storage-integrity physical table hg_safe.x is not directly addressable"},
 		{"callable in physical", "CREATE LIVE VIEW other.v AS SELECT in(id, hg_unsafe.x) FROM db1.t",
 			"storage-integrity physical table hg_unsafe.x is not directly addressable"},
 		{"ordinary scalar qualifier is a decoy", "CREATE LIVE VIEW other.v AS SELECT equals(id, hg_safe.x) FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 		{"in-scope CTE is not an IN table", "CREATE LIVE VIEW other.v AS WITH t AS (SELECT * FROM other.u) SELECT id IN t FROM other.base",
 			"original"},
 		{"partially opaque IN target does not mask later physical source", "CREATE LIVE VIEW other.v AS SELECT id IN hg_safe.{target:Identifier} FROM hg_unsafe.x",
 			"storage-integrity physical table hg_unsafe.x is not directly addressable"},
 		{"fully opaque callable IN target does not mask later logical source", "CREATE LIVE VIEW other.v AS SELECT in(id, {target:Identifier}) FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &pb.RewriteSQLResponse{Code: pb.RewriteCode_UnsupportedStatement, Message: "original"}
@@ -205,7 +211,7 @@ func TestAnnotateStorageIntegrityReject_LiveViewVerifierRegressions(t *testing.T
 		// (si_create_live_view_over_si_rejected).
 		{"FROM alias is not an IN binding",
 			"CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 		{"window PARTITION source keeps precedence over ORDER source",
 			"CREATE LIVE VIEW other.v AS SELECT sum(x) OVER (PARTITION BY (SELECT 1 FROM hg_unsafe.db1__x) ORDER BY (SELECT 1 FROM db1.t))",
 			"storage-integrity physical table hg_unsafe.db1__x is not directly addressable"},
@@ -214,7 +220,7 @@ func TestAnnotateStorageIntegrityReject_LiveViewVerifierRegressions(t *testing.T
 			"storage-integrity physical table hg_unsafe.db1__x is not directly addressable"},
 		{"parameterized alias does not suppress later logical source",
 			"CREATE LIVE VIEW other.v AS SELECT * FROM other.u AS {alias:Identifier} JOIN db1.t ON 1",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			siReferenceMsg},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &pb.RewriteSQLResponse{Code: pb.RewriteCode_UnsupportedStatement, Message: "original"}
@@ -241,7 +247,7 @@ func TestAnnotateStorageIntegrityReject_LiveViewOnClusterGrammar(t *testing.T) {
 		{
 			"AS keyword cluster preserves logical source",
 			"CREATE LIVE VIEW other.v ON CLUSTER as AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"quoted dotted cluster preserves target ordering",
@@ -266,7 +272,7 @@ func TestAnnotateStorageIntegrityReject_LiveViewOnClusterGrammar(t *testing.T) {
 		{
 			"AS column name does not hide logical source",
 			"CREATE LIVE VIEW other.v (AS UInt64) AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"opaque TO target does not erase earlier physical primary",
@@ -291,37 +297,37 @@ func TestAnnotateStorageIntegrityReject_LiveViewOnClusterGrammar(t *testing.T) {
 		{
 			"SQL SECURITY DEFINER preamble preserves logical source",
 			"CREATE SQL SECURITY DEFINER LIVE VIEW other.v AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"SQL SECURITY INVOKER preamble preserves logical source",
 			"CREATE SQL SECURITY INVOKER LIVE VIEW other.v AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"bare AS definer before live view is consumed",
 			"CREATE DEFINER=AS LIVE VIEW other.v AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"bare TO definer after target is consumed",
 			"CREATE LIVE VIEW other.v DEFINER=TO AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"unquoted definer user and host before live view are consumed",
 			"CREATE DEFINER=user@host LIVE VIEW other.v AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"unquoted definer user and host after target are consumed",
 			"CREATE LIVE VIEW other.v DEFINER=AS@TO SQL SECURITY INVOKER AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"security after column preamble preserves logical source",
 			"CREATE LIVE VIEW other.v (x UInt64) SQL SECURITY DEFINER AS SELECT * FROM db1.t",
-			"storage-integrity table db1.t accepts writes only through the signed statement lane",
+			siReferenceMsg,
 		},
 		{
 			"definer spelling is not an SI object",
@@ -408,7 +414,7 @@ func TestAnnotateStorageIntegrityReject_PreservesExistingClassification(t *testi
 		for _, tc := range []struct{ sql, want string }{
 			{"CREATE LIVE VIEW other.v AS SELECT merge('t')", "original"},
 			{"CREATE LIVE VIEW other.v AS SELECT * FROM merge('t')",
-				"storage-integrity table db1.t accepts writes only through the signed statement lane"},
+				siReferenceMsg},
 			{"CREATE LIVE VIEW other.v AS SELECT remote('host', 'hg_safe', 'db1__t') FROM other.u", "original"},
 			{"CREATE LIVE VIEW other.v AS SELECT * FROM remote('host', 'hg_safe', 'db1__t')",
 				"storage-integrity physical table hg_safe.db1__t is not directly addressable"},

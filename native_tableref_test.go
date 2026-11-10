@@ -485,7 +485,7 @@ func TestTableRef_EmbeddedSourcesAreRewrittenAndReported(t *testing.T) {
 		{name: "ctas active source", sql: "CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM db1.t", si: true, wantCode: pb.RewriteCode_Success,
 			wantAcc: []string{"db1.n", "db1.t"}},
 		{name: "ctas into active target still refused", sql: "CREATE TABLE db1.t ENGINE = Memory AS SELECT * FROM db1.o", si: true,
-			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "accepts writes only through the signed statement lane"},
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: siAppendOnlyV2Msg},
 		// Fix round 1: a PARENTHESIZED embedded body (`AS (SELECT …)` /
 		// `INSERT INTO t (SELECT …)`) is polyglot's {"subquery":{"this":…, …}}
 		// wrapper around the same read body, not a bare {"select":…} —
@@ -2693,7 +2693,7 @@ func TestTableRef_GrantTargetIsKeyedByIdentity(t *testing.T) {
 	cases = append(cases,
 		tablerefCase{name: "active_qualified", sql: "GRANT SELECT ON db1.t TO u", si: true,
 			wantCode: pb.RewriteCode_UnsupportedStatement,
-			wantMsg:  "storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			wantMsg:  siAppendOnlyV2Msg},
 		tablerefCase{name: "reserved_qualified", sql: "GRANT SELECT ON hg_safe.db1__t TO u", si: true,
 			wantCode: pb.RewriteCode_UnsupportedStatement,
 			wantMsg:  "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
@@ -2749,7 +2749,7 @@ func TestTableRef_HasColumnInTableArgumentsAreNotResplit(t *testing.T) {
 // the rewrite is fail-safe (it can only reach the caller's own governed
 // table).
 func TestTableRef_OuterCTEDoesNotShadowViewBody(t *testing.T) {
-	const siWrite = "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	const siWrite = siReferenceMsg
 	type shadow struct {
 		label      string
 		in, out    string // the name as written, and as the generator prints it
@@ -2868,7 +2868,7 @@ func TestTableRef_OuterCTEDoesNotHideReservedColumnInViewBody(t *testing.T) {
 // message naming the source, the target reported first. An ordinary source
 // keeps the signed-lane marking, and without the SI surface nothing changes.
 func TestTableRef_ActiveToActiveInsertIsRefused(t *testing.T) {
-	const siWrite = "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	const siWrite = siReferenceMsg
 	var cases []tablerefCase
 	for _, c := range []struct {
 		sql string
@@ -3156,7 +3156,7 @@ func TestTableRef_UnresolvedUnqualifiedPrecedence(t *testing.T) {
 func TestTableRef_UnresolvedNameDoesNotStripSIWriteRefusalMap(t *testing.T) {
 	e := newEngine(t)
 	phys := "phys"
-	const siWrite = "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	const siWrite = siReferenceMsg
 	for _, ctx := range []string{"", "db9"} {
 		dyn := tablerefDynamic(true)
 		dyn.UpstreamLogicalDatabaseInContext = ctx
