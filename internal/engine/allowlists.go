@@ -138,12 +138,17 @@ func TableSettingRefusedMessage(name string) string {
 // The names are ClickHouse 26.3's registrations and aliases (DATABASE,
 // SCHEMA and current_database for currentDatabase; currentSchemas and
 // current_schemas; user and current_user for currentUser; fullHostName for
-// FQDN).
+// FQDN; authenticatedUser and its alias authUser), plus ClickHouse 26.8's
+// pgGetUserById / pg_get_userbyid (the session's initial user) and
+// currentRequestURL / currentHandler (the gateway's HTTP request), as in
+// rewriter-grpc firstDeploymentIdentityCall.
 var deploymentIdentityFunctions = map[string]bool{
 	"currentdatabase": true, "database": true, "schema": true, "current_database": true,
 	"currentschemas": true, "current_schemas": true,
 	"currentuser": true, "user": true, "current_user": true, "session_user": true,
+	"authenticateduser": true, "authuser": true,
 	"hostname": true, "fqdn": true, "fullhostname": true, "serveruuid": true, "getmacro": true,
+	"pggetuserbyid": true, "pg_get_userbyid": true, "currentrequesturl": true, "currenthandler": true,
 }
 
 // tableNameIntroducers are the words after which a name followed by "(" is a
@@ -173,6 +178,60 @@ func DeploymentIdentityFunction(name string) bool {
 func FunctionNotAccessibleMessage(name string) string {
 	return "function " + name + " is not accessible"
 }
+
+// deploymentIdentityColumn is the virtual column ClickHouse 26.8 gives
+// MergeTree, Memory, Log, View, MaterializedView and system tables, holding
+// the physical database name. Matched as written: ClickHouse column names
+// are case-sensitive, so `_DATABASE` is an ordinary column.
+const deploymentIdentityColumn = "_database"
+
+// HasDeploymentIdentityColumn reports whether ast references the
+// deploymentIdentityColumn as a column, bare or qualified (`t._database`),
+// anywhere in the statement. Mirrors rewriter-grpc
+// firstDeploymentIdentityColumn; a string literal or an alias that only
+// spells the name is not a column reference.
+func HasDeploymentIdentityColumn(ast AST) (bool, error) {
+	if len(ast) == 0 {
+		return false, nil
+	}
+	var root any
+	if err := json.Unmarshal(ast, &root); err != nil {
+		return false, fmt.Errorf("engine: decode: %w", err)
+	}
+	return hasIdentityColumn(root), nil
+}
+
+func hasIdentityColumn(node any) bool {
+	switch n := node.(type) {
+	case []any:
+		for _, item := range n {
+			if hasIdentityColumn(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		if col, ok := n["column"].(map[string]any); ok {
+			if nm, ok := col["name"].(map[string]any); ok && nm["name"] == deploymentIdentityColumn {
+				return true
+			}
+		}
+		for _, v := range n {
+			if hasIdentityColumn(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ColumnNotAccessibleMessage is the refusal of a deployment-identity column.
+func ColumnNotAccessibleMessage(name string) string {
+	return "virtual column " + name + " is not accessible"
+}
+
+// DeploymentIdentityColumnName is the column HasDeploymentIdentityColumn
+// looks for, for the refusal message.
+func DeploymentIdentityColumnName() string { return deploymentIdentityColumn }
 
 // FirstDeploymentIdentityCall returns the name of the first call in sql, in
 // text order, of a deployment-identity function: a bare word or a quoted

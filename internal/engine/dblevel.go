@@ -296,10 +296,13 @@ func DatabaseTarget(ast AST) (db string, ifNotExists, ifExists bool, err error) 
 	return db, ifNotExists, ifExists, nil
 }
 
-// SpliceShowTable replaces the table name of a SHOW COLUMNS / INDEX family
-// statement's first FROM / IN clause — which must be a single unqualified
-// name token — with replacement (already quoted), leaving every other byte of
-// sql unchanged (spec 2026-09-26 R7).
+// SpliceShowTable replaces the target of a SHOW COLUMNS / INDEX family
+// statement with replacement (already quoted and qualified), leaving every
+// other byte of sql unchanged (spec 2026-09-26 R7). The target is the first
+// FROM / IN clause's name — `t` or `db.t` — together with an immediately
+// following `{FROM | IN} db` clause, which is dropped because replacement
+// carries the database. A three-part name is not a target (the dispatcher
+// refuses it first).
 func SpliceShowTable(e Engine, sql, replacement string) (string, error) {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
@@ -309,11 +312,26 @@ func SpliceShowTable(e Engine, sql, replacement string) (string, error) {
 		if toks[i].TokenType != "FROM" && toks[i].TokenType != "IN" {
 			continue
 		}
-		name := toks[i+1]
-		if !isNameTok(name.TokenType) || (i+2 < len(toks) && toks[i+2].TokenType == "DOT") {
-			return "", fmt.Errorf("engine: SHOW table clause is not a single unqualified name")
+		start := toks[i+1]
+		if !isNameTok(start.TokenType) {
+			return "", fmt.Errorf("engine: SHOW table clause is not a name")
 		}
-		return sql[:name.Span.Start] + replacement + sql[name.Span.End:], nil
+		end, j := start.Span.End, i+2
+		if j+1 < len(toks) && toks[j].TokenType == "DOT" {
+			if !isNameTok(toks[j+1].TokenType) || (j+2 < len(toks) && toks[j+2].TokenType == "DOT") {
+				return "", fmt.Errorf("engine: SHOW table clause is not a one- or two-part name")
+			}
+			end, j = toks[j+1].Span.End, j+2
+		} else if j < len(toks) && toks[j].TokenType == "DOT" {
+			return "", fmt.Errorf("engine: SHOW table clause is not a one- or two-part name")
+		}
+		if j+1 < len(toks) && (toks[j].TokenType == "FROM" || toks[j].TokenType == "IN") {
+			if !isNameTok(toks[j+1].TokenType) {
+				return "", fmt.Errorf("engine: SHOW database clause is not a name")
+			}
+			end = toks[j+1].Span.End
+		}
+		return sql[:start.Span.Start] + replacement + sql[end:], nil
 	}
 	return "", fmt.Errorf("engine: SHOW statement has no table clause")
 }

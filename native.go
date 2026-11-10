@@ -89,13 +89,29 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 					return
 				}
 				name, found, err := engine.FirstDeploymentIdentityName(e, ast, sql)
+				// Then the `_database` virtual column ClickHouse 26.8 adds
+				// (the physical database name), as rewriter-grpc refuses it
+				// after the identity calls.
+				column := false
 				if err == nil && !found {
-					return
+					column, err = engine.HasDeploymentIdentityColumn(ast)
+					if err == nil && !column {
+						return
+					}
 				}
+				// A refusal carries no rewrite maps (as rewriter-grpc's
+				// and rejectSystemTable's), so nothing of the partial
+				// rewrite leaks.
 				resp.Code = pb.RewriteCode_UnsupportedStatement
 				resp.Message = engine.UnsupportedStatementMessage
-				if found {
+				resp.TableRewrites = nil
+				resp.DatabaseRewrites = nil
+				resp.PrivilegesDeltas = nil
+				switch {
+				case found:
 					resp.Message = engine.FunctionNotAccessibleMessage(name)
+				case column:
+					resp.Message = engine.ColumnNotAccessibleMessage(engine.DeploymentIdentityColumnName())
 				}
 				resp.SqlAfterRewrite = sql
 			} else {

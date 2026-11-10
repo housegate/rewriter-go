@@ -270,6 +270,9 @@ func TestCommandRerenderGate(t *testing.T) {
 			"SHOW CREATE TABLE db1.o SETTINGS max_threads = 1",
 			"SHOW CREATE TABLE db1.o XYZ phys.x",
 			"DESCRIBE TABLE t FORMAT JSON",
+			// Spec 2026-09-26 R7, amended 2026-11-07: a qualified target is
+			// re-rendered like an unqualified one, so its clause is refused too.
+			"DESCRIBE TABLE db1.t FORMAT JSON",
 			"USE db1 XYZ",
 			"SHOW TABLES FROM db1 LIKE 'x%'",
 			"SHOW TABLES FROM db1 LIMIT 10",
@@ -282,13 +285,6 @@ func TestCommandRerenderGate(t *testing.T) {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql})
 		}
-		// DESCRIBE re-renders an SI table as the metadata SELECT; an ordinary
-		// qualified target is echoed verbatim and drops nothing.
-		describeSI := tablerefCase{name: "describe si", sql: "DESCRIBE TABLE db1.t FORMAT JSON", si: si, wantCode: pb.RewriteCode_Success}
-		if si {
-			describeSI.wantCode, describeSI.wantMsg, describeSI.wantSQL = pb.RewriteCode_UnsupportedStatement, unsupported, "DESCRIBE TABLE db1.t FORMAT JSON"
-		}
-		cases = append(cases, describeSI)
 		for _, sql := range []string{
 			"EXISTS TABLE db1.o",
 			"SHOW CREATE TABLE db1.o;",
@@ -469,6 +465,8 @@ func TestCommandRerenderGateClauses(t *testing.T) {
 			"SHOW CREATE TABLE db1.o PARALLEL WITH SHOW CREATE TABLE db1.o",
 			"DESCRIBE TABLE t SETTINGS max_threads = 1",
 			"DESCRIBE TABLE t INTO OUTFILE '/tmp/x'",
+			"DESCRIBE TABLE db1.t SETTINGS max_threads = 1",
+			"DESCRIBE TABLE db1.t INTO OUTFILE '/tmp/x'",
 			"USE db1 PARALLEL WITH USE db1",
 			"USE db1 FORMAT JSON",
 			"USE db1 SETTINGS max_threads = 1",
@@ -485,13 +483,6 @@ func TestCommandRerenderGateClauses(t *testing.T) {
 			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported})
 		}
-	}
-	// DESCRIBE re-renders an SI table as the metadata SELECT; only there is
-	// a trailing clause dropped, so only there does DESCRIBE refuse it.
-	for _, sql := range []string{"DESCRIBE TABLE db1.t SETTINGS max_threads = 1", "DESCRIBE TABLE db1.t INTO OUTFILE '/tmp/x'"} {
-		cases = append(cases,
-			tablerefCase{name: "si/" + sql, sql: sql, si: true, wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: unsupported, wantSQL: sql},
-			tablerefCase{name: "ordinary/" + sql, sql: sql, si: false, wantCode: pb.RewriteCode_Success})
 	}
 	runTablerefCases(t, cases)
 }
