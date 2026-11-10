@@ -445,12 +445,33 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 		rejectDBInvalid(resp, "SHOW TABLES target logical database '"+logical+"' is not in database_map and not a known physical database; user does not have this database")
 		return resp, true, nil
 	}
-	if info.Trailing || info.HasLike || info.ShowExtended || info.ShowFull || info.ShowTemporary {
-		// The synthetic enumeration models only SHOW TABLES [{FROM|IN} <db>]:
-		// it would drop a LIKE / LIMIT / FORMAT / SETTINGS clause and the
-		// EXTENDED / FULL / TEMPORARY variants (mid-statement drop gate).
+	// The synthetic enumeration models SHOW [FULL] TABLES [{FROM|IN} <db>]
+	// [[NOT] {LIKE|ILIKE} '<pattern>'] [LIMIT <n>]. A WHERE / FORMAT /
+	// SETTINGS / INTO OUTFILE clause, a LIMIT that is not a plain decimal, an
+	// empty or non-string pattern and the EXTENDED / TEMPORARY variants are
+	// refused rather than dropped (mid-statement drop gate). TEMPORARY lists
+	// the session's temporary tables, which no database filter covers.
+	if (info.Trailing && info.TrailingLimit == "") || info.ShowExtended || info.ShowTemporary {
 		rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
 		return resp, true, nil
+	}
+	likeClause := ""
+	if info.HasLike {
+		pattern, ok := engine.DecodeStringLiteral(info.LikeRaw)
+		if !ok || pattern == "" {
+			rejectDBUnsupported(resp, engine.UnsupportedStatementMessage)
+			return resp, true, nil
+		}
+		op := "LIKE"
+		if info.LikeCaseInsensitive {
+			op = "ILIKE"
+		}
+		if info.LikeNot {
+			op = "NOT " + op
+		}
+		// The value ClickHouse decodes, re-escaped (as rewriter-grpc does with
+		// ASTShowTablesQuery::like): `\_` survives as a literal underscore.
+		likeClause = " WHERE name " + op + " '" + escapeSQLLiteral(pattern) + "'"
 	}
 	source := "system.tables"
 	if key, ok := dyn.GetLogicalDatabaseToRemoteUpstreamIndex()[logical]; ok {
@@ -464,7 +485,24 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 	prefix := nameresolve.BuildDynamicTablePrefix(logical, dyn)
 	ep := escapeSQLLiteral(prefix)
 	ephys := escapeSQLLiteral(physical)
-	resp.SqlAfterRewrite = "SELECT multiIf(startsWith(name, '" + ep + "'), substring(name, length('" + ep + "') + 1), name) AS name FROM (SELECT name FROM " + source + " WHERE database = '" + ephys + "' AND startsWith(name, '" + ep + "'))"
+	columns, extra := "name", ""
+	if info.ShowFull {
+		// ClickHouse answers SHOW FULL TABLES with (name, engine).
+		columns, extra = "name, engine", ", engine"
+	}
+	listing := "SELECT multiIf(startsWith(name, '" + ep + "'), substring(name, length('" + ep + "') + 1), name) AS name" + extra +
+		" FROM (SELECT " + columns + " FROM " + source + " WHERE database = '" + ephys + "' AND startsWith(name, '" + ep + "'))"
+	if !info.ShowFull && likeClause == "" && info.TrailingLimit == "" {
+		resp.SqlAfterRewrite = listing
+	} else {
+		// The pattern and the limit apply to the logical name, after the
+		// prefix is stripped, ordered by name as ClickHouse's own SHOW TABLES
+		// is; an outer query keeps the filter off the stripped alias.
+		resp.SqlAfterRewrite = "SELECT " + columns + " FROM (" + listing + ")" + likeClause + " ORDER BY name"
+		if info.TrailingLimit != "" {
+			resp.SqlAfterRewrite += " LIMIT " + info.TrailingLimit
+		}
+	}
 	recordDatabaseRewrite(resp, logical, physical)
 	return resp, true, nil
 }

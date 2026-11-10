@@ -151,8 +151,8 @@ func TestRewriteDBLevel_showTablePrefixesRetainPolicySemantics(t *testing.T) {
 				t.Fatalf("base %q answered Success; the row must start from a refusal", tc.baseSQL)
 			}
 			// A prefix never changes a policy refusal. Where the base answers
-			// Success, the synthetic enumeration cannot express FULL (an extra
-			// engine column) or TEMPORARY (session tables), so the prefixed
+			// Success, the synthetic enumeration cannot express TEMPORARY
+			// (session tables, no database filter) or EXTENDED, so the prefixed
 			// statement is refused rather than answered for SHOW TABLES.
 			if base.GetCode() == pb.RewriteCode_Success {
 				if prefixed.GetCode() != pb.RewriteCode_UnsupportedStatement || prefixed.GetMessage() != engine.UnsupportedStatementMessage {
