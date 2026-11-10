@@ -63,6 +63,43 @@ var sqlBearingSettings = map[string]bool{
 	// The old analyzer's name resolution (see above).
 	"legacy_column_name_of_tuple_literal": true,
 	"profile":                             true,
+	// Settings a ClickHouse 26.8 server honours, refused whatever the
+	// embedded parser since the backend decides (rewriter-grpc
+	// sqlBearingSetting). select / filter / order / sort are SQL text the
+	// server parses and wraps around the query (`SELECT <select> FROM
+	// (<query>) WHERE <filter> ORDER BY <order>`), outside every walker;
+	// database sets the current database like USE, moving every position the
+	// rewriter does not qualify; format / input_format override the format an
+	// INSERT's inline data is read with (`input_format = 'Values'` over
+	// `FORMAT CSV` data the rewriter left opaque), output_format /
+	// default_format the result's; asterisk_include_virtual_columns puts
+	// `_database` into `SELECT *`; the cloud-credential and dynamic-disk
+	// switches (dynamic_disk_allow_*, SQLBearingSetting) hand the server's own
+	// credentials, environment, Keeper and config includes to s3() / disk();
+	// url_base / s3_base relocate a relative url() / s3() target; the analyzer
+	// compatibility switches and view inlining change what a name binds;
+	// enable_streaming_queries admits the STREAM table expression; the AI
+	// functions' default credentials name a server named collection.
+	"select":                           true,
+	"filter":                           true,
+	"order":                            true,
+	"sort":                             true,
+	"database":                         true,
+	"format":                           true,
+	"input_format":                     true,
+	"output_format":                    true,
+	"default_format":                   true,
+	"asterisk_include_virtual_columns": true,
+	"s3_allow_server_credentials_in_user_queries": true,
+	"url_base": true,
+	"s3_base":  true,
+	"analyzer_compatibility_allow_cte_redefinition":              true,
+	"analyzer_compatibility_prefer_alias_over_subcolumn":         true,
+	"analyzer_compatibility_multiple_joins_qualify_column_names": true,
+	"analyzer_inline_views":                                      true,
+	"enable_streaming_queries":                                   true,
+	"ai_function_text_default_credentials":                       true,
+	"ai_function_embedding_default_credentials":                  true,
 }
 
 // analyzerSettings switch the query analyzer; the second is an alias of the
@@ -121,7 +158,8 @@ func trueLiteralTokens(value []rawToken) bool {
 // decoded again here.
 func SQLBearingSetting(name string) bool {
 	lower := strings.ToLower(name)
-	return sqlBearingSettings[lower] || strings.HasSuffix(lower, "_dialect")
+	return sqlBearingSettings[lower] || strings.HasSuffix(lower, "_dialect") ||
+		strings.HasPrefix(lower, "dynamic_disk_allow_")
 }
 
 // SettingAssignment is one `name = value` of a SET statement or a query-level
