@@ -35,9 +35,9 @@ func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
 	if exceedsNestingDepth(sql, maxParseDepth) {
 		return nil, fmt.Errorf("engine: parse: input bracket nesting exceeds limit %d", maxParseDepth)
 	}
-	ast, err := e.c.ParseOne(sql, dialect)
+	ast, err := e.parseStatement(sql)
 	if err != nil {
-		return nil, fmt.Errorf("engine: parse: %w", err)
+		return nil, err
 	}
 	// Every quoted identifier leaves the engine carrying the name ClickHouse
 	// resolves (decodeASTIdentifiers), so no caller compares Polyglot's
@@ -57,6 +57,28 @@ func (e *polyglotEngine) ParseOne(sql string) (AST, error) {
 	// recorded on its column_def (restoreViewColumnComments) and printed
 	// back by Generate.
 	return restoreViewColumnComments(e, sql, restored)
+}
+
+// parseStatement runs the ClickHouse-dialect parse. A streamed
+// `INSERT … FORMAT Values`, which the pinned Polyglot refuses, is parsed
+// through a same-length stand-in format name and gets the client's name back
+// (streamedValuesSQL); every other statement, and every failure, is Polyglot's
+// own answer.
+func (e *polyglotEngine) parseStatement(sql string) (AST, error) {
+	ast, err := e.c.ParseOne(sql, dialect)
+	if err == nil {
+		return AST(ast), nil
+	}
+	parseErr := fmt.Errorf("engine: parse: %w", err)
+	standIn, spelling, ok := streamedValuesSQL(e, sql)
+	if !ok {
+		return nil, parseErr
+	}
+	alt, altErr := e.c.ParseOne(standIn, dialect)
+	if altErr != nil {
+		return nil, parseErr
+	}
+	return restoreStreamedValuesFormat(AST(alt), spelling)
 }
 
 func (e *polyglotEngine) ParseGeneric(sql string) (AST, error) {
@@ -123,7 +145,17 @@ func (e *polyglotEngine) Tokenize(sql string) (AST, error) {
 func (e *polyglotEngine) DiffSQL(sql1, sql2 string) (AST, error) {
 	out, err := e.c.Diff(sql1, sql2, dialect)
 	if err != nil {
-		return nil, fmt.Errorf("engine: diff: %w", err)
+		// Two streamed `INSERT … FORMAT Values` statements that name the
+		// format alike compare through the stand-in ParseOne parses them
+		// with (streamedValuesSQL).
+		alt1, name1, ok1 := streamedValuesSQL(e, sql1)
+		alt2, name2, ok2 := streamedValuesSQL(e, sql2)
+		if !ok1 || !ok2 || name1 != name2 {
+			return nil, fmt.Errorf("engine: diff: %w", err)
+		}
+		if out, err = e.c.Diff(alt1, alt2, dialect); err != nil {
+			return nil, fmt.Errorf("engine: diff: %w", err)
+		}
 	}
 	return AST(out), nil
 }

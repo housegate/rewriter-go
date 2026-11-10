@@ -44,6 +44,16 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 	if insertHasFormatClause(ast) {
 		for i := len(toks) - 1; i >= 0; i-- {
 			if toks[i].TokenType == "FORMAT" && i+1 < len(toks) {
+				// A FORMAT Values data clause with no rows is the streamed
+				// form (streamedValuesSQL). ClickHouse reads whatever
+				// follows the format name as Values data, so only
+				// whitespace may follow it: a comment there is not a
+				// comment to ClickHouse, and rewriter-grpc refuses it too.
+				if name := toks[i+1]; name.TokenType == "VALUES" &&
+					!isClickHouseInsertWhitespace(sql[name.Span.End:]) {
+					return fmt.Errorf("%w: text after a streamed FORMAT %s: %q",
+						ErrNotParsedInFull, name.Source, excerpt(sql[name.Span.End:]))
+				}
 				toks = toks[:i+2]
 				break
 			}

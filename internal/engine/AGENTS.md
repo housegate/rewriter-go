@@ -14,6 +14,7 @@
 | Write/DDL classification | `writes.go` | Structured vs raw write nodes and rewrite slots |
 | DB/global/grant/object helpers | `dblevel.go`, `global.go`, `grant.go`, `objtarget.go` | Statement-family AST handling; GRANT/REVOKE uses generic-dialect recovery |
 | Parser guard | `guard.go` | Bracket nesting limit before polyglot parse |
+| Streamed `INSERT … FORMAT Values` | `streamed_values.go` | Same-length stand-in parse for the row-less form Polyglot refuses; `ParseOne` and `DiffSQL` fall back to it only after Polyglot's own parse fails |
 | Whole-statement parse gate | `wholestmt.go` | `CheckParsedInFull`: refuse a statement Polyglot did not consume in full |
 | Mid-statement drop gate | `regenerated.go`, `regenerated_lexeme.go`, `regenerated_precedence.go` | `CheckRegenerated`: refuse a statement whose regeneration does not spell the input |
 | AST shape fixtures | `testdata/ast-shapes`, `characterize_test.go` | Snapshot corpus and its regeneration path |
