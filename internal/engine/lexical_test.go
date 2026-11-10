@@ -35,6 +35,39 @@ func TestNameRefs_D2CommandTargets(t *testing.T) {
 	}
 }
 
+func TestNameRefRolesFromAST(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		name, sql string
+		want      []NameRef
+		reads     []bool
+	}{
+		{"check table target", "CHECK TABLE db1.t", tableRef("db1", "t"), []bool{false}},
+		{"live view targets precede reads", "CREATE LIVE VIEW other.v TO db1.s AS SELECT * FROM db1.t",
+			append(append(tableRef("other", "v"), tableRef("db1", "s")...), tableRef("db1", "t")...), []bool{false, false, true}},
+		{"a name that is both target and read keeps the target role", "CREATE LIVE VIEW db1.t AS SELECT * FROM db1.t",
+			tableRef("db1", "t"), []bool{false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ast, err := e.ParseOne(tc.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			refs, reads, err := NameRefRolesFromAST(e, ast, tc.sql)
+			if err != nil {
+				t.Fatalf("NameRefRolesFromAST: %v", err)
+			}
+			if !reflect.DeepEqual(refs, tc.want) || !reflect.DeepEqual(reads, tc.reads) {
+				t.Fatalf("refs=%v reads=%v, want %v %v", refs, reads, tc.want, tc.reads)
+			}
+			plain, err := NameRefsFromAST(e, ast, tc.sql)
+			if err != nil || !reflect.DeepEqual(plain, refs) {
+				t.Fatalf("NameRefsFromAST = %v, %v; want the same references %v", plain, err, refs)
+			}
+		})
+	}
+}
+
 func TestNameRefs_SystemTableAndViewGrammar(t *testing.T) {
 	e := newTestEngine(t)
 	for _, tc := range []struct {

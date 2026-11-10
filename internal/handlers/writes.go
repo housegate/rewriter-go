@@ -98,7 +98,9 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 	case engine.NodeSelect, engine.NodeUnion, engine.NodeIntersect, engine.NodeExcept:
 		return nil, false, nil
 	}
-	inspectTarget := func(tt engine.TableTarget, allowLogicalTarget bool) (*pb.RewriteSQLResponse, bool) {
+	// reference marks tt as a table the statement only reads (a mutation
+	// operand), which gets the reference message rather than the target one.
+	inspectTarget := func(tt engine.TableTarget, allowLogicalTarget, reference bool) (*pb.RewriteSQLResponse, bool) {
 		if tt.Table == "" {
 			if tt.DB != "" && nameresolve.IsStorageIntegrityPhysicalDatabase(tt.DB, sel.Dynamic) {
 				resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
@@ -130,7 +132,11 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 			}
 			resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
 			recordAccessedWrite(resp, tt, sel)
-			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(logicalKey))
+			if reference {
+				rejectUnsupported(resp, nameresolve.StorageIntegrityReferenceRejectMessage(logicalKey))
+			} else {
+				rejectUnsupported(resp, nameresolve.StorageIntegrityAppendOnlyMessage(logicalKey, sel.Dynamic))
+			}
 			return resp, true
 		}
 		return nil, false
@@ -147,7 +153,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 			continue
 		}
 		seen[id] = true
-		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert || siDrop); rejected {
+		if resp, rejected := inspectTarget(tt, info.Kind == engine.NodeInsert || siDrop, false); rejected {
 			return resp, true, nil
 		}
 	}
@@ -171,7 +177,7 @@ func preflightStorageIntegrityWrite(e engine.Engine, ast engine.AST, sql string,
 			for _, read := range reads.Ordered {
 				switch read.Kind {
 				case engine.MutationReadTable:
-					if resp, rejected := inspectTarget(read.Table, false); rejected {
+					if resp, rejected := inspectTarget(read.Table, false, true); rejected {
 						resp.SqlAfterRewrite = sql
 						return resp, true, nil
 					}
@@ -270,7 +276,7 @@ func decideWriteTarget(tt engine.TableTarget, kind string, sel nameresolve.Selec
 	if sel.Mode == nameresolve.ModeDynamic && kind != engine.NodeInsert &&
 		!(kind == engine.NodeDropTable && nameresolve.StorageIntegrityDropContract(sel)) {
 		if _, key, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {
-			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			rejectUnsupported(resp, nameresolve.StorageIntegrityAppendOnlyMessage(key, sel.Dynamic))
 			return engine.TableDecision{}, false
 		}
 	}
@@ -668,7 +674,7 @@ func rejectStorageIntegrityBodyReads(resp, bodyResp *pb.RewriteSQLResponse, sel 
 			continue
 		}
 		if _, authorized := nameresolve.AuthorizeStorageIntegrityLogical(accessed.GetOriginalDatabase(), sel.Dynamic); authorized {
-			rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+			rejectUnsupported(resp, nameresolve.StorageIntegrityReferenceRejectMessage(key))
 			return true
 		}
 	}

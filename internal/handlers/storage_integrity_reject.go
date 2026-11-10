@@ -44,11 +44,11 @@ func AnnotateStorageIntegrityRejectAST(e engine.Engine, resp *pb.RewriteSQLRespo
 	if touchesStorageIntegrity(resp.GetOriginalAccessedTables()) {
 		return
 	}
-	refs, err := engine.NameRefsFromAST(e, ast, sql)
+	refs, reads, err := engine.NameRefRolesFromAST(e, ast, sql)
 	if err != nil {
 		return // inability to prove a target leaves the caller's message intact
 	}
-	for _, ref := range refs {
+	for i, ref := range refs {
 		switch ref.Kind {
 		case engine.NameRefDatabase:
 			if nameresolve.IsStorageIntegrityPhysicalDatabase(ref.DB, sel.Dynamic) {
@@ -65,7 +65,11 @@ func AnnotateStorageIntegrityRejectAST(e engine.Engine, resp *pb.RewriteSQLRespo
 				return
 			}
 			if _, key, ok := nameresolve.LookupStorageIntegrity(ref.DB, ref.Table, sel.Dynamic); ok {
-				resp.Message = nameresolve.StorageIntegrityWriteRejectMessage(key)
+				if reads[i] {
+					resp.Message = nameresolve.StorageIntegrityReferenceRejectMessage(key)
+				} else {
+					resp.Message = nameresolve.StorageIntegrityAppendOnlyMessage(key, sel.Dynamic)
+				}
 				return
 			}
 		}

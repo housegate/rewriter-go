@@ -70,7 +70,7 @@ func RewriteGrant(e engine.Engine, ast engine.AST, sql string, opts []*pb.Rewrit
 			if !authorized {
 				rejectInvalid(resp, nameresolve.StorageIntegrityUnauthorizedMessage(logical))
 			} else {
-				rejectUnsupported(resp, nameresolve.StorageIntegrityWriteRejectMessage(key))
+				rejectUnsupported(resp, nameresolve.StorageIntegrityAppendOnlyMessage(key, siSel.Dynamic))
 			}
 			return resp, true, nil
 		}

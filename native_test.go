@@ -1105,7 +1105,7 @@ func TestStorageIntegrityContract_LiveViewVariantsFailClosedBeforeWriteDispatch(
 		{
 			name:    "UUID and suffix security remain live view grammar",
 			sql:     "CREATE LIVE VIEW other.v UUID '01234567-89ab-cdef-0123-456789abcdef' DEFINER=AS@TO SQL SECURITY INVOKER AS SELECT * FROM db1.t",
-			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message: siReferenceMsg,
 		},
 		{
 			name:    "ATTACH destination UUID and trailing comment remain live view grammar",
@@ -1115,7 +1115,7 @@ func TestStorageIntegrityContract_LiveViewVariantsFailClosedBeforeWriteDispatch(
 		{
 			name:    "heredoc UUID remains a pinned string literal",
 			sql:     "CREATE LIVE VIEW other.v UUID $uuid$01234567-89ab-cdef-0123-456789abcdef$uuid$ AS SELECT * FROM db1.t",
-			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message: siReferenceMsg,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1165,7 +1165,7 @@ func TestStorageIntegrityContract_LiveViewOrderedSourceAndAliasRegressions(t *te
 			// view that only reads db1.t (si_create_live_view_over_si_rejected).
 			name:    "FROM alias is not an IN binding",
 			sql:     "CREATE LIVE VIEW other.v AS SELECT id IN t FROM other.u AS t",
-			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message: siReferenceMsg,
 		},
 		{
 			name:    "window PARTITION source precedes ORDER source",
@@ -1180,7 +1180,7 @@ func TestStorageIntegrityContract_LiveViewOrderedSourceAndAliasRegressions(t *te
 		{
 			name:    "parameterized alias does not suppress later proven source",
 			sql:     "CREATE LIVE VIEW other.v AS SELECT * FROM other.u AS {alias:Identifier} JOIN db1.t ON 1",
-			message: "storage-integrity table db1.t accepts writes only through the signed statement lane",
+			message: siReferenceMsg,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -134,7 +134,7 @@ func rejectStorageIntegrityNamespaces(e engine.Engine, resp *pb.RewriteSQLRespon
 
 func namespaceLogicalRejectMessage(ref engine.NamespaceRef, key string) string {
 	if ref.Source == engine.NamespaceRefTableEngine {
-		return nameresolve.StorageIntegrityWriteRejectMessage(key)
+		return nameresolve.StorageIntegrityReferenceRejectMessage(key)
 	}
 	return "storage-integrity table " + key + " is not directly addressable through " + namespaceSurface(ref)
 }

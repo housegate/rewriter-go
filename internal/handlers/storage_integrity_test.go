@@ -353,7 +353,7 @@ func TestStorageIntegrityPhysicalNamespaceRejected(t *testing.T) {
 func TestWrites_storageIntegrityRejectsNonLane(t *testing.T) {
 	e := newEngine(t)
 	opts := dynOpt(siDyn(pb.StorageIntegrityArgs_READ_MODE_SAFE))
-	want := "storage-integrity table db1.t accepts writes only through the signed statement lane"
+	want := siAppendOnlyMsg
 	for _, sql := range []string{
 		"ALTER TABLE db1.t DELETE WHERE a = 1",
 		"DROP TABLE db1.t",
@@ -446,7 +446,7 @@ func TestGrant_storageIntegrityRejected(t *testing.T) {
 		if err != nil || !handled {
 			t.Fatalf("%q: handled=%v err=%v", sql, handled, err)
 		}
-		if resp.Code != pb.RewriteCode_UnsupportedStatement || !strings.Contains(resp.Message, "storage-integrity table db1.t accepts writes only") {
+		if resp.Code != pb.RewriteCode_UnsupportedStatement || resp.Message != siAppendOnlyMsg {
 			t.Fatalf("%q: code=%v msg=%q", sql, resp.Code, resp.Message)
 		}
 		if len(resp.OriginalAccessedTables) != 1 ||
@@ -525,7 +525,7 @@ func TestWrite_storageIntegrityEarlyRejectsRecordTarget(t *testing.T) {
 				t.Fatalf("handled=%v err=%v", handled, err)
 			}
 			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
-				!strings.Contains(resp.GetMessage(), "storage-integrity table db1.t accepts writes only") {
+				resp.GetMessage() != siAppendOnlyMsg {
 				t.Fatalf("code=%v msg=%q", resp.GetCode(), resp.GetMessage())
 			}
 			if len(resp.GetOriginalAccessedTables()) != 1 ||
@@ -558,7 +558,7 @@ func TestWrite_storageIntegrityViewBodiesRejected(t *testing.T) {
 				t.Fatalf("handled=%v err=%v", handled, err)
 			}
 			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
-				!strings.Contains(resp.GetMessage(), "storage-integrity table db1.t accepts writes only") {
+				resp.GetMessage() != siReferenceMsg {
 				t.Fatalf("code=%v msg=%q", resp.GetCode(), resp.GetMessage())
 			}
 			sawSI := false

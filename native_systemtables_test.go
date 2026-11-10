@@ -310,7 +310,7 @@ func TestSystemTables_Precedence(t *testing.T) {
 		{name: "SI physical wins", sql: "SELECT * FROM hg_safe.db1__t JOIN system.processes USING (a)", si: true,
 			wantCode: pb.RewriteCode_RewriteError, wantMsg: "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
 		{name: "SI view write wins", sql: "CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN system.processes USING (a)", si: true,
-			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "storage-integrity table db1.t accepts writes only through the signed statement lane"},
+			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: siReferenceMsg},
 		{name: "SI derived read then system", sql: "SELECT * FROM db1.t JOIN system.processes USING (a)", si: true,
 			wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: systemMsg("processes")},
 		{name: "inactive view", sql: "CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN system.processes USING (a)",

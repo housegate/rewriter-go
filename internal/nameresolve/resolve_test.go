@@ -1,6 +1,7 @@
 package nameresolve
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -376,9 +377,42 @@ func TestResolveAccessed_unqualifiedConfiguredPhysicalContext(t *testing.T) {
 	}
 }
 
-func TestStorageIntegrityWriteRejectMessage(t *testing.T) {
-	want := "storage-integrity table db1.t accepts writes only through the signed statement lane"
-	if got := StorageIntegrityWriteRejectMessage("db1.t"); got != want {
-		t.Fatalf("got %q", got)
+// The SI refusal texts are client-visible and shared with rewriter-grpc
+// byte for byte. Neither may suggest that signing would admit a statement:
+// an SI table is append-only (housegate/housegate#323).
+func TestStorageIntegrityRefusalMessages(t *testing.T) {
+	const appendOnly = "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, " +
+		"and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused"
+	const schemaHint = "; to change its schema, use a plain DROP TABLE and CREATE it again"
+	const reference = "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or " +
+		"CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and " +
+		"writes into a storage-integrity table cannot reference it"
+	args := func(v pb.StorageIntegrityContractVersion) *pb.RewriteTableDynamicArgs {
+		return &pb.RewriteTableDynamicArgs{StorageIntegrity: &pb.StorageIntegrityArgs{ContractVersion: v}}
+	}
+	for _, c := range []struct {
+		name string
+		args *pb.RewriteTableDynamicArgs
+		want string
+	}{
+		{"nil args", nil, appendOnly},
+		{"unspecified", args(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED), appendOnly},
+		{"v1", args(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V1), appendOnly},
+		{"v2 adds the DROP and re-CREATE hint", args(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2), appendOnly + schemaHint},
+	} {
+		if got := StorageIntegrityAppendOnlyMessage("db1.t", c.args); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	if got := StorageIntegrityReferenceRejectMessage("db1.t"); got != reference {
+		t.Errorf("reference: got %q, want %q", got, reference)
+	}
+	for _, msg := range []string{
+		StorageIntegrityAppendOnlyMessage("db1.t", args(pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2)),
+		StorageIntegrityReferenceRejectMessage("db1.t"),
+	} {
+		if strings.Contains(msg, "sign") {
+			t.Errorf("%q mentions signing", msg)
+		}
 	}
 }

@@ -436,10 +436,29 @@ func ReservedRowIDColumn(a *pb.RewriteTableDynamicArgs) string {
 	return DefaultReservedRowIDColumn
 }
 
-// StorageIntegrityWriteRejectMessage is the shared (Go + C++) message for any
-// non-lane write/DDL touching an SI table (Spec G §4.4).
-func StorageIntegrityWriteRejectMessage(logicalKey string) string {
-	return "storage-integrity table " + logicalKey + " accepts writes only through the signed statement lane"
+// StorageIntegrityAppendOnlyMessage is the shared (Go + C++) message for a
+// statement whose target is a logical storage-integrity table and that is
+// not an INSERT (Spec G §4.4): a mutation, DDL, DCL or maintenance statement.
+// An SI table is append-only, so the message must not suggest that signing or
+// another path would admit the statement. Under contract V2, where a plain
+// DROP TABLE is accepted, it also says how to change the schema.
+func StorageIntegrityAppendOnlyMessage(logicalKey string, a *pb.RewriteTableDynamicArgs) string {
+	msg := "storage-integrity table " + logicalKey +
+		" is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused"
+	if a.GetStorageIntegrity().GetContractVersion() == pb.StorageIntegrityContractVersion_STORAGE_INTEGRITY_CONTRACT_V2 {
+		msg += "; to change its schema, use a plain DROP TABLE and CREATE it again"
+	}
+	return msg
+}
+
+// StorageIntegrityReferenceRejectMessage is the shared (Go + C++) message for
+// a statement that reads or references a logical storage-integrity table
+// from a position where the derived safe/unsafe read is not admitted: a view
+// or materialized-view body, a table-engine argument, an ALTER / UPDATE /
+// DELETE operand, or the source of a write into a storage-integrity table.
+func StorageIntegrityReferenceRejectMessage(logicalKey string) string {
+	return "storage-integrity table " + logicalKey +
+		" can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it"
 }
 
 func StorageIntegrityUnauthorizedMessage(logical string) string {
