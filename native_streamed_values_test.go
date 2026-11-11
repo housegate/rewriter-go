@@ -221,8 +221,10 @@ func TestPlainValuesComments(t *testing.T) {
 				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES (1)`},
 			tablerefCase{name: mode + "/comment_before_values", si: si, sql: "INSERT INTO db1.o /* c */ VALUES (1)",
 				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" /* c */ VALUES (1)`},
+			// A comment in the opaque (cols) SETTINGS text: #84,
+			// TestOpaqueInsertTextComments.
 			tablerefCase{name: mode + "/comment_in_settings", si: si, sql: "INSERT INTO db1.o (a) SETTINGS /* c */ max_threads = 1 VALUES (1)",
-				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS /* c */ max_threads = 1 VALUES (1)`},
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
 			tablerefCase{name: mode + "/comment_markers_in_strings", si: si, sql: "INSERT INTO db1.o VALUES ('-- a', '/* b */', '# c')",
 				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES ('-- a', '/* b */', '# c')`},
 			tablerefCase{name: mode + "/semicolon", si: si, sql: "INSERT INTO db1.o VALUES (1);",
@@ -264,6 +266,61 @@ func TestPlainValuesCommentsAllModes(t *testing.T) {
 		resp, err := doRewrite(e, "INSERT INTO o VALUES /* c */ (1)", opts)
 		if err != nil || resp.GetCode() != pb.RewriteCode_Success {
 			t.Errorf("%s comment before rows = %v %v, want Success", name, resp.GetCode(), err)
+		}
+	}
+}
+
+// TestOpaqueInsertTextComments pins housegate/rewriter-go#84: an INSERT whose
+// column list is followed by SETTINGS keeps the rest as opaque text, which the
+// R2 / R5 rule reads lexically. rewriter-grpc refuses a comment anywhere in that
+// text in dynamic mode (a comment can hide a read from the comment-free scan);
+// this engine now refuses it too, in every mode. The data after a format name
+// other than Values is not SQL and is not read.
+func TestOpaqueInsertTextComments(t *testing.T) {
+	unsupported := pb.RewriteCode_UnsupportedStatement
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		mode := "si_off"
+		if si {
+			mode = "si_v2"
+		}
+		for _, c := range []struct{ name, sql string }{
+			{"comment_in_settings", "INSERT INTO db1.o (a) SETTINGS /* c */ max_threads = 1 VALUES (1)"},
+			{"comment_after_settings", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 -- c\nVALUES (1)"},
+			{"hash_comment_after_settings", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 # c\nVALUES (1)"},
+			{"comment_before_rows", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES /* c */ (1)"},
+			{"comment_after_rows", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1) -- c"},
+			{"comment_in_select", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT /* c */ 1"},
+			{"comment_after_select", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1 -- c"},
+			{"comment_before_format", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 /* c */ FORMAT CSV"},
+			{"si_table", "INSERT INTO db1.t (a) SETTINGS /* c */ max_threads = 1 VALUES (1)"},
+		} {
+			cases = append(cases, tablerefCase{name: mode + "/" + c.name, si: si, sql: c.sql,
+				wantCode: unsupported, wantMsg: "statement is not supported"})
+		}
+		cases = append(cases,
+			tablerefCase{name: mode + "/plain", si: si, sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 VALUES (1)`, wantAcc: []string{"db1.o"}},
+			tablerefCase{name: mode + "/comment_before_settings", si: si, sql: "INSERT INTO db1.o (a) /* c */ SETTINGS max_threads = 1 VALUES (1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 VALUES (1)`},
+			tablerefCase{name: mode + "/comment_markers_in_strings", si: si, sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES ('-- x', '/* y */')",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS max_threads = 1 VALUES ('-- x', '/* y */')`},
+			tablerefCase{name: mode + "/csv_data", si: si, sql: "INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT CSV\n1,2",
+				wantCode: pb.RewriteCode_Success, wantSQL: "INSERT INTO phys.\"db1.o\" (a) SETTINGS max_threads = 1 FORMAT CSV\n1,2"},
+			tablerefCase{name: mode + "/settings_without_columns", si: si, sql: "INSERT INTO db1.o SETTINGS /* c */ max_threads = 1 VALUES (1)",
+				wantCode: pb.RewriteCode_Success},
+		)
+	}
+	runTablerefCases(t, cases)
+
+	e := newEngine(t)
+	static := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			StaticArgs: &pb.RewriteTableStaticArgs{TableMap: map[string]string{"o": "p_o"}}}}}}
+	for name, opts := range map[string][]*pb.RewriteOption{"static": static, "none": nil} {
+		resp, err := doRewrite(e, "INSERT INTO o (a) SETTINGS /* c */ max_threads = 1 VALUES (1)", opts)
+		if err != nil || resp.GetCode() != unsupported {
+			t.Errorf("%s comment in opaque text = %v %v, want UnsupportedStatement", name, resp.GetCode(), err)
 		}
 	}
 }

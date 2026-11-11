@@ -131,50 +131,55 @@ func plainValuesRows(ast AST, toks []rawToken) int {
 	return v + 1
 }
 
-// opaqueValuesData returns the byte offset in sql where ClickHouse starts
-// reading the inline Values data of an INSERT whose column list is followed by
-// a SETTINGS clause, which Polyglot keeps as one opaque command text
-// (`SETTINGS … VALUES <rows>` or `SETTINGS … FORMAT Values <rows>`), and a
-// label for messages; ok is false for any other statement, an INSERT …
-// SETTINGS … SELECT included. The first VALUES, FORMAT, SELECT or WITH token
-// outside brackets after the SETTINGS keyword decides: a SETTINGS clause holds
-// only name = value pairs.
-func opaqueValuesData(ast AST, toks []rawToken) (start int, what string, ok bool) {
+// opaqueInsertTextStart returns the byte offset in sql of the SETTINGS keyword
+// that follows the column list of an INSERT Polyglot keeps as one opaque
+// command text (`INSERT … (cols) SETTINGS … VALUES <rows>`, `… SELECT …`,
+// `… FORMAT <name> [data]`), and the offset where that text ends: the end of
+// sql, or the end of the format name of a FORMAT clause other than Values,
+// whose data is not SQL. ok is false for any other statement. The keyword is
+// the first SETTINGS token outside brackets after the column list's ')'.
+//
+// rewriter-grpc refuses a comment anywhere in that text in dynamic mode
+// (`opaqueTextIsUngoverned`: a comment can hide a read from the comment-free
+// lexical scan), while Polyglot's tokenizer, and so the R2 / R5 scan over the
+// text (OpaqueInsertQueryIsUngoverned), skips it (housegate/rewriter-go#84).
+// CheckParsedInFull admits only whitespace between the tokens of the text, in
+// every mode, as it does for Values data (valuesDataStart); rewriter-grpc's
+// static and no-rewrite modes forward the text verbatim instead.
+func opaqueInsertTextStart(sql string, ast AST, toks []rawToken) (start, end int, ok bool) {
 	_, body, _, err := bodyOf(ast)
 	if err != nil || body == nil {
-		return 0, "", false
+		return 0, 0, false
 	}
 	q, _ := body["query"].(map[string]any)
 	cmd, _ := q["command"].(map[string]any)
 	this, _ := cmd["this"].(string)
 	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(this)), "SETTINGS") {
-		return 0, "", false
+		return 0, 0, false
 	}
-	depth, settings := 0, false
+	depth, columns, start := 0, false, -1
 	for i, tok := range toks {
 		switch {
 		case isBracketToken(tok.TokenType) && !isClosingBracket(tok.TokenType):
 			depth++
 		case isClosingBracket(tok.TokenType):
 			depth--
-		case depth != 0:
-		case !settings:
-			settings = tok.TokenType == "SETTINGS"
-		case tok.TokenType == "SELECT" || tok.TokenType == "WITH":
-			return 0, "", false
-		case tok.TokenType == "FORMAT":
-			if i+1 < len(toks) && toks[i+1].TokenType == "VALUES" {
-				return toks[i+1].Span.End, "FORMAT " + toks[i+1].Source + " data", true
+			columns = columns || depth == 0
+		case depth != 0 || !columns:
+		case start < 0:
+			if tok.TokenType == "SETTINGS" {
+				start = tok.Span.Start
 			}
-			return 0, "", false
-		case tok.TokenType == "VALUES":
-			if i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
-				return toks[i+1].Span.Start, "VALUES rows", true
-			}
-			return 0, "", false
+		case tok.TokenType == "FORMAT" && i+1 < len(toks) && toks[i+1].TokenType != "VALUES":
+			// The data after any other format name is not SQL; the
+			// tokenizer does not split it.
+			return start, toks[i+1].Span.End, true
 		}
 	}
-	return 0, "", false
+	if start < 0 {
+		return 0, 0, false
+	}
+	return start, len(sql), true
 }
 
 // valuesDataStart returns the byte offset in sql from which ClickHouse reads
@@ -187,6 +192,8 @@ func opaqueValuesData(ast AST, toks []rawToken) (start int, what string, ok bool
 // reads it as row text: 25.8 refuses one after a row as unparsable data (26.8
 // accepts most, but not a trailing block comment), and rewriter-grpc refuses
 // every comment in the rows in dynamic mode (housegate/rewriter-go#75, #77).
+// The opaque `(cols) SETTINGS …` form is checked from its SETTINGS keyword on
+// instead (opaqueInsertTextStart), which covers its rows too.
 // CheckParsedInFull therefore admits only whitespace between the data's
 // tokens, in every mode. rewriter-grpc's static and no-rewrite modes forward
 // the rows verbatim instead, comment included, so those modes differ: this
@@ -199,7 +206,7 @@ func valuesDataStart(ast AST, toks []rawToken) (start int, what string, ok bool)
 	if i := plainValuesRows(ast, toks); i >= 0 {
 		return toks[i].Span.Start, "VALUES rows", true
 	}
-	return opaqueValuesData(ast, toks)
+	return 0, "", false
 }
 
 // valuesDataTextError returns an error wrapping ErrNotParsedInFull when the
