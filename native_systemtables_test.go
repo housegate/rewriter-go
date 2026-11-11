@@ -86,9 +86,6 @@ func TestSystemTables_AllowedTablesKeepTodaysBehaviour(t *testing.T) {
 		wantCode: pb.RewriteCode_Success, wantSQL: `SELECT * FROM "system"."tables"`})
 	for _, sql := range []string{
 		`SELECT * FROM "system".columns`,
-		// Not information_schema: ClickHouse names are case-sensitive, so
-		// this database does not exist (UNKNOWN_DATABASE).
-		"SELECT * FROM Information_Schema.tables",
 		"SELECT name FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%'",
 		"SELECT * FROM system.mutations WHERE database = 'phys' AND is_done = 0",
 		"SELECT * FROM system.parts WHERE database = 'phys' AND active",
@@ -102,6 +99,13 @@ func TestSystemTables_AllowedTablesKeepTodaysBehaviour(t *testing.T) {
 		"SHOW CLUSTER 'default'",
 	} {
 		cases = append(cases, sysAllowed(sql, sql)...)
+	}
+	// Not information_schema: ClickHouse names are case-sensitive, so this
+	// database does not exist; it is an unmapped database, refused like any
+	// other (housegate/housegate#336).
+	for _, si := range []bool{false, true} {
+		cases = append(cases, tablerefCase{name: "case-wrong information_schema", sql: "SELECT * FROM Information_Schema.tables", si: si,
+			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: nameresolve.UnmappedDatabaseMessage("Information_Schema")})
 	}
 	cases = append(cases,
 		tablerefCase{name: "IN allowed operand", sql: "SELECT * FROM db1.o WHERE a IN system.tables", wantCode: pb.RewriteCode_Success,

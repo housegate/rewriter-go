@@ -61,6 +61,39 @@ func IsUnresolvedUnqualifiedTableMessage(msg string) bool {
 		strings.HasPrefix(msg, unresolvedUnqualifiedPrefix) && strings.HasSuffix(msg, unresolvedUnqualifiedSuffix)
 }
 
+// UnmappedDatabaseMessage is the cross-engine message for a qualified
+// read-position table whose database is not `system` and resolves through
+// neither database_map nor known_physical_databases in dynamic mode
+// (housegate/housegate#336). ClickHouse would read the verbatim name as a
+// physical database under the one ClickHouse user every tenant shares, so
+// the name is refused instead of forwarded. Names are case-sensitive, like
+// ClickHouse's: `SYSTEM.processes` is refused here.
+//
+// The database name is inserted verbatim, without escaping a `"` it
+// contains, like UnresolvedUnqualifiedTableMessage; both engines follow this.
+func UnmappedDatabaseMessage(db string) string {
+	return unmappedDatabasePrefix + db + unmappedDatabaseSuffix
+}
+
+const (
+	unmappedDatabasePrefix = `database "`
+	unmappedDatabaseSuffix = `" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)`
+)
+
+// IsUnmappedDatabaseMessage reports whether msg was built by
+// UnmappedDatabaseMessage.
+func IsUnmappedDatabaseMessage(msg string) bool {
+	return len(msg) >= len(unmappedDatabasePrefix)+len(unmappedDatabaseSuffix) &&
+		strings.HasPrefix(msg, unmappedDatabasePrefix) && strings.HasSuffix(msg, unmappedDatabaseSuffix)
+}
+
+// IsUnresolvedReadMessage reports whether msg is one of the two read-walk
+// refusals: an unqualified name that does not resolve through the logical
+// context, or a qualified name whose database is unmapped.
+func IsUnresolvedReadMessage(msg string) bool {
+	return IsUnresolvedUnqualifiedTableMessage(msg) || IsUnmappedDatabaseMessage(msg)
+}
+
 // ValidateProtectedDatabases mirrors the reserved_databases rule: every entry
 // is a simple identifier. Checked before any handler runs.
 func ValidateProtectedDatabases(a *pb.RewriteTableDynamicArgs) error {
