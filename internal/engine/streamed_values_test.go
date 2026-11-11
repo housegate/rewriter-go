@@ -114,6 +114,10 @@ func TestInlineFormatValues(t *testing.T) {
 		{"INSERT INTO db1.o FORMAT Values /* c */ (1)", 5, false},
 		{"INSERT INTO db1.o FORMAT Values (1 /* c */)", 5, false},
 		{"INSERT INTO db1.o FORMAT Values (1);\n-- c", 5, false},
+		// The rows start at the last VALUES token outside brackets, so a
+		// table named values does not hide the format name.
+		{"INSERT INTO db1.values FORMAT Values (1)", 5, true},
+		{"INSERT INTO db1.values FORMAT Values (1) -- c", 5, false},
 		{"INSERT INTO db1.o VALUES (1)", -1, true},
 		{"INSERT INTO db1.o (format, values) VALUES (1, 2)", -1, true},
 		{"INSERT INTO db1.o FORMAT Values", -1, true},
@@ -144,6 +148,79 @@ func TestInlineFormatValues(t *testing.T) {
 			if err := CheckRegenerated(e, tc.sql, ast); err != nil {
 				t.Errorf("CheckRegenerated(%q): %v", tc.sql, err)
 			}
+		}
+	}
+}
+
+// TestPlainValuesComments: the inline rows of a plain INSERT … VALUES are
+// Values data to ClickHouse from the first row's '(' on, so only whitespace may
+// separate their tokens; a comment before the first row is skipped by
+// ClickHouse's lexer and stays accepted (housegate/rewriter-go#77).
+func TestPlainValuesComments(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql  string
+		rows int // index of the first row's '(' token, -1 = not plain VALUES rows
+		full bool
+	}{
+		{"INSERT INTO db1.o VALUES (1)", 6, true},
+		{"INSERT INTO db1.o VALUES (1), (2);", 6, true},
+		{"INSERT INTO db1.o VALUES (1)\t\n", 6, true},
+		{"INSERT INTO db1.o VALUES ('-- x', '/* y */', '# z')", 6, true},
+		{"INSERT INTO db1.o VALUES /* c */ (1)", 6, true},
+		{"INSERT INTO db1.o VALUES -- c\n(1)", 6, true},
+		{"INSERT INTO db1.o /* c */ VALUES (1)", 6, true},
+		{"INSERT INTO db1.o (a /* c */) VALUES (1)", 9, true},
+		{"INSERT INTO db1.o (format, values) VALUES (1, 2)", 11, true},
+		{"INSERT INTO db1.values VALUES (1)", 6, true},
+		{"INSERT INTO values (a) VALUES (1)", 7, true},
+		// An INSERT whose column list is followed by SETTINGS keeps the rest
+		// as opaque text (opaqueValuesData), read from the same offsets.
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1)", -1, true},
+		{"INSERT INTO db1.o (a) SETTINGS /* c */ max_threads = 1 VALUES /* c */ (1)", -1, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (1)", -1, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1 -- c", -1, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1 /* c */)", -1, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (1) -- c", -1, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values /* c */ (1)", -1, false},
+		{"INSERT INTO db1.o VALUES (1) -- c", 6, false},
+		{"INSERT INTO db1.o VALUES (1) /* c */", 6, false},
+		{"INSERT INTO db1.o VALUES (1) # c", 6, false},
+		{"INSERT INTO db1.o VALUES (1)\n-- c", 6, false},
+		{"INSERT INTO db1.o VALUES (1 /* c */)", 6, false},
+		{"INSERT INTO db1.o VALUES (1 -- c\n)", 6, false},
+		{"INSERT INTO db1.o VALUES (/* c */ 1)", 6, false},
+		{"INSERT INTO db1.o VALUES (1), /* c */ (2)", 6, false},
+		{"INSERT INTO db1.o VALUES (1) /* c */ ;", 6, false},
+		{"INSERT INTO db1.o VALUES (1); -- c", 6, false},
+		{"INSERT INTO db1.o VALUES (1); /* c */", 6, false},
+		{"INSERT INTO db1.values VALUES (1) -- c", 6, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1) -- c", -1, false},
+		{"INSERT INTO db1.o SETTINGS max_threads = 1 VALUES (1) -- c", 10, false},
+		{"INSERT INTO db1.o SETTINGS max_threads = 1 VALUES (1)", 10, true},
+		{"INSERT INTO db1.o FORMAT Values (1)", -1, true},
+		{"INSERT INTO db1.o SELECT 1 -- c", -1, true},
+		{"INSERT INTO db1.o FORMAT CSV 1,2", -1, true},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("ParseOne(%q): %v", tc.sql, err)
+		}
+		toks, err := tokenizeRaw(e, tc.sql)
+		if err != nil {
+			t.Fatalf("tokenizeRaw(%q): %v", tc.sql, err)
+		}
+		if got := plainValuesRows(ast, toks); got != tc.rows {
+			t.Errorf("plainValuesRows(%q) = %d, want %d", tc.sql, got, tc.rows)
+			continue
+		}
+		err = CheckParsedInFull(e, tc.sql, ast)
+		if tc.full {
+			if err != nil {
+				t.Errorf("CheckParsedInFull(%q): %v", tc.sql, err)
+			}
+		} else if !errors.Is(err, ErrNotParsedInFull) {
+			t.Errorf("CheckParsedInFull(%q) = %v, want ErrNotParsedInFull", tc.sql, err)
 		}
 	}
 }
