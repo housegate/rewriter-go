@@ -306,7 +306,12 @@ func TestCheckRegenerated(t *testing.T) {
 		// Review M3: cosmetic respellings still refused (fail closed).
 		{"mod of a parenthesised operand", "SELECT a MOD (2 + 1) FROM db1.o", differs + "lost [MOD], added [PERCENT]"},
 		{"regexp of a parenthesised operand", "SELECT a REGEXP ('x' = 1) FROM db1.o", differs + "lost [REGEXP], added [MATCH]"},
-		{"format values rows", "INSERT INTO db1.o FORMAT Values (1, 'x')", differs + "lost [FORMAT], added nothing"},
+		// housegate/rewriter-go#75: FORMAT Values <rows> regenerates as the
+		// VALUES form ClickHouse runs alike; the FORMAT keyword is the only
+		// spelling it may lose.
+		{"format values rows", "INSERT INTO db1.o FORMAT Values (1, 'x')", ""},
+		{"format values rows lower case", "INSERT INTO db1.o (a, b) FORMAT values (1, 'x'), (2, 'y')", ""},
+		{"format values rows after settings", "INSERT INTO db1.o SETTINGS max_threads = 1 FORMAT VALUES (1)", ""},
 
 		// A # in a regenerated bare word: ClickHouse reads `# ` as a comment
 		// to the end of the line, so the tail of the statement disappears, and

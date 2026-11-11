@@ -94,3 +94,56 @@ func TestDiffSQLStreamedFormatValues(t *testing.T) {
 		t.Fatal("DiffSQL of differently spelt format names: want the parse error")
 	}
 }
+
+// TestInlineFormatValues: an INSERT … FORMAT Values <rows> parses into the
+// VALUES form's AST, is found by its FORMAT keyword, and passes both gates
+// unless a comment follows the format name (housegate/rewriter-go#75).
+func TestInlineFormatValues(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql    string
+		format int // index of the FORMAT token, -1 = not the inline form
+		full   bool
+	}{
+		{"INSERT INTO db1.o FORMAT Values (1)", 5, true},
+		{"INSERT INTO db1.o FORMAT values\n(1), (2);", 5, true},
+		{"INSERT INTO db1.o (a, b) FORMAT VALUES (1, 'x')", 10, true},
+		{"INSERT INTO db1.o SETTINGS max_threads = 1 FORMAT Values (1)", 9, true},
+		{"INSERT INTO db1.o FORMAT Values ('-- x', '/* y */')", 5, true},
+		{"INSERT INTO db1.o FORMAT Values (1) -- c", 5, false},
+		{"INSERT INTO db1.o FORMAT Values /* c */ (1)", 5, false},
+		{"INSERT INTO db1.o FORMAT Values (1 /* c */)", 5, false},
+		{"INSERT INTO db1.o FORMAT Values (1);\n-- c", 5, false},
+		{"INSERT INTO db1.o VALUES (1)", -1, true},
+		{"INSERT INTO db1.o (format, values) VALUES (1, 2)", -1, true},
+		{"INSERT INTO db1.o FORMAT Values", -1, true},
+		{"INSERT INTO db1.o FORMAT CSV 1,2", -1, true},
+		{"INSERT INTO db1.o SELECT 1 FORMAT Values", -1, true},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("ParseOne(%q): %v", tc.sql, err)
+		}
+		toks, err := tokenizeRaw(e, tc.sql)
+		if err != nil {
+			t.Fatalf("tokenizeRaw(%q): %v", tc.sql, err)
+		}
+		if got := inlineFormatValues(ast, toks); got != tc.format {
+			t.Errorf("inlineFormatValues(%q) = %d, want %d", tc.sql, got, tc.format)
+			continue
+		}
+		err = CheckParsedInFull(e, tc.sql, ast)
+		if tc.full {
+			if err != nil {
+				t.Errorf("CheckParsedInFull(%q): %v", tc.sql, err)
+			}
+		} else if !errors.Is(err, ErrNotParsedInFull) {
+			t.Errorf("CheckParsedInFull(%q) = %v, want ErrNotParsedInFull", tc.sql, err)
+		}
+		if tc.format >= 0 && tc.full {
+			if err := CheckRegenerated(e, tc.sql, ast); err != nil {
+				t.Errorf("CheckRegenerated(%q): %v", tc.sql, err)
+			}
+		}
+	}
+}
