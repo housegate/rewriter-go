@@ -244,7 +244,16 @@ func AnalyzeSnapshot(e Engine, sql string, opts SnapshotOptions) (*SnapshotPlan,
 	}
 	ins := sm(root["insert"])
 	if ins == nil {
-		for _, k := range []string{"select", "union", "use", "create", "create_table", "update", "delete", "drop", "alter", "grant", "revoke", "truncate", "describe", "show"} {
+		// These are the only typed ordinary roots ParseOne emits for the
+		// ClickHouse dialect. USE arrives as a command node and is rescued
+		// above; GRANT/REVOKE/DESCRIBE/SHOW also arrive as command nodes and
+		// refuse, as in the C++ engine. Polyglot has no bare create/drop/alter
+		// variant: DROP/ALTER/CREATE VIEW/CREATE DATABASE parse as drop_*,
+		// alter_table, create_view and create_database and refuse here,
+		// while the C++ engine classifies them as ordinary. That divergence
+		// is fail-closed; change the ordinary set in both engines together
+		// (see housegate/housegate#153), never by adding keys here alone.
+		for _, k := range []string{"select", "union", "create_table", "update", "delete", "truncate"} {
 			if _, ok := root[k]; ok {
 				return &SnapshotPlan{Ordinary: true}, nil
 			}

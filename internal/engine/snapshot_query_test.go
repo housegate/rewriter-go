@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -92,6 +93,90 @@ func TestSnapshotUseClassification(t *testing.T) {
 			got := err == nil && p.Ordinary
 			if got != tt.ordinary {
 				t.Fatalf("ordinary=%v err=%v plan=%+v", got, err, p)
+			}
+		})
+	}
+}
+
+// TestSnapshotOrdinaryClassification pins which statement classes the snapshot
+// analyzer acknowledges as ordinary (NOT_SNAPSHOT_QUERY) under the pinned
+// polyglot ClickHouse dialect. Everything else must refuse with the
+// INVALID_INPUT "requires one recognized statement" category; it never falls
+// back to ordinary passthrough.
+func TestSnapshotOrdinaryClassification(t *testing.T) {
+	lib := os.Getenv("POLYGLOT_SQL_FFI_PATH")
+	if lib == "" {
+		t.Skip("requires actual FFI")
+	}
+	e, err := NewPolyglot(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	ordinary := []string{
+		"SELECT value FROM tenant.events",
+		"SELECT 1 UNION ALL SELECT 2",
+		"WITH x AS (SELECT 1) SELECT * FROM x",
+		"CREATE TABLE tenant.t (value Int64) ENGINE = MergeTree ORDER BY value",
+		"CREATE TABLE tenant.t AS tenant.events",
+		"UPDATE tenant.events SET value = 1 WHERE 1",
+		"DELETE FROM tenant.events WHERE 1",
+		"TRUNCATE TABLE tenant.events",
+		"USE tenant",
+	}
+	refused := []string{
+		// The ClickHouse dialect parses these as generic command nodes; the C++
+		// engine refuses them too, so both engines agree.
+		"GRANT SELECT ON tenant.events TO reader",
+		"GRANT reader TO u",
+		"REVOKE SELECT ON tenant.events FROM reader",
+		"DESCRIBE TABLE tenant.events",
+		"DESC tenant.events",
+		"SHOW TABLES FROM tenant",
+		"SHOW DATABASES",
+		"SHOW CREATE TABLE tenant.events",
+		"SHOW TABLES FROM tenant FORMAT Native",
+		"EXISTS TABLE tenant.events",
+		"EXPLAIN SELECT 1",
+		"SET max_threads = 1",
+		"SYSTEM RELOAD CONFIG",
+		"OPTIMIZE TABLE tenant.events",
+		"CHECK TABLE tenant.events",
+		"RENAME TABLE tenant.a TO tenant.b",
+		"CREATE USER u",
+		"CREATE FUNCTION f AS x -> x",
+		// Known divergence: the C++ engine classifies these as ordinary
+		// (ASTDropQuery / ASTAlterQuery / ASTCreateQuery / ASTSelectWithUnionQuery).
+		// This engine refuses them, which is fail-closed. Reconcile the two
+		// ordinary sets in both engines together, never in one alone.
+		"DROP TABLE tenant.events",
+		"DROP TABLE IF EXISTS tenant.events",
+		"DROP VIEW tenant.v",
+		"DROP DATABASE x",
+		"DROP DICTIONARY tenant.d",
+		"ALTER TABLE tenant.events ADD COLUMN c Int64",
+		"ALTER TABLE tenant.events DELETE WHERE 1",
+		"ALTER TABLE tenant.events UPDATE value = 1 WHERE 1",
+		"CREATE VIEW tenant.v AS SELECT 1",
+		"CREATE MATERIALIZED VIEW tenant.mv ENGINE = Memory AS SELECT 1",
+		"CREATE DATABASE x",
+		"SELECT 1 INTERSECT SELECT 1",
+		"SELECT 1 EXCEPT SELECT 1",
+		"(SELECT 1)",
+	}
+	for _, sql := range ordinary {
+		t.Run("ordinary/"+sql, func(t *testing.T) {
+			p, err := AnalyzeSnapshot(e, sql, SnapshotOptions{Database: "tenant"})
+			if err != nil || p == nil || !p.Ordinary {
+				t.Fatalf("plan=%+v err=%v; want ordinary", p, err)
+			}
+		})
+	}
+	for _, sql := range refused {
+		t.Run("refused/"+sql, func(t *testing.T) {
+			p, err := AnalyzeSnapshot(e, sql, SnapshotOptions{Database: "tenant"})
+			if p != nil || !errors.Is(err, snapshotStatement) {
+				t.Fatalf("plan=%+v err=%v; want the INVALID_INPUT statement refusal", p, err)
 			}
 		})
 	}
