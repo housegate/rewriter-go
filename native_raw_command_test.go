@@ -156,7 +156,9 @@ func TestTableRef_Round2Pins(t *testing.T) {
 			tablerefCase{name: "garbage_hex_notin_alter", si: si, sql: "ALTER TABLE db1.o DELETE WHERE `n\\x7ZtIn`(a, `db2.x`)",
 				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported"},
 			tablerefCase{name: "garbage_hex_protected_db", si: si, sql: "SELECT * FROM `ph\\x7Zys`.x",
-				wantCode: pb.RewriteCode_Success}, // ph o ys is not phys: an ordinary unknown database
+				// ph o ys is not phys: an ordinary unmapped database, refused as
+				// such (housegate/housegate#336), not as the protected one.
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: `database "phoys" does not resolve through the caller's databases`},
 			tablerefCase{name: "garbage_hex_hg_safe", si: si, sql: "SELECT * FROM `hg\\x6Zsafe`.db1__t",
 				wantCode: pb.RewriteCode_InvalidRewriteRequest},
 		)

@@ -274,10 +274,14 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 	// resolve the verbatim name in the session's current database — the
 	// physical database, where `db1.t` is an Active SI table's ordinary
 	// physical table — so it is refused, not skipped (spec 2026-09-26 §5).
-	// CTE names never reach this callback, and a qualified unmapped name
-	// (db2.x) stays a lenient skip: ClickHouse has no physical db2, and the
-	// host's permission check owns it.
-	var unresolved string
+	// CTE names never reach this callback. A qualified name whose database
+	// is not `system` and does not resolve (db2.x, default.t, SYSTEM.t) is
+	// refused the same way with UnmappedDatabaseMessage
+	// (housegate/housegate#336): ClickHouse would read the verbatim name as
+	// a physical database under the shared ClickHouse user. The first such
+	// name in walk order, of either kind, is the refusal. `system` tables
+	// are decided by the system-table allowlist, which runs first.
+	var unresolvedMessage string
 	var haveUnresolved bool
 	rewritten, err := engine.RewriteSelectTables(ast, func(tt engine.TableTarget) engine.TableDecision {
 		if storageIntegrityActive {
@@ -299,9 +303,14 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 			}
 		}
 		o := nameresolve.Resolve(tt.DB, tt.Table, sel)
-		if sel.Mode == nameresolve.ModeDynamic && tt.DB == "" && o.Status == nameresolve.StatusInvalid {
+		if sel.Mode == nameresolve.ModeDynamic && o.Status == nameresolve.StatusInvalid && tt.DB != nameresolve.SystemDatabase {
 			if !haveUnresolved {
-				unresolved, haveUnresolved = tt.Table, true
+				if tt.DB == "" {
+					unresolvedMessage = nameresolve.UnresolvedUnqualifiedTableMessage(tt.Table)
+				} else {
+					unresolvedMessage = nameresolve.UnmappedDatabaseMessage(tt.DB)
+				}
+				haveUnresolved = true
 			}
 			return engine.TableDecision{Action: engine.ActionSkip}
 		}
@@ -319,7 +328,7 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		// so a different refusal that outranks it (the SI write refusal of a
 		// view body) keeps the map it would have without the unresolved name.
 		resp.Code = pb.RewriteCode_InvalidRewriteRequest
-		resp.Message = nameresolve.UnresolvedUnqualifiedTableMessage(unresolved)
+		resp.Message = unresolvedMessage
 		return ast, resp, nil
 	}
 
@@ -337,10 +346,10 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 }
 
 // decideTable maps the nameresolve.Outcome already resolved for tt to an
-// engine.TableDecision and records the table_rewrites entry. SELECT is lenient:
-// StatusInvalid → skip (no error). The caller refuses an unqualified
-// dynamic-mode StatusInvalid before reaching it, so the lenient skip covers
-// qualified unmapped names only.
+// engine.TableDecision and records the table_rewrites entry. StatusInvalid →
+// skip (no error). In dynamic mode the caller refuses every StatusInvalid but
+// a `system` table before reaching it, so the skip covers static mode and
+// `system` tables only.
 func decideTable(tt engine.TableTarget, o nameresolve.Outcome, rewrites map[string]string) engine.TableDecision {
 	switch o.Status {
 	case nameresolve.StatusRewrite:
@@ -406,14 +415,15 @@ func buildAccessed(targets []engine.TableTarget, sel nameresolve.Selection) []*p
 }
 
 // clearOnUnresolved empties resp's table_rewrites when its FINAL message is
-// the unresolved-unqualified refusal (whatever code the caller gave it: an
+// the unresolved-unqualified or unmapped-database refusal (whatever code the
+// caller gave it: an
 // embedded INSERT … SELECT / CTAS body answers UnsupportedStatement), so that
 // rejection carries no partial map — neither the tables the walk rewrote
 // before the refusal nor a write statement's own targets. Every caller of
 // rewriteSelectCore calls it after settling its final code and message.
 func clearOnUnresolved(resp *pb.RewriteSQLResponse) {
 	if resp.GetCode() != pb.RewriteCode_Success &&
-		nameresolve.IsUnresolvedUnqualifiedTableMessage(resp.GetMessage()) {
+		nameresolve.IsUnresolvedReadMessage(resp.GetMessage()) {
 		resp.TableRewrites = map[string]string{}
 	}
 }

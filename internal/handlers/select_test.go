@@ -99,7 +99,8 @@ func TestRewriteSelect_cteInjectAndFailedAliases(t *testing.T) {
 // TestRewriteSelect_invalidUnqualified_isRefused: an unqualified table with no
 // logical context does not resolve, and ClickHouse would read it from the
 // session's current (physical) database, so the dynamic-mode SELECT refuses it
-// (spec 2026-09-26 §5). A qualified unmapped name stays a lenient skip.
+// (spec 2026-09-26 §5). A qualified unmapped name is refused too
+// (housegate/housegate#336).
 func TestRewriteSelect_invalidUnqualified_isRefused(t *testing.T) {
 	e := newEngine(t)
 	ast, _ := e.ParseOne("SELECT a FROM events")
@@ -114,16 +115,17 @@ func TestRewriteSelect_invalidUnqualified_isRefused(t *testing.T) {
 	}
 }
 
-func TestRewriteSelect_invalidQualified_skipsLeniently(t *testing.T) {
+func TestRewriteSelect_invalidQualified_isRefused(t *testing.T) {
 	e := newEngine(t)
-	ast, _ := e.ParseOne("SELECT a FROM tenant2.events")
+	ast, _ := e.ParseOne("SELECT a FROM tenant1.o JOIN tenant2.events USING (a)")
 	opts := dynOpt(&pb.RewriteTableDynamicArgs{DatabaseMap: map[string]string{"tenant1": "testnet"}})
 	resp, err := RewriteSelect(e, ast, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.GetCode() != pb.RewriteCode_Success {
-		t.Fatalf("code = %v, want Success (lenient)", resp.GetCode())
+	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest ||
+		resp.GetMessage() != `database "tenant2" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)` {
+		t.Fatalf("got %v %q, want the unmapped-database refusal", resp.GetCode(), resp.GetMessage())
 	}
 	if len(resp.GetTableRewrites()) != 0 {
 		t.Fatalf("expected no rewrites, got %v", resp.GetTableRewrites())

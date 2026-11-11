@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/housegate/rewriter-go/internal/engine"
+	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-proto/gen/pb"
 )
 
@@ -2148,18 +2149,23 @@ func TestTableRef_AliasedInOperandIsATableOperand(t *testing.T) {
 			// `db2.x` in the session's logical database, never tenant db2.
 			{"SELECT * FROM db1.t WHERE a IN (`db2.x` AS z)", scan + `a IN (phys."db1.db2.x")`, []string{"db1.t", ".db2.x"}},
 			// A bare identifier under an alias is read as a table, like `a IN (b)`
-			// (the safe reading; see AGENTS.md "Known deviation"). An
-			// alias-qualified column is an unmapped logical table that the host's
-			// permission observer refuses; it is forwarded unchanged.
+			// (the safe reading; see AGENTS.md "Known deviation").
 			{"SELECT * FROM db1.t WHERE a IN (b AS z)", scan + `a IN (phys."db1.b")`, []string{".b", "db1.t"}},
 			{"SELECT * FROM db1.t WHERE a IN (b)", scan + `a IN (phys."db1.b")`, []string{".b", "db1.t"}},
-			{"SELECT * FROM db1.t WHERE a IN (tt.b AS z)", scan + `a IN (tt.b AS z)`, []string{"db1.t", "tt.b"}},
-			{"SELECT * FROM db1.t WHERE a IN (tt.b)", scan + `a IN (tt.b)`, []string{"db1.t", "tt.b"}},
 			// A CTE name is left untouched and unreported, aliased or not.
 			{"WITH o2 AS (SELECT 1) SELECT * FROM db1.t WHERE a IN (o2 AS z)", `WITH o2 AS (SELECT 1) ` + scan + `a IN (o2 AS z)`, []string{"db1.t"}},
 		} {
 			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
 				wantCode: pb.RewriteCode_Success, wantSQL: c.want, wantAcc: c.acc})
+		}
+		// An alias-qualified column is read as table tt.b of database tt, which
+		// is unmapped: refused (housegate/housegate#336).
+		for _, sql := range []string{
+			"SELECT * FROM db1.t WHERE a IN (tt.b AS z)",
+			"SELECT * FROM db1.t WHERE a IN (tt.b)",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: nameresolve.UnmappedDatabaseMessage("tt")})
 		}
 		// Values stay values: an aliased subquery or literal is unchanged.
 		for _, v := range []string{"((SELECT 1) AS z)", "(1 AS z)"} {
@@ -2382,15 +2388,6 @@ func TestTableRef_QuotedTwinIsItsOwnTable(t *testing.T) {
 				[]twinAccessed{{"", "db1.t", "phys", false}, {"db1", "t", "phys", si}}},
 			{"SELECT a FROM `db1.t` WHERE a IN db1.t", "",
 				[]twinAccessed{{"", "db1.t", "phys", false}, {"db1", "t", "phys", si}}},
-			{"SELECT a IN `default.x` FROM default.x",
-				`SELECT a IN phys."db1.default.x" FROM default.x`,
-				[]twinAccessed{{"", "default.x", "phys", false}, {"default", "x", "", false}}},
-			{"SELECT a FROM default.x WHERE a IN `default.x`",
-				`SELECT a FROM default.x WHERE a IN phys."db1.default.x"`,
-				[]twinAccessed{{"", "default.x", "phys", false}, {"default", "x", "", false}}},
-			{"SELECT a FROM db1.o WHERE a IN `db2.x` OR a IN db2.x",
-				`SELECT a FROM phys."db1.o" "db1.o" WHERE a IN phys."db1.db2.x" OR a IN db2.x`,
-				[]twinAccessed{{"db1", "o", "phys", false}, {"", "db2.x", "phys", false}, {"db2", "x", "", false}}},
 			{"SELECT a FROM `db1.o` UNION ALL SELECT a FROM db1.o",
 				`SELECT a FROM phys."db1.db1.o" "db1.o" UNION ALL SELECT a FROM phys."db1.o" "db1.o"`,
 				[]twinAccessed{{"", "db1.o", "phys", false}, {"db1", "o", "phys", false}}},
@@ -2398,14 +2395,29 @@ func TestTableRef_QuotedTwinIsItsOwnTable(t *testing.T) {
 				[]twinAccessed{{"", "db1.t", "phys", false}, {"db1", "t", "phys", si}}},
 			{"SELECT (SELECT max(a) FROM `system.one`) FROM system.one", "",
 				[]twinAccessed{{"", "system.one", "phys", false}, {"system", "one", "", false}}},
-			// Two qualified names that share the written key "db1.t.x".
-			{"SELECT a IN `db1.t`.x FROM db1.`t.x`",
-				`SELECT a IN "db1.t".x FROM phys."db1.t.x" "db1.t.x"`,
-				[]twinAccessed{{"db1", "t.x", "phys", false}, {"db1.t", "x", "", false}}},
 		}
 		for _, c := range cases {
 			t.Run(fmt.Sprintf("si=%v/%s", si, c.sql), func(t *testing.T) {
 				runTwinCase(t, e, c.sql, si, c.wantSQL, c.want)
+			})
+		}
+		// A qualified name of an unmapped database is refused whatever its
+		// twin resolves to (housegate/housegate#336). `db1.t`.x is table x of
+		// database "db1.t", which is unmapped too.
+		for _, c := range []struct{ sql, db string }{
+			{"SELECT a IN `default.x` FROM default.x", "default"},
+			{"SELECT a FROM default.x WHERE a IN `default.x`", "default"},
+			{"SELECT a FROM db1.o WHERE a IN `db2.x` OR a IN db2.x", "db2"},
+			{"SELECT a IN `db1.t`.x FROM db1.`t.x`", "db1.t"},
+		} {
+			t.Run(fmt.Sprintf("si=%v/%s", si, c.sql), func(t *testing.T) {
+				resp, err := doRewrite(e, c.sql, tablerefOpts(si))
+				if err != nil {
+					t.Fatalf("doRewrite: %v", err)
+				}
+				if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest || resp.GetMessage() != nameresolve.UnmappedDatabaseMessage(c.db) {
+					t.Fatalf("got %s (%s), want InvalidRewriteRequest for %q", resp.GetCode(), resp.GetMessage(), c.db)
+				}
 			})
 		}
 	}
@@ -2482,6 +2494,19 @@ func TestTableRef_QuotedTwinPositionMatrix(t *testing.T) {
 							resp, err := doRewrite(e, sql, tablerefOpts(si))
 							if err != nil {
 								t.Fatalf("doRewrite: %v", err)
+							}
+							if n[0] == "db2" || n[0] == "default" {
+								// An unmapped database is refused in every read
+								// position (housegate/housegate#336); its twin
+								// resolves, so the qualified name is the refusal.
+								if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest ||
+									resp.GetMessage() != nameresolve.UnmappedDatabaseMessage(n[0]) {
+									t.Fatalf("got %s (%s), want InvalidRewriteRequest %q", resp.GetCode(), resp.GetMessage(), nameresolve.UnmappedDatabaseMessage(n[0]))
+								}
+								if len(resp.GetTableRewrites()) != 0 {
+									t.Fatalf("table_rewrites = %v, want empty", resp.GetTableRewrites())
+								}
+								return
 							}
 							if resp.GetCode() != pb.RewriteCode_Success {
 								t.Fatalf("code = %s (%s), want Success", resp.GetCode(), resp.GetMessage())
@@ -2995,8 +3020,8 @@ func TestTableRef_UnresolvedUnqualifiedNameIsRefused(t *testing.T) {
 
 // TestTableRef_UnresolvedUnqualifiedRuleLeavesOthersAlone pins what the
 // refusal above must not touch: CTE names and table aliases (not tables),
-// qualified unmapped names (lenient; spec §5 and the permission observer own
-// them), a mapped logical context, and the none / static modes.
+// a mapped logical context, and the none / static modes. A qualified unmapped
+// name has its own refusal (TestTableRef_UnmappedDatabaseRefused).
 func TestTableRef_UnresolvedUnqualifiedRuleLeavesOthersAlone(t *testing.T) {
 	e := newEngine(t)
 	type c struct {
@@ -3012,9 +3037,6 @@ func TestTableRef_UnresolvedUnqualifiedRuleLeavesOthersAlone(t *testing.T) {
 				{"cte_name_in_operand", "WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c",
 					`WITH c AS (SELECT 1 AS a) SELECT * FROM phys."db1.o" "db1.o" WHERE a IN c`},
 				{"table_alias_column", "SELECT b.a FROM db1.o AS b", `SELECT b.a FROM phys."db1.o" AS b`},
-				{"qualified_unmapped", "SELECT * FROM db2.x", "SELECT * FROM db2.x"},
-				{"qualified_unmapped_in", "SELECT * FROM db1.o WHERE a IN db2.x",
-					`SELECT * FROM phys."db1.o" "db1.o" WHERE a IN db2.x`},
 				{"no_table", "SELECT 1", "SELECT 1"},
 			} {
 				t.Run(fmt.Sprintf("si=%v/ctx=%q/%s", si, ctx, k.name), func(t *testing.T) {
@@ -3388,4 +3410,106 @@ func TestTableRef_ViewColumnListResiduals(t *testing.T) {
 			pb.RewriteCode_UnsupportedStatement, "CREATE DICTIONARY is not supported")
 	}
 	runTablerefCases(t, cases)
+}
+
+// TestTableRef_UnmappedDatabaseRefused pins housegate/housegate#336: in
+// dynamic mode a qualified read-position table whose database is not
+// `system` and resolves through neither database_map nor
+// known_physical_databases is refused with UnmappedDatabaseMessage, in every
+// read position and in both SI states, with an empty table_rewrites map.
+// ClickHouse would otherwise read the verbatim name as a physical database
+// under the shared ClickHouse user. An embedded INSERT … SELECT / CTAS body
+// answers UnsupportedStatement, a view / MV body InvalidRewriteRequest, as
+// the unresolved-unqualified refusal does.
+func TestTableRef_UnmappedDatabaseRefused(t *testing.T) {
+	e := newEngine(t)
+	invalid, unsupported := pb.RewriteCode_InvalidRewriteRequest, pb.RewriteCode_UnsupportedStatement
+	for _, si := range []bool{false, true} {
+		for _, ctx := range []string{"", "db1"} {
+			dyn := tablerefDynamic(si)
+			dyn.UpstreamLogicalDatabaseInContext = ctx
+			opts := []*pb.RewriteOption{tableRewriteDynamic(dyn)}
+			for _, k := range []struct {
+				sql, db string
+				code    pb.RewriteCode
+			}{
+				{"SELECT * FROM default.t", "default", invalid},
+				{"SELECT * FROM `default`.`t`", "default", invalid},
+				{`SELECT * FROM "default"."t"`, "default", invalid},
+				{"SELECT * FROM default.t FINAL", "default", invalid},
+				{"SELECT * FROM default.t SAMPLE 0.1", "default", invalid},
+				{"SELECT * FROM db1.o JOIN default.t USING (a)", "default", invalid},
+				{"SELECT * FROM db1.o ANY LEFT JOIN default.t USING a", "default", invalid},
+				{"SELECT * FROM db1.o PASTE JOIN default.t", "default", invalid},
+				{"SELECT * FROM db1.o, default.t", "default", invalid},
+				{"SELECT * FROM db1.o WHERE a IN (SELECT a FROM default.t)", "default", invalid},
+				{"SELECT * FROM db1.o WHERE a GLOBAL IN (SELECT a FROM default.t)", "default", invalid},
+				{"SELECT * FROM db1.o WHERE a IN default.t", "default", invalid},
+				{"SELECT * FROM db1.o WHERE a IN (default.t)", "default", invalid},
+				{"SELECT * FROM db1.o WHERE EXISTS (SELECT 1 FROM default.t)", "default", invalid},
+				{"SELECT (SELECT max(a) FROM default.t)", "default", invalid},
+				{"WITH x AS (SELECT * FROM default.t) SELECT * FROM x", "default", invalid},
+				{"SELECT * FROM db1.o UNION ALL SELECT * FROM default.t", "default", invalid},
+				{"SELECT * FROM view(SELECT * FROM default.t)", "default", invalid},
+				{"SELECT * FROM SYSTEM.processes", "SYSTEM", invalid},
+				{"SELECT * FROM System.tables", "System", invalid},
+				{"SELECT * FROM other_db.t", "other_db", invalid},
+				{"SELECT * FROM _temporary_and_external_tables.t", "_temporary_and_external_tables", invalid},
+				{"INSERT INTO db1.o SELECT * FROM default.t", "default", unsupported},
+				{"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM default.t", "default", unsupported},
+				{"CREATE VIEW db1.v AS SELECT * FROM default.t", "default", invalid},
+				{"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS SELECT * FROM default.t", "default", invalid},
+			} {
+				t.Run(fmt.Sprintf("si=%v/ctx=%q/%s", si, ctx, k.sql), func(t *testing.T) {
+					resp, err := doRewrite(e, k.sql, opts)
+					if err != nil {
+						t.Fatalf("doRewrite: %v", err)
+					}
+					if resp.GetCode() != k.code || resp.GetMessage() != nameresolve.UnmappedDatabaseMessage(k.db) {
+						t.Fatalf("got %s %q, want %s %q", resp.GetCode(), resp.GetMessage(), k.code, nameresolve.UnmappedDatabaseMessage(k.db))
+					}
+					if resp.GetSqlAfterRewrite() != k.sql {
+						t.Fatalf("sql = %q, want the input echoed", resp.GetSqlAfterRewrite())
+					}
+					if len(resp.GetTableRewrites()) != 0 {
+						t.Fatalf("table_rewrites = %v, want empty", resp.GetTableRewrites())
+					}
+				})
+			}
+			// `system` itself is the system-table allowlist's to decide.
+			for _, sql := range []string{"SELECT * FROM system.tables", "SELECT * FROM db1.o WHERE a IN (SELECT a FROM system.one)"} {
+				resp, err := doRewrite(e, sql, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if resp.GetCode() != pb.RewriteCode_Success {
+					t.Fatalf("si=%v ctx=%q %s: got %s %q, want Success", si, ctx, sql, resp.GetCode(), resp.GetMessage())
+				}
+			}
+		}
+	}
+	// A mapped remote logical with no upstream entry is unresolvable too.
+	dyn := tablerefDynamic(false)
+	dyn.DatabaseMap["db3"] = "phys"
+	dyn.LogicalDatabaseToRemoteUpstreamIndex = map[string]string{"db3": "missing"}
+	resp, err := doRewrite(e, "SELECT * FROM db3.x", []*pb.RewriteOption{tableRewriteDynamic(dyn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetCode() != pb.RewriteCode_InvalidRewriteRequest || resp.GetMessage() != nameresolve.UnmappedDatabaseMessage("db3") {
+		t.Fatalf("missing remote upstream: got %s %q", resp.GetCode(), resp.GetMessage())
+	}
+	// None and static modes forward a qualified unmapped name unchanged.
+	for name, opts := range map[string][]*pb.RewriteOption{
+		"none":   nil,
+		"static": {{Op: pb.RewriteOp_TableNameRewrite, Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{StaticArgs: &pb.RewriteTableStaticArgs{TableMap: map[string]string{"db.x": "y"}}}}}},
+	} {
+		resp, err := doRewrite(e, "SELECT * FROM default.t", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetCode() != pb.RewriteCode_Success || resp.GetSqlAfterRewrite() != "SELECT * FROM default.t" {
+			t.Fatalf("%s: got %s %q %q", name, resp.GetCode(), resp.GetMessage(), resp.GetSqlAfterRewrite())
+		}
+	}
 }
