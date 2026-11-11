@@ -60,7 +60,10 @@ var ErrNotRegeneratedFaithfully = errors.New("engine: generate: the regenerated 
 // the statement has no data and is compared in full (checkInputData). An
 // INSERT … SELECT … FORMAT <name> without input() is compared in full, apart
 // from a text of only comments after the name, which ClickHouse ignores
-// (withoutIgnoredData).
+// (withoutIgnoredData). An INSERT … FORMAT Values <rows> whose rows Polyglot
+// parsed like VALUES rows (inlineFormatValues) is compared without its FORMAT
+// keyword: it regenerates as INSERT … VALUES <rows>, which ClickHouse runs
+// alike.
 func CheckRegenerated(e Engine, sql string, ast AST) error {
 	kind, err := NodeKind(ast)
 	if err != nil {
@@ -86,6 +89,11 @@ func CheckRegenerated(e Engine, sql string, ast AST) error {
 	}
 	if kind == NodeInsert {
 		switch {
+		case inlineFormatValues(ast, in) >= 0:
+			// FORMAT Values <rows> regenerates as VALUES <rows>, which
+			// ClickHouse runs alike (inlineFormatValues).
+			i := inlineFormatValues(ast, in)
+			in = append(in[:i:i], in[i+1:]...)
 		case insertHasFormatClause(ast):
 			in, out = throughFormatName(in), throughFormatName(out)
 		case readsInput(in):

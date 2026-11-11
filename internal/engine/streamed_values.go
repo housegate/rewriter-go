@@ -74,3 +74,65 @@ func restoreStreamedValuesFormat(ast AST, spelling string) (AST, error) {
 func isClickHouseInsertWhitespace(s string) bool {
 	return strings.Trim(s, " \t\n\r\f\v") == ""
 }
+
+// inlineFormatValues returns the index in toks of the FORMAT keyword of an
+// INSERT … FORMAT Values <rows> whose rows Polyglot parsed into insert.values,
+// or -1. ClickHouse runs such a statement exactly like INSERT … VALUES <rows>
+// (measured on 25.8 and 26.8, any case of the format name), and Polyglot
+// parses it into the same AST, so it is checked and rewritten as the VALUES
+// form, which rewriter-grpc generates too (housegate/rewriter-go#75).
+//
+// The FORMAT keyword is the token right before the first VALUES token outside
+// brackets, which is where the AST's rows begin: a column named format or
+// values sits inside the column list's brackets, and a quoted `Values` is not
+// a VALUES token.
+func inlineFormatValues(ast AST, toks []rawToken) int {
+	_, body, _, err := bodyOf(ast)
+	if err != nil || body == nil || body["query"] != nil {
+		return -1
+	}
+	if rows, _ := body["values"].([]any); len(rows) == 0 {
+		return -1
+	}
+	depth := 0
+	for i, tok := range toks {
+		switch {
+		case isBracketToken(tok.TokenType) && !isClosingBracket(tok.TokenType):
+			depth++
+		case isClosingBracket(tok.TokenType):
+			depth--
+		case depth == 0 && tok.TokenType == "VALUES":
+			if i > 0 && toks[i-1].TokenType == "FORMAT" {
+				return i - 1
+			}
+			return -1
+		}
+	}
+	return -1
+}
+
+// inlineFormatValuesTextError refuses a comment in the text after the format
+// name of an inline FORMAT Values statement (inlineFormatValues). ClickHouse
+// starts reading Values data right after the name, where after VALUES its
+// lexer first skips comments, so the comment is row text to it (25.8 refuses
+// it as unparsable data) while Polyglot drops it; rewriter-grpc refuses it
+// too. Only whitespace may come between the tokens after the name.
+func inlineFormatValuesTextError(sql string, toks []rawToken, format int) error {
+	name := toks[format+1]
+	end := name.Span.End
+	for _, tok := range toks[format+2:] {
+		if tok.Span.Start < end {
+			continue
+		}
+		if !isClickHouseInsertWhitespace(sql[end:tok.Span.Start]) {
+			return fmt.Errorf("%w: comment in FORMAT %s data: %q",
+				ErrNotParsedInFull, name.Source, excerpt(sql[end:]))
+		}
+		end = tok.Span.End
+	}
+	if !isClickHouseInsertWhitespace(sql[end:]) {
+		return fmt.Errorf("%w: comment in FORMAT %s data: %q",
+			ErrNotParsedInFull, name.Source, excerpt(sql[end:]))
+	}
+	return nil
+}

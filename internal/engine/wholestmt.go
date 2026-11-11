@@ -35,7 +35,9 @@ var ErrNotParsedInFull = errors.New("engine: parse: statement was not parsed in 
 //
 // An INSERT … FORMAT <name> statement is checked only up to the format name:
 // the rest is the data payload, which Polyglot does not model and
-// GenerateInsert splices back verbatim.
+// GenerateInsert splices back verbatim. An INSERT … FORMAT Values <rows>,
+// whose rows Polyglot parses like VALUES rows, is checked in full, and only
+// whitespace may separate the tokens after the format name.
 func CheckParsedInFull(e Engine, sql string, ast AST) error {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
@@ -56,6 +58,16 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 				}
 				toks = toks[:i+2]
 				break
+			}
+		}
+	}
+	// An inline FORMAT Values statement parses into the VALUES form's AST,
+	// which drops the comments ClickHouse would read as row text
+	// (inlineFormatValuesTextError).
+	if kind, kerr := NodeKind(ast); kerr == nil && kind == NodeInsert {
+		if i := inlineFormatValues(ast, toks); i >= 0 {
+			if err := inlineFormatValuesTextError(sql, toks, i); err != nil {
+				return err
 			}
 		}
 	}
