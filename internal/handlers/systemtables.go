@@ -10,7 +10,8 @@ import (
 // statement once (engine.CollectObjectRefs) and returns the first, in
 // collector order (documented there), that names a system table outside the
 // allowlist (spec
-// 2026-09-26 §5, "The system database", step 1), or refused=false. siObject
+// 2026-09-26 §5, "The system database", step 1) or any table of
+// information_schema, or refused=false. siObject
 // reports that the statement also names a storage-integrity object — an SI
 // physical or reserved database, an Active SI table (qualified or through the
 // session's logical database), or an SI logical database through a
@@ -19,13 +20,13 @@ import (
 // caller's statement, never from SQL a handler emitted, so the rewriter's
 // own system.tables / system.columns synthesis for SHOW TABLES and the SI
 // DESCRIBE keeps working.
-func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolve.Selection) (table string, refused, siObject bool, err error) {
+func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolve.Selection) (hit systemRefusal, refused, siObject bool, err error) {
 	if sel.Mode != nameresolve.ModeDynamic {
-		return "", false, false, nil
+		return systemRefusal{}, false, false, nil
 	}
 	refs, err := engine.CollectObjectRefs(e, ast, sql)
 	if err != nil {
-		return "", false, false, err
+		return systemRefusal{}, false, false, err
 	}
 	dyn := sel.Dynamic
 	ctx := dyn.GetUpstreamLogicalDatabaseInContext()
@@ -34,7 +35,14 @@ func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolv
 			// A pattern or a non-static name (Exact false) is never allowed,
 			// whatever its text.
 			if !refused && !(ref.Exact && nameresolve.SystemTableAllowed(ref.Table)) {
-				table, refused = ref.Table, true
+				hit, refused = systemRefusal{db: nameresolve.SystemDatabase, table: ref.Table}, true
+			}
+			continue
+		}
+		if db := refDatabase(ref, ctx); nameresolve.MetadataDatabaseRefused(db) {
+			// information_schema: every table, pattern or name is refused.
+			if !refused {
+				hit, refused = systemRefusal{db: db, table: ref.Table}, true
 			}
 			continue
 		}
@@ -56,21 +64,45 @@ func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolv
 			}
 		}
 	}
-	return table, refused, siObject, nil
+	return hit, refused, siObject, nil
+}
+
+// systemRefusal is the first refused metadata reference of a statement: a
+// system table outside the allowlist (db is nameresolve.SystemDatabase), or
+// any table of information_schema (db as the statement spells it).
+type systemRefusal struct {
+	db, table string
+}
+
+// message is the cross-engine refusal text for r.
+func (r systemRefusal) message() string {
+	if r.db != nameresolve.SystemDatabase {
+		return nameresolve.MetadataDatabaseRefusedMessage(r.db)
+	}
+	return nameresolve.SystemTableRefusedMessage(r.table)
+}
+
+// refDatabase is the database a reference reads: its qualifier, or the
+// session's database for an unqualified name.
+func refDatabase(ref engine.ObjectRef, contextDB string) string {
+	if ref.DB == "" {
+		return contextDB
+	}
+	return ref.DB
 }
 
 // rejectSystemTable turns a systemTableScan hit into resp's refusal:
-// UnsupportedStatement, nameresolve.SystemTableRefusedMessage, the system
-// table recorded as accessed (once), and no rewrite maps, so nothing of a
-// partial rewrite leaks.
-func rejectSystemTable(resp *pb.RewriteSQLResponse, table string, sel nameresolve.Selection) {
+// UnsupportedStatement, the refusal's message, the metadata table recorded
+// as accessed (once), and no rewrite maps, so nothing of a partial rewrite
+// leaks.
+func rejectSystemTable(resp *pb.RewriteSQLResponse, hit systemRefusal, sel nameresolve.Selection) {
 	resp.Code = pb.RewriteCode_UnsupportedStatement
-	resp.Message = nameresolve.SystemTableRefusedMessage(table)
+	resp.Message = hit.message()
 	resp.TableRewrites = nil
 	resp.DatabaseRewrites = nil
 	resp.PrivilegesDeltas = nil
-	if table != "" {
-		recordAccessedWriteUnique(resp, engine.TableTarget{DB: nameresolve.SystemDatabase, Table: table}, sel)
+	if hit.table != "" {
+		recordAccessedWriteUnique(resp, engine.TableTarget{DB: hit.db, Table: hit.table}, sel)
 	}
 }
 
@@ -89,7 +121,7 @@ func RejectSystemTablesOnSuccess(e engine.Engine, ast engine.AST, sql string, se
 	if sel.Mode != nameresolve.ModeDynamic || !nameresolve.StorageIntegritySurfaceActive(sel.Dynamic) {
 		return false
 	}
-	table, refused, _, err := systemTableScan(e, ast, sql, sel)
+	hit, refused, _, err := systemTableScan(e, ast, sql, sel)
 	if err != nil {
 		resp.Code = pb.RewriteCode_UnsupportedStatement
 		resp.Message = nameresolve.StorageIntegrityUnmodelledMessage
@@ -102,7 +134,7 @@ func RejectSystemTablesOnSuccess(e engine.Engine, ast engine.AST, sql string, se
 	if !refused {
 		return false
 	}
-	rejectSystemTable(resp, table, sel)
+	rejectSystemTable(resp, hit, sel)
 	resp.SqlAfterRewrite = sql
 	return true
 }

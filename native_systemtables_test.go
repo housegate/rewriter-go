@@ -48,9 +48,8 @@ func TestSystemTables_AllowlistIsExact(t *testing.T) {
 		"unicode", "warnings", "zeros", "zeros_mt",
 		// clusters (b*, read by the Sentio driver)
 		"clusters",
-		// class (c) read by the Sentio driver / clients; step 2 rewrites them
-		"tables", "columns", "data_skipping_indices", "projections", "parts", "parts_columns",
-		"projection_parts", "projection_parts_columns", "databases", "completions", "mutations",
+		// class (c) read by the Sentio driver; step 2 rewrites them
+		"tables", "columns", "data_skipping_indices", "projections", "parts", "databases", "mutations",
 	}
 	for _, table := range allowed {
 		if !nameresolve.SystemTableAllowed(table) {
@@ -65,6 +64,8 @@ func TestSystemTables_AllowlistIsExact(t *testing.T) {
 		"asynchronous_metrics", "events", "metrics", "detached_parts", "rocksdb", "iceberg_history",
 		"database_replicas", "dropped_tables", "dropped_tables_parts", "detached_tables", "part_log",
 		"zookeeper", "session_log", "future_table_nobody_knows",
+		// class (c) no known client reads through housegate; refused until step 2
+		"completions", "parts_columns", "projection_parts", "projection_parts_columns",
 		// case-sensitive, like ClickHouse (measured on 26.2: system.Tables is UNKNOWN_TABLE)
 		"Tables", "TABLES", "PROCESSES",
 		"", "tables ", "tables\\N",
@@ -85,9 +86,9 @@ func TestSystemTables_AllowedTablesKeepTodaysBehaviour(t *testing.T) {
 		wantCode: pb.RewriteCode_Success, wantSQL: `SELECT * FROM "system"."tables"`})
 	for _, sql := range []string{
 		`SELECT * FROM "system".columns`,
-		"SELECT * FROM information_schema.tables",
-		"SELECT * FROM INFORMATION_SCHEMA.TABLES",
-		"SELECT * FROM information_schema.columns WHERE table_schema = 'phys'",
+		// Not information_schema: ClickHouse names are case-sensitive, so
+		// this database does not exist (UNKNOWN_DATABASE).
+		"SELECT * FROM Information_Schema.tables",
 		"SELECT name FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%'",
 		"SELECT * FROM system.mutations WHERE database = 'phys' AND is_done = 0",
 		"SELECT * FROM system.parts WHERE database = 'phys' AND active",
@@ -214,6 +215,65 @@ func TestSystemTables_RefusedEverywhere(t *testing.T) {
 		{"SELECT hasColumnInTable('system', 'processes', 'query')", "processes"},
 	} {
 		cases = append(cases, sysRefused(c.sql, c.sql, c.table)...)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestSystemTables_DeferredClassCAndInformationSchemaRefused: the class (c)
+// tables no known client reads through housegate (completions, parts_columns,
+// projection_parts, projection_parts_columns) and every table of
+// information_schema show every tenant's names under the shared ClickHouse
+// user. They are refused, in every position and both SI states, with a
+// message that names the issue tracking their filtered logical reads.
+func TestSystemTables_DeferredClassCAndInformationSchemaRefused(t *testing.T) {
+	var cases []tablerefCase
+	for _, table := range []string{"completions", "parts_columns", "projection_parts", "projection_parts_columns"} {
+		sql := "SELECT * FROM system." + table
+		cases = append(cases, sysRefused(sql, sql, table)...)
+		if msg := systemMsg(table); !strings.HasSuffix(msg, "; tenant-filtered metadata reads are tracked in housegate/housegate#218") {
+			t.Errorf("message for system.%s = %q, want the #218 pointer", table, msg)
+		}
+	}
+	// clickhouse-client 25.8+ interactive suggestions (Suggest.cpp,
+	// getLoadSuggestionQueryUsingSystemCompletionsTable).
+	suggestions := "SELECT DISTINCT arrayJoin(extractAll(word, '[\\\\w_]{2,}')) AS res FROM (SELECT word FROM system.completions " +
+		"WHERE context IN ('function', 'table engine', 'format', 'table function', 'data type', 'merge tree setting', 'setting', " +
+		"'aggregate function combinator pair', 'keyword', 'cluster', 'macro', 'policy') UNION ALL SELECT word FROM ( " +
+		"SELECT word, context, ROW_NUMBER() OVER (PARTITION BY context ORDER BY word) AS rn FROM  (SELECT DISTINCT word, context " +
+		"FROM system.completions WHERE context IN ('database', 'table', 'column', 'dictionary'))) WHERE rn <= 10000) WHERE notEmpty(res)"
+	cases = append(cases, sysRefused("clickhouse-client suggestions", suggestions, "completions")...)
+	cases = append(cases, sysRefused("show columns completions", "SHOW COLUMNS FROM completions FROM system", "completions")...)
+
+	isRefused := func(name, sql, db string) []tablerefCase {
+		var out []tablerefCase
+		for _, si := range []bool{false, true} {
+			out = append(out, tablerefCase{name: name, sql: sql, si: si, wantCode: pb.RewriteCode_UnsupportedStatement,
+				wantMsg: nameresolve.MetadataDatabaseRefusedMessage(db), wantSQL: sql})
+		}
+		return out
+	}
+	for _, c := range []struct{ sql, db string }{
+		{"SELECT * FROM information_schema.tables", "information_schema"},
+		{"SELECT * FROM INFORMATION_SCHEMA.TABLES", "INFORMATION_SCHEMA"},
+		{"SELECT * FROM `information_schema`.`tables`", "information_schema"},
+		{"SELECT * FROM information_schema.columns WHERE table_schema = 'phys'", "information_schema"},
+		{"SELECT * FROM information_schema.schemata", "information_schema"},
+		{"SELECT * FROM information_schema.future_view_nobody_knows", "information_schema"},
+		{"SELECT * FROM db1.o JOIN information_schema.tables USING (a)", "information_schema"},
+		{"SELECT * FROM db1.o WHERE a IN (SELECT table_name FROM INFORMATION_SCHEMA.TABLES)", "INFORMATION_SCHEMA"},
+		{"WITH x AS (SELECT * FROM information_schema.columns) SELECT * FROM x", "information_schema"},
+		{"SELECT * FROM view(SELECT * FROM information_schema.schemata)", "information_schema"},
+		{"INSERT INTO db1.o SELECT table_name FROM information_schema.tables", "information_schema"},
+		{"DESCRIBE information_schema.tables", "information_schema"},
+		{"EXISTS information_schema.tables", "information_schema"},
+		{"SHOW CREATE TABLE information_schema.tables", "information_schema"},
+		{"SHOW COLUMNS FROM information_schema.tables", "information_schema"},
+		{"SHOW COLUMNS FROM tables FROM information_schema", "information_schema"},
+		{"SHOW INDEX FROM tables FROM information_schema", "information_schema"},
+		{"SELECT * FROM merge('information_schema', '^tables$')", "information_schema"},
+		{"SELECT hasColumnInTable('information_schema', 'tables', 'table_name')", "information_schema"},
+	} {
+		cases = append(cases, isRefused(c.sql, c.sql, c.db)...)
 	}
 	runTablerefCases(t, cases)
 }

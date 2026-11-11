@@ -371,8 +371,9 @@ func dispatchShowTables(e engine.Engine, ast engine.AST, sql string, info engine
 			return dispatchShowTableTarget(e, sql, info, dyn, resp)
 		}
 		if info.HasTableClause {
-			// A metadata-database target (the system-table allowlist judged it):
-			// echo the original text. Polyglot's Generate happens to round-trip
+			// A system-database target the system-table allowlist admitted (an
+			// information_schema one was refused by the preflight scan): echo
+			// the original text. Polyglot's Generate happens to round-trip
 			// this family byte-for-byte today, but ClickHouse's own
 			// ASTShowColumnsQuery / ASTShowIndexesQuery formatter does not, so
 			// echoing is what keeps the two engines equal on every spelling
