@@ -98,11 +98,11 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 	// storage-integrity object, the SI pipeline answers first and the same
 	// check runs on its would-be Success (RejectSystemTablesOnSuccess, from
 	// finalize), so an SI message keeps precedence.
-	if table, refused, siObject, serr := systemTableScan(e, ast, sql, sel); serr != nil {
+	if hit, refused, siObject, serr := systemTableScan(e, ast, sql, sel); serr != nil {
 		return nil, false, serr
 	} else if refused && !siObject {
 		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
-		rejectSystemTable(resp, table, sel)
+		rejectSystemTable(resp, hit, sel)
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
