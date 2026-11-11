@@ -176,3 +176,94 @@ func accessedNames(r *pb.RewriteSQLResponse) string {
 	}
 	return strings.Join(out, ",")
 }
+
+// TestPlainValuesComments pins housegate/rewriter-go#77: ClickHouse's parser
+// skips comments after VALUES up to the first row and reads everything from
+// that row's '(' on as Values data. A comment inside, between or after the
+// rows is row text to it (25.8 refuses one after a row as unparsable data;
+// 26.8 accepts most, but not a trailing block comment), while Polyglot drops
+// it or regenerates it. It is refused as rewriter-grpc refuses it.
+func TestPlainValuesComments(t *testing.T) {
+	unsupported := pb.RewriteCode_UnsupportedStatement
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		mode := "si_off"
+		if si {
+			mode = "si_v2"
+		}
+		for _, c := range []struct{ name, sql string }{
+			{"line_comment_after_rows", "INSERT INTO db1.o VALUES (1) -- c"},
+			{"block_comment_after_rows", "INSERT INTO db1.o VALUES (1) /* c */"},
+			{"hash_comment_after_rows", "INSERT INTO db1.o VALUES (1) # c"},
+			{"comment_line_after_rows", "INSERT INTO db1.o VALUES (1)\n-- c"},
+			{"comment_in_row", "INSERT INTO db1.o VALUES (1 /* c */)"},
+			{"line_comment_in_row", "INSERT INTO db1.o VALUES (1 -- c\n)"},
+			{"comment_at_row_start", "INSERT INTO db1.o VALUES (/* c */ 1)"},
+			{"comment_between_rows", "INSERT INTO db1.o VALUES (1), /* c */ (2)"},
+			{"comment_before_semicolon", "INSERT INTO db1.o VALUES (1) /* c */ ;"},
+			{"comment_after_semicolon", "INSERT INTO db1.o VALUES (1); -- c"},
+			{"columns", "INSERT INTO db1.o (a, b) VALUES (1, 2) -- c"},
+			{"settings", "INSERT INTO db1.o SETTINGS max_threads = 1 VALUES (1) -- c"},
+			{"columns_settings", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1) -- c"},
+			{"columns_settings_in_row", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1 /* c */)"},
+			{"columns_settings_format_values", "INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (1) -- c"},
+			{"table_named_values", "INSERT INTO db1.values VALUES (1) -- c"},
+			{"si_table", "INSERT INTO db1.t VALUES (1) -- c"},
+		} {
+			cases = append(cases, tablerefCase{name: mode + "/" + c.name, si: si, sql: c.sql,
+				wantCode: unsupported, wantMsg: "statement is not supported"})
+		}
+		cases = append(cases,
+			// ClickHouse's lexer skips a comment before the first row.
+			tablerefCase{name: mode + "/comment_before_rows", si: si, sql: "INSERT INTO db1.o VALUES /* c */ (1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES (1)`, wantAcc: []string{"db1.o"}},
+			tablerefCase{name: mode + "/comment_line_before_rows", si: si, sql: "INSERT INTO db1.o VALUES -- c\n(1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES (1)`},
+			tablerefCase{name: mode + "/comment_before_values", si: si, sql: "INSERT INTO db1.o /* c */ VALUES (1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" /* c */ VALUES (1)`},
+			tablerefCase{name: mode + "/comment_in_settings", si: si, sql: "INSERT INTO db1.o (a) SETTINGS /* c */ max_threads = 1 VALUES (1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" (a) SETTINGS /* c */ max_threads = 1 VALUES (1)`},
+			tablerefCase{name: mode + "/comment_markers_in_strings", si: si, sql: "INSERT INTO db1.o VALUES ('-- a', '/* b */', '# c')",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES ('-- a', '/* b */', '# c')`},
+			tablerefCase{name: mode + "/semicolon", si: si, sql: "INSERT INTO db1.o VALUES (1);",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES (1)`},
+			tablerefCase{name: mode + "/trailing_whitespace", si: si, sql: "INSERT INTO db1.o VALUES (1), (2) ;\t\n",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.o" VALUES (1), (2)`},
+			tablerefCase{name: mode + "/table_named_values", si: si, sql: "INSERT INTO db1.values VALUES (1)",
+				wantCode: pb.RewriteCode_Success, wantSQL: `INSERT INTO phys."db1.values" VALUES (1)`},
+			tablerefCase{name: mode + "/select_comment", si: si, sql: "INSERT INTO db1.o SELECT 1 -- c",
+				wantCode: pb.RewriteCode_Success},
+		)
+	}
+	runTablerefCases(t, cases)
+}
+
+// TestPlainValuesCommentsAllModes: the refusal is the whole-statement parse
+// gate's, so it holds in static and no-rewrite requests too. rewriter-grpc
+// differs there: outside dynamic mode it forwards the rows verbatim, comment
+// included, and lets ClickHouse decide (housegate/rewriter-go#77).
+func TestPlainValuesCommentsAllModes(t *testing.T) {
+	e := newEngine(t)
+	static := []*pb.RewriteOption{{Op: pb.RewriteOp_TableNameRewrite,
+		Value: &pb.RewriteOption_TableNameArgs{TableNameArgs: &pb.RewriteTableNameArgs{
+			StaticArgs: &pb.RewriteTableStaticArgs{TableMap: map[string]string{"o": "p_o"}}}}}}
+	for name, opts := range map[string][]*pb.RewriteOption{"static": static, "none": nil} {
+		for _, sql := range []string{
+			"INSERT INTO o VALUES (1) -- c",
+			"INSERT INTO o VALUES (1 /* c */)",
+			"INSERT INTO o VALUES (1); -- c",
+		} {
+			resp, err := doRewrite(e, sql, opts)
+			if err != nil {
+				t.Fatalf("%s doRewrite(%q): %v", name, sql, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+				t.Errorf("%s %q = %s %q, want UnsupportedStatement", name, sql, resp.GetCode(), resp.GetSqlAfterRewrite())
+			}
+		}
+		resp, err := doRewrite(e, "INSERT INTO o VALUES /* c */ (1)", opts)
+		if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+			t.Errorf("%s comment before rows = %v %v, want Success", name, resp.GetCode(), err)
+		}
+	}
+}

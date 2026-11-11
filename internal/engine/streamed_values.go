@@ -75,18 +75,13 @@ func isClickHouseInsertWhitespace(s string) bool {
 	return strings.Trim(s, " \t\n\r\f\v") == ""
 }
 
-// inlineFormatValues returns the index in toks of the FORMAT keyword of an
-// INSERT … FORMAT Values <rows> whose rows Polyglot parsed into insert.values,
-// or -1. ClickHouse runs such a statement exactly like INSERT … VALUES <rows>
-// (measured on 25.8 and 26.8, any case of the format name), and Polyglot
-// parses it into the same AST, so it is checked and rewritten as the VALUES
-// form, which rewriter-grpc generates too (housegate/rewriter-go#75).
-//
-// The FORMAT keyword is the token right before the first VALUES token outside
-// brackets, which is where the AST's rows begin: a column named format or
-// values sits inside the column list's brackets, and a quoted `Values` is not
-// a VALUES token.
-func inlineFormatValues(ast AST, toks []rawToken) int {
+// valuesRowsKeyword returns the index in toks of the VALUES token that starts
+// the inline rows of an INSERT whose rows Polyglot parsed into insert.values
+// (the VALUES keyword, or the format name of FORMAT Values), or -1. It is the
+// last VALUES token outside brackets: the rows themselves sit inside brackets,
+// with only commas and a semicolon between them, while a table or column named
+// values comes before them, and a quoted `Values` is not a VALUES token.
+func valuesRowsKeyword(ast AST, toks []rawToken) int {
 	_, body, _, err := bodyOf(ast)
 	if err != nil || body == nil || body["query"] != nil {
 		return -1
@@ -94,7 +89,7 @@ func inlineFormatValues(ast AST, toks []rawToken) int {
 	if rows, _ := body["values"].([]any); len(rows) == 0 {
 		return -1
 	}
-	depth := 0
+	depth, last := 0, -1
 	for i, tok := range toks {
 		switch {
 		case isBracketToken(tok.TokenType) && !isClosingBracket(tok.TokenType):
@@ -102,37 +97,127 @@ func inlineFormatValues(ast AST, toks []rawToken) int {
 		case isClosingBracket(tok.TokenType):
 			depth--
 		case depth == 0 && tok.TokenType == "VALUES":
-			if i > 0 && toks[i-1].TokenType == "FORMAT" {
-				return i - 1
-			}
-			return -1
+			last = i
 		}
+	}
+	return last
+}
+
+// inlineFormatValues returns the index in toks of the FORMAT keyword of an
+// INSERT … FORMAT Values <rows> whose rows Polyglot parsed into insert.values,
+// or -1. ClickHouse runs such a statement exactly like INSERT … VALUES <rows>
+// (measured on 25.8 and 26.8, any case of the format name), and Polyglot
+// parses it into the same AST, so it is checked and rewritten as the VALUES
+// form, which rewriter-grpc generates too (housegate/rewriter-go#75).
+//
+// The FORMAT keyword is the token right before the VALUES token where the
+// AST's rows begin (valuesRowsKeyword).
+func inlineFormatValues(ast AST, toks []rawToken) int {
+	if v := valuesRowsKeyword(ast, toks); v > 0 && toks[v-1].TokenType == "FORMAT" {
+		return v - 1
 	}
 	return -1
 }
 
-// inlineFormatValuesTextError refuses a comment in the text after the format
-// name of an inline FORMAT Values statement (inlineFormatValues). ClickHouse
-// starts reading Values data right after the name, where after VALUES its
-// lexer first skips comments, so the comment is row text to it (25.8 refuses
-// it as unparsable data) while Polyglot drops it; rewriter-grpc refuses it
-// too. Only whitespace may come between the tokens after the name.
-func inlineFormatValuesTextError(sql string, toks []rawToken, format int) error {
-	name := toks[format+1]
-	end := name.Span.End
-	for _, tok := range toks[format+2:] {
+// plainValuesRows returns the index in toks of the '(' that opens the first
+// row of a plain INSERT … VALUES <rows> whose rows Polyglot parsed into
+// insert.values, or -1 (housegate/rewriter-go#77).
+func plainValuesRows(ast AST, toks []rawToken) int {
+	v := valuesRowsKeyword(ast, toks)
+	if v < 0 || (v > 0 && toks[v-1].TokenType == "FORMAT") ||
+		v+1 >= len(toks) || toks[v+1].TokenType != "L_PAREN" {
+		return -1
+	}
+	return v + 1
+}
+
+// opaqueValuesData returns the byte offset in sql where ClickHouse starts
+// reading the inline Values data of an INSERT whose column list is followed by
+// a SETTINGS clause, which Polyglot keeps as one opaque command text
+// (`SETTINGS … VALUES <rows>` or `SETTINGS … FORMAT Values <rows>`), and a
+// label for messages; ok is false for any other statement, an INSERT …
+// SETTINGS … SELECT included. The first VALUES, FORMAT, SELECT or WITH token
+// outside brackets after the SETTINGS keyword decides: a SETTINGS clause holds
+// only name = value pairs.
+func opaqueValuesData(ast AST, toks []rawToken) (start int, what string, ok bool) {
+	_, body, _, err := bodyOf(ast)
+	if err != nil || body == nil {
+		return 0, "", false
+	}
+	q, _ := body["query"].(map[string]any)
+	cmd, _ := q["command"].(map[string]any)
+	this, _ := cmd["this"].(string)
+	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(this)), "SETTINGS") {
+		return 0, "", false
+	}
+	depth, settings := 0, false
+	for i, tok := range toks {
+		switch {
+		case isBracketToken(tok.TokenType) && !isClosingBracket(tok.TokenType):
+			depth++
+		case isClosingBracket(tok.TokenType):
+			depth--
+		case depth != 0:
+		case !settings:
+			settings = tok.TokenType == "SETTINGS"
+		case tok.TokenType == "SELECT" || tok.TokenType == "WITH":
+			return 0, "", false
+		case tok.TokenType == "FORMAT":
+			if i+1 < len(toks) && toks[i+1].TokenType == "VALUES" {
+				return toks[i+1].Span.End, "FORMAT " + toks[i+1].Source + " data", true
+			}
+			return 0, "", false
+		case tok.TokenType == "VALUES":
+			if i+1 < len(toks) && toks[i+1].TokenType == "L_PAREN" {
+				return toks[i+1].Span.Start, "VALUES rows", true
+			}
+			return 0, "", false
+		}
+	}
+	return 0, "", false
+}
+
+// valuesDataStart returns the byte offset in sql from which ClickHouse reads
+// an INSERT's inline rows as Values data, and a label for messages, or ok
+// false when the statement has no inline rows. After `FORMAT Values` the data
+// starts right after the format name; after VALUES ClickHouse's parser first
+// skips comments, and the data starts at the first row's '('.
+//
+// Polyglot drops a comment in the data, or regenerates it, while ClickHouse
+// reads it as row text: 25.8 refuses one after a row as unparsable data (26.8
+// accepts most, but not a trailing block comment), and rewriter-grpc refuses
+// every comment in the rows in dynamic mode (housegate/rewriter-go#75, #77).
+// CheckParsedInFull therefore admits only whitespace between the data's
+// tokens, in every mode. rewriter-grpc's static and no-rewrite modes forward
+// the rows verbatim instead, comment included, so those modes differ: this
+// engine refuses the statement there.
+func valuesDataStart(ast AST, toks []rawToken) (start int, what string, ok bool) {
+	if i := inlineFormatValues(ast, toks); i >= 0 {
+		name := toks[i+1]
+		return name.Span.End, "FORMAT " + name.Source + " data", true
+	}
+	if i := plainValuesRows(ast, toks); i >= 0 {
+		return toks[i].Span.Start, "VALUES rows", true
+	}
+	return opaqueValuesData(ast, toks)
+}
+
+// valuesDataTextError returns an error wrapping ErrNotParsedInFull when the
+// text of sql from offset start holds anything but whitespace between or after
+// its tokens, that is, a comment.
+func valuesDataTextError(sql string, toks []rawToken, start int, what string) error {
+	end := start
+	for _, tok := range toks {
 		if tok.Span.Start < end {
 			continue
 		}
 		if !isClickHouseInsertWhitespace(sql[end:tok.Span.Start]) {
-			return fmt.Errorf("%w: comment in FORMAT %s data: %q",
-				ErrNotParsedInFull, name.Source, excerpt(sql[end:]))
+			return fmt.Errorf("%w: comment in %s: %q", ErrNotParsedInFull, what, excerpt(sql[end:]))
 		}
 		end = tok.Span.End
 	}
 	if !isClickHouseInsertWhitespace(sql[end:]) {
-		return fmt.Errorf("%w: comment in FORMAT %s data: %q",
-			ErrNotParsedInFull, name.Source, excerpt(sql[end:]))
+		return fmt.Errorf("%w: comment in %s: %q", ErrNotParsedInFull, what, excerpt(sql[end:]))
 	}
 	return nil
 }

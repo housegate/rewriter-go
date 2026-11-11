@@ -16,6 +16,7 @@
 | Parser guard | `guard.go` | Bracket nesting limit before polyglot parse |
 | Streamed `INSERT … FORMAT Values` | `streamed_values.go` | Same-length stand-in parse for the row-less form Polyglot refuses; `ParseOne` and `DiffSQL` fall back to it only after Polyglot's own parse fails |
 | Inline `INSERT … FORMAT Values <rows>` | `streamed_values.go` | `inlineFormatValues`: Polyglot parses the rows like VALUES rows; both gates treat the statement as its VALUES form (generated as `VALUES`), and a comment after the format name is refused because ClickHouse reads it as row data |
+| Inline Values data | `streamed_values.go` | `valuesDataStart`: where ClickHouse starts reading inline rows as Values data (after the `FORMAT Values` name; at the first row's `(` after `VALUES`, also in the opaque `(cols) SETTINGS … VALUES` form); `CheckParsedInFull` admits only whitespace between the data's tokens, in every mode (#75, #77) |
 | Whole-statement parse gate | `wholestmt.go` | `CheckParsedInFull`: refuse a statement Polyglot did not consume in full |
 | Mid-statement drop gate | `regenerated.go`, `regenerated_lexeme.go`, `regenerated_precedence.go` | `CheckRegenerated`: refuse a statement whose regeneration does not spell the input |
 | AST shape fixtures | `testdata/ast-shapes`, `characterize_test.go` | Snapshot corpus and its regeneration path |
