@@ -175,11 +175,10 @@ func TestPlainValuesComments(t *testing.T) {
 		{"INSERT INTO db1.values VALUES (1)", 6, true},
 		{"INSERT INTO values (a) VALUES (1)", 7, true},
 		// An INSERT whose column list is followed by SETTINGS keeps the rest
-		// as opaque text (opaqueValuesData), read from the same offsets.
+		// as opaque text, checked from SETTINGS on (opaqueInsertTextStart,
+		// TestOpaqueInsertTextComments).
 		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1)", -1, true},
-		{"INSERT INTO db1.o (a) SETTINGS /* c */ max_threads = 1 VALUES /* c */ (1)", -1, true},
 		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (1)", -1, true},
-		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1 -- c", -1, true},
 		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1 /* c */)", -1, false},
 		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values (1) -- c", -1, false},
 		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT Values /* c */ (1)", -1, false},
@@ -212,6 +211,67 @@ func TestPlainValuesComments(t *testing.T) {
 		}
 		if got := plainValuesRows(ast, toks); got != tc.rows {
 			t.Errorf("plainValuesRows(%q) = %d, want %d", tc.sql, got, tc.rows)
+			continue
+		}
+		err = CheckParsedInFull(e, tc.sql, ast)
+		if tc.full {
+			if err != nil {
+				t.Errorf("CheckParsedInFull(%q): %v", tc.sql, err)
+			}
+		} else if !errors.Is(err, ErrNotParsedInFull) {
+			t.Errorf("CheckParsedInFull(%q) = %v, want ErrNotParsedInFull", tc.sql, err)
+		}
+	}
+}
+
+// TestOpaqueInsertTextComments: the text of an INSERT whose column list is
+// followed by SETTINGS is opaque to Polyglot and checked from that keyword on;
+// only whitespace may separate its tokens, as rewriter-grpc refuses any comment
+// in it in dynamic mode (housegate/rewriter-go#84).
+func TestOpaqueInsertTextComments(t *testing.T) {
+	e := newTestEngine(t)
+	for _, tc := range []struct {
+		sql   string
+		start int // byte offset of the SETTINGS keyword, -1 = not opaque
+		full  bool
+	}{
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1)", 22, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1", 22, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT CSV", 22, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT CSV\n1,2", 22, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES ('-- x', '/* y */')", 22, true},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = '/* x */' VALUES (1)", 22, true},
+		{"INSERT INTO db1.o (a) /* c */ SETTINGS max_threads = 1 VALUES (1)", 30, true},
+		{"INSERT INTO db1.settings (a) SETTINGS max_threads = 1 VALUES (1)", 29, true},
+		{"INSERT INTO db1.o (a) SETTINGS /* c */ max_threads = 1 VALUES (1)", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 /* c */ VALUES (1)", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 -- c\nVALUES (1)", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 # c\nVALUES (1)", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES /* c */ (1)", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1) -- c", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT 1 -- c", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 SELECT /* c */ 1", 22, false},
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 /* c */ FORMAT CSV", 22, false},
+		// The data after another format name is not SQL and is not read.
+		{"INSERT INTO db1.o (a) SETTINGS max_threads = 1 FORMAT CSV 1 -- x", 22, true},
+		{"INSERT INTO db1.o SETTINGS max_threads = 1 VALUES (1)", -1, true},
+		{"INSERT INTO db1.o (a) VALUES (1)", -1, true},
+		{"INSERT INTO db1.o (a) SELECT 1 SETTINGS max_threads = 1", -1, true},
+	} {
+		ast, err := e.ParseOne(tc.sql)
+		if err != nil {
+			t.Fatalf("ParseOne(%q): %v", tc.sql, err)
+		}
+		toks, err := tokenizeRaw(e, tc.sql)
+		if err != nil {
+			t.Fatalf("tokenizeRaw(%q): %v", tc.sql, err)
+		}
+		start, _, ok := opaqueInsertTextStart(tc.sql, ast, toks)
+		if !ok {
+			start = -1
+		}
+		if start != tc.start {
+			t.Errorf("opaqueInsertTextStart(%q) = %d, want %d", tc.sql, start, tc.start)
 			continue
 		}
 		err = CheckParsedInFull(e, tc.sql, ast)

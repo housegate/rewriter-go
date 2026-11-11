@@ -39,7 +39,8 @@ var ErrNotParsedInFull = errors.New("engine: parse: statement was not parsed in 
 // whose rows Polyglot parses like VALUES rows, is checked in full, and only
 // whitespace may separate the tokens after the format name. Likewise only
 // whitespace may separate the tokens of plain INSERT … VALUES rows, from the
-// first row's '(' on.
+// first row's '(' on, and the tokens of the opaque text of an INSERT whose
+// column list is followed by SETTINGS, from that keyword on.
 func CheckParsedInFull(e Engine, sql string, ast AST) error {
 	toks, err := tokenizeRaw(e, sql)
 	if err != nil {
@@ -66,8 +67,20 @@ func CheckParsedInFull(e Engine, sql string, ast AST) error {
 	// Inline VALUES rows, after VALUES or FORMAT Values, parse into an AST
 	// that drops the comments ClickHouse would read as row text
 	// (valuesDataStart).
+	// The opaque `(cols) SETTINGS …` text is checked from its SETTINGS
+	// keyword on (opaqueInsertTextStart).
 	if kind, kerr := NodeKind(ast); kerr == nil && kind == NodeInsert {
-		if start, what, ok := valuesDataStart(ast, toks); ok {
+		if start, end, ok := opaqueInsertTextStart(sql, ast, toks); ok {
+			var text []rawToken
+			for _, tok := range toks {
+				if tok.Span.End <= end {
+					text = append(text, tok)
+				}
+			}
+			if err := valuesDataTextError(sql[:end], text, start, "opaque INSERT text"); err != nil {
+				return err
+			}
+		} else if start, what, ok := valuesDataStart(ast, toks); ok {
 			if err := valuesDataTextError(sql, toks, start, what); err != nil {
 				return err
 			}
