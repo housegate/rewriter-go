@@ -164,14 +164,57 @@ var tableNameIntroducers = map[string]bool{
 // user, DATABASE and SCHEMA resolve the same way but are ordinary column
 // names, so a bare one is left alone (a known residual: it reaches the
 // function only when the statement has no such column).
+//
+// ClickHouse 26.6 / 26.8 functions that allow omitting their parentheses are
+// called by their bare name too: session_user (measured on 26.8.37.168,
+// `SELECT SESSION_USER` returns the shared user), currentRequestURL and
+// currentHandler. And since 26.5 a bare function name as a higher-order
+// function's first argument is that function applied to the lambda arguments
+// when no column or alias has the name and the function takes arguments:
+// `arrayMap(currentSchemas, [true])` returns the physical session database
+// and `arrayMap(pgGetUserById, [toUInt32(0)])` the shared user (measured), so
+// currentSchemas / current_schemas / pgGetUserById / pg_get_userbyid and the
+// AI functions (ExternalCallFunction) are matched bare as well. A column of
+// one of these names is refused too, deliberately. Mirrors rewriter-grpc
+// firstBareDeploymentIdentityName.
 var bareDeploymentIdentityNames = map[string]bool{
 	"currentdatabase": true, "current_database": true, "currentuser": true, "current_user": true,
+	"session_user": true, "currentrequesturl": true, "currenthandler": true,
+	"currentschemas": true, "current_schemas": true, "pggetuserbyid": true, "pg_get_userbyid": true,
+}
+
+// externalCallFunctions are ClickHouse 26.8's AI functions (and, matched
+// case-insensitively, their AI* aliases). They send their text to the LLM
+// provider of a named collection that the call's `credentials` parameter or
+// the ai_function_*_default_credentials setting names: generally available
+// (allow_experimental_ai_functions is obsolete), and a SQL-created
+// collection is admitted by default (ai_function_allow_sql_named_collections).
+// Whether a collection the one shared ClickHouse user may use exists is
+// deployment configuration this engine cannot see, so they are refused like
+// a deployment-identity call, with the same message, as rewriter-grpc
+// isExternalCallFunctionName.
+var externalCallFunctions = map[string]bool{
+	"aigenerate": true, "aiclassify": true, "aiextract": true, "aitranslate": true,
+	"aiembed": true, "aifilter": true, "airedact": true, "aisimilarity": true,
+}
+
+// ExternalCallFunction reports whether a call of name makes an outbound call
+// no tenant policy governs (externalCallFunctions).
+func ExternalCallFunction(name string) bool {
+	return externalCallFunctions[strings.ToLower(name)]
 }
 
 // DeploymentIdentityFunction reports whether a call of name reveals the
 // shared deployment (deploymentIdentityFunctions).
 func DeploymentIdentityFunction(name string) bool {
 	return deploymentIdentityFunctions[strings.ToLower(name)]
+}
+
+// refusedCallName reports whether a call or bare reference of name is
+// refused with FunctionNotAccessibleMessage: a deployment-identity function
+// or an external-call function.
+func refusedCallName(name string) bool {
+	return DeploymentIdentityFunction(name) || ExternalCallFunction(name)
 }
 
 // FunctionNotAccessibleMessage is the refusal of a deployment-identity call.
@@ -262,11 +305,11 @@ func FirstDeploymentIdentityCall(e Engine, sql string) (name string, ok bool, er
 			if !ok {
 				unquoted = tk.Text
 			}
-			if DeploymentIdentityFunction(unquoted) {
+			if refusedCallName(unquoted) {
 				return unquoted, true, nil
 			}
 		case !isQuotedLexeme(tk.TokenType) && isWordStart(tk.Source):
-			if DeploymentIdentityFunction(tk.Source) {
+			if refusedCallName(tk.Source) {
 				return tk.Source, true, nil
 			}
 		}
@@ -295,6 +338,10 @@ func FirstDeploymentIdentityName(e Engine, ast AST, sql string) (name string, ok
 	return name, ok, nil
 }
 
+func bareRefusedName(name string) bool {
+	return bareDeploymentIdentityNames[strings.ToLower(name)] || ExternalCallFunction(name)
+}
+
 func firstBareIdentityName(node any) (string, bool) {
 	switch n := node.(type) {
 	case []any:
@@ -306,13 +353,13 @@ func firstBareIdentityName(node any) (string, bool) {
 	case map[string]any:
 		if col, ok := n["column"].(map[string]any); ok && col["table"] == nil {
 			if nm, ok := col["name"].(map[string]any); ok {
-				if s, ok := nm["name"].(string); ok && bareDeploymentIdentityNames[strings.ToLower(s)] {
+				if s, ok := nm["name"].(string); ok && bareRefusedName(s) {
 					return s, true
 				}
 			}
 		}
 		if fn, ok := n["function"].(map[string]any); ok && fn["no_parens"] == true {
-			if s, ok := fn["name"].(string); ok && bareDeploymentIdentityNames[strings.ToLower(s)] {
+			if s, ok := fn["name"].(string); ok && bareRefusedName(s) {
 				return s, true
 			}
 		}
