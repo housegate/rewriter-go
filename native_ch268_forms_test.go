@@ -447,3 +447,75 @@ func TestDeploymentIdentity_BareNamesOfNonCallableFunctionsAreOrdinaryColumns(t 
 		}
 	}
 }
+
+// TestDeploymentIdentity_ClickHouse268FixRoundTwoRoutes mirrors rewriter-grpc
+// MetadataAccess.ClickHouse268FixRoundTwoRoutes (Step 5 fix round 2): a
+// refused name after a keyword inside a keyword-operand function or after
+// IS [NOT] DISTINCT FROM in opaque text is an expression, not an object
+// name (FirstBareRefusedNameInText honours object-name introducers only
+// outside every bracket); an Identifier parameter in a VALUES row is
+// refused; an ALTER action's column definition is an object name. With the
+// SI surface active this engine's SI ALTER path refuses an ALTER … UPDATE of
+// an ordinary table carrying a FROM inside an expression first, with
+// `statement is not supported` (a pre-existing message difference).
+func TestDeploymentIdentity_ClickHouse268FixRoundTwoRoutes(t *testing.T) {
+	e := newEngine(t)
+	refused := []struct{ sql, name string }{
+		{"ALTER TABLE db1.o UPDATE s = trim(BOTH ' ' FROM SESSION_USER) WHERE 1", "SESSION_USER"},
+		{"ALTER TABLE db1.o UPDATE s = trim(LEADING 'x' FROM currentUser) WHERE 1", "currentUser"},
+		{"ALTER TABLE db1.o UPDATE s = trim(BOTH ' ' FROM `session_user`) WHERE 1", "session_user"},
+		{"ALTER TABLE db1.o UPDATE s = substring(SESSION_USER FROM 1 FOR 3) WHERE 1", "SESSION_USER"},
+		{"ALTER TABLE db1.o MODIFY COLUMN s String DEFAULT trim(BOTH ' ' FROM SESSION_USER)", "SESSION_USER"},
+		{"ALTER TABLE db1.o UPDATE s = 'z' WHERE s IS DISTINCT FROM SESSION_USER", "SESSION_USER"},
+		{"ALTER TABLE db1.o UPDATE s = 'z' WHERE s IS NOT DISTINCT FROM current_user", "current_user"},
+		{"ALTER TABLE db1.o UPDATE s = toString(EXTRACT(DAY FROM now())) || currentUser WHERE 1", "currentUser"},
+		{"INSERT INTO db1.o (s) VALUES (toString(tuple(SESSION_USER).1))", "SESSION_USER"},
+	}
+	for _, si := range []bool{false, true} {
+		for _, c := range refused {
+			resp, err := doRewrite(e, c.sql, tablerefOpts(si))
+			if err != nil {
+				t.Fatalf("si=%v %s: %v", si, c.sql, err)
+			}
+			want := "function " + c.name + " is not accessible"
+			if resp.GetCode() != pb.RewriteCode_UnsupportedStatement ||
+				(resp.GetMessage() != want && !(si && resp.GetMessage() == "statement is not supported")) {
+				t.Errorf("si=%v %s: code=%v message=%q, want %q", si, c.sql, resp.GetCode(), resp.GetMessage(), want)
+			}
+		}
+		for _, sql := range []string{
+			"INSERT INTO db1.o (s) VALUES ({f:Identifier})",
+			"INSERT INTO db1.o (s) FORMAT Values ({f:Identifier})",
+			"INSERT INTO db1.o (s) VALUES ('a'), ({ f : Identifier })",
+		} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil || resp.GetCode() != pb.RewriteCode_UnsupportedStatement || resp.GetMessage() != "statement is not supported" {
+				t.Errorf("si=%v %s: code=%v message=%q err=%v", si, sql, resp.GetCode(), resp.GetMessage(), err)
+			}
+		}
+		for _, sql := range []string{
+			"ALTER TABLE db1.o UPDATE s = 'z' WHERE s IN session_user",
+			"ALTER TABLE db1.o UPDATE a = position('a' IN SESSION_USER) WHERE 1",
+			"INSERT INTO db1.o (s) SETTINGS max_threads = 1 SELECT trim(BOTH ' ' FROM SESSION_USER)",
+		} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err == nil && resp.GetCode() == pb.RewriteCode_Success {
+				t.Errorf("si=%v %s: Success, want a refusal", si, sql)
+			}
+		}
+		for _, sql := range []string{
+			"ALTER TABLE db1.o ADD COLUMN session_user String",
+			"ALTER TABLE db1.o DROP COLUMN session_user",
+			"ALTER TABLE db1.o RENAME COLUMN session_user TO s2",
+			"ALTER TABLE db1.o ADD COLUMN c String AFTER session_user",
+			"ALTER TABLE db1.o MODIFY COLUMN s String DEFAULT substring(s FROM 1)",
+			"INSERT INTO db1.o (s) VALUES ('{f:Identifier}')",
+			"INSERT INTO db1.o (s) VALUES ({v:String})",
+		} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+				t.Errorf("si=%v %s: code=%v message=%q err=%v, want Success", si, sql, resp.GetCode(), resp.GetMessage(), err)
+			}
+		}
+	}
+}

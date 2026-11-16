@@ -396,21 +396,30 @@ func bareRefusedName(name string) bool { return BareRefusedName(name) }
 
 // bareNameIntroducers are the words after which a bare name in opaque text
 // is an object or column name being declared or addressed, not an
-// expression (a table, a column, an index, a database).
+// expression (a table, a column, an index, a database). They are honoured
+// only outside every bracket (FirstBareRefusedNameInText): inside one the
+// same words introduce expressions (`trim(BOTH ' ' FROM SESSION_USER)`,
+// `substring(x FROM 1)`, `position('a' IN SESSION_USER)`). IN and EXISTS are
+// not introducers at all (measured on 26.8.37.168, `'default' IN
+// session_user` is 1: the operand resolves as the function), and a FROM
+// after DISTINCT (`IS [NOT] DISTINCT FROM x`) is an expression operand.
 var bareNameIntroducers = map[string]bool{
-	"into": true, "table": true, "exists": true, "view": true, "dictionary": true, "to": true,
-	"from": true, "join": true, "in": true, "use": true, "describe": true, "desc": true,
+	"into": true, "table": true, "view": true, "dictionary": true, "to": true,
+	"from": true, "join": true, "use": true, "describe": true, "desc": true,
 	"database": true, "column": true, "index": true, "projection": true, "constraint": true,
 	"statistics": true, "after": true,
 }
 
 // FirstBareRefusedNameInText returns the first unqualified bare word or
-// quoted identifier of text, in text order, that BareRefusedName refuses:
-// not after or before a `.`, and not right after a bareNameIntroducers word.
-// It reads the opaque texts Polyglot leaves unstructured (a command node, raw
-// ALTER actions, a view's column-list items, the query of an INSERT with a
-// SETTINGS clause), where the AST walk of FirstDeploymentIdentityName sees
-// no column node: measured on 26.8.37.168,
+// quoted identifier of text, in text order, that BareRefusedName refuses.
+// It fails closed: a name is skipped only when it is provably not an
+// expression — after a `.` (a qualified name's last part), or right after a
+// bareNameIntroducers word outside every bracket (except a FROM after
+// DISTINCT). A name followed by `.` is refused (`SESSION_USER.1` reads the
+// function's result). It reads the opaque texts Polyglot leaves unstructured
+// (a command node, raw ALTER actions, a view's column-list items, the query
+// of an INSERT with a SETTINGS clause), where the AST walk of
+// FirstDeploymentIdentityName sees no column node: measured on 26.8.37.168,
 // `INSERT INTO t (s) SETTINGS max_threads = 1 SELECT arrayMap(currentSchemas, [true])`
 // writes the physical database name into t, and
 // `ALTER TABLE t MODIFY COLUMN s String DEFAULT SESSION_USER` stores the
@@ -420,18 +429,30 @@ func FirstBareRefusedNameInText(e Engine, text string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	depth := 0
 	for i, tk := range toks {
+		switch tk.TokenType {
+		case "L_PAREN", "L_BRACKET":
+			depth++
+			continue
+		case "R_PAREN", "R_BRACKET":
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
 		if tk.Source == "" {
 			continue
 		}
 		if i > 0 && toks[i-1].TokenType == "DOT" {
 			continue
 		}
-		if i+1 < len(toks) && toks[i+1].TokenType == "DOT" {
-			continue
-		}
-		if i > 0 && !isQuotedLexeme(toks[i-1].TokenType) && bareNameIntroducers[strings.ToLower(toks[i-1].Source)] {
-			continue
+		if depth == 0 && i > 0 && !isQuotedLexeme(toks[i-1].TokenType) {
+			prev := strings.ToLower(toks[i-1].Source)
+			afterDistinct := prev == "from" && i > 1 && strings.EqualFold(toks[i-2].Source, "distinct")
+			if bareNameIntroducers[prev] && !afterDistinct {
+				continue
+			}
 		}
 		var name string
 		switch {
@@ -453,6 +474,11 @@ func FirstBareRefusedNameInText(e Engine, text string) (string, bool, error) {
 	return "", false, nil
 }
 
+func hasNullKey(m map[string]any, key string) bool {
+	v, ok := m[key]
+	return ok && v == nil
+}
+
 func firstBareIdentityName(node any) (string, bool) {
 	switch n := node.(type) {
 	case []any:
@@ -462,7 +488,10 @@ func firstBareIdentityName(node any) (string, bool) {
 			}
 		}
 	case map[string]any:
-		if col, ok := n["column"].(map[string]any); ok && col["table"] == nil {
+		// A column reference carries a "table" key (null when unqualified);
+		// a column definition (`ADD COLUMN session_user String`) has none and
+		// names an object, not an expression, as in rewriter-grpc.
+		if col, ok := n["column"].(map[string]any); ok && hasNullKey(col, "table") {
 			if nm, ok := col["name"].(map[string]any); ok {
 				if s, ok := nm["name"].(string); ok && bareRefusedName(s) {
 					return s, true
