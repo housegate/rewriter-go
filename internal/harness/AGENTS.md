@@ -69,7 +69,7 @@ published corpus.
   `StorageIntegrityArgs.reserved_databases` (read by the engines under V2
   only).
 - Every case whose name starts with `si_tr_` (table-reference hardening) must set a non-empty `dynamic.protected_databases` string array (rule R9), sent as `RewriteTableDynamicArgs.protected_databases`.
-- Every input is ClickHouse SQL: it parses under ClickHouse 26.3 with `implicit_select = 0`. An input ClickHouse refuses proves nothing about the table-reference invariant, and rewriter-grpc, which uses ClickHouse's parser, can only answer `SyntaxError` for it. Check new inputs with `clickhouse local` (any 26.3.x; `clickhouse local` enables `implicit_select` by default, hence the `SET`):
+- Every input is ClickHouse SQL: it parses under ClickHouse 26.3 with `implicit_select = 0`, except the `si_tr_ch268_*` cases, which pin syntax ClickHouse 26.4 – 26.8 added and parse under the 26.8.37.168 servers and rewriter-grpc's embedded parser (check those with a 26.8 `clickhouse local`). An input ClickHouse refuses proves nothing about the table-reference invariant, and rewriter-grpc, which uses ClickHouse's parser, can only answer `SyntaxError` for it. Check new inputs with `clickhouse local` (any 26.3.x; `clickhouse local` enables `implicit_select` by default, hence the `SET`):
 
   ```bash
   python3 - <<'EOF'
