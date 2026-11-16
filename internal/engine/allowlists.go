@@ -371,28 +371,25 @@ func firstBareRefusedNameInOpaqueText(e Engine, ast AST, sql string) (string, bo
 	return "", false, nil
 }
 
-// bareIdentityNamesCannotCall are deployment-identity functions measured on
-// 26.8.37.168 as not callable by a bare name (they take no argument, so a
-// higher-order function does not apply them, and they do not allow omitting
-// parentheses: `SELECT hostName` and `arrayMap(hostName, ['x'])` are
-// UNKNOWN_IDENTIFIER), or callable only with a constant argument a lambda
-// cannot supply (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN). They are
-// refused bare anyway, for one rule over every identity name; so is a bare
-// string-lookup name (`arrayMap(dictGet, …)` is ILLEGAL_TYPE_OF_ARGUMENT:
-// the lookup target must be constant). A column of one of these names is
-// refused too, deliberately.
-var bareIdentityNamesCannotCall = map[string]bool{
-	"hostname": true, "fqdn": true, "fullhostname": true, "serveruuid": true,
-	"authenticateduser": true, "authuser": true, "getmacro": true,
-}
-
 // BareRefusedName reports whether an unqualified bare name (not followed by
 // a call's parentheses) is refused with FunctionNotAccessibleMessage, as
-// rewriter-grpc isBareRefusedName.
+// rewriter-grpc isBareRefusedName: only the names a ClickHouse 26.8.37.168
+// server calls by a bare name (bareDeploymentIdentityNames) plus every AI
+// function.
+//
+// Measured NOT callable bare on 26.8.37.168, so left out (a column of that
+// name stays an ordinary column; their call form `name(...)` is still
+// refused): hostName, FQDN, fullHostName, serverUUID, authenticatedUser,
+// authUser (`SELECT hostName` and `arrayMap(hostName, ['x'])` are
+// UNKNOWN_IDENTIFIER: no argument, parentheses not optional); getMacro
+// (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN: the argument must be a
+// constant String); joinGet, dictGet*, hasColumnInTable,
+// naiveBayesClassifier* (`arrayMap(dictGet, ['d'], ['a'], [1])` is
+// ILLEGAL_TYPE_OF_ARGUMENT, `arrayMap(dictGetString, …)` and
+// `arrayMap(naiveBayesClassifier, …)` ILLEGAL_COLUMN: the target must be a
+// constant). Re-measure on a ClickHouse bump.
 func BareRefusedName(name string) bool {
-	lower := strings.ToLower(name)
-	return bareDeploymentIdentityNames[lower] || bareIdentityNamesCannotCall[lower] ||
-		ExternalCallFunction(name) || IsStringLookup(name)
+	return bareDeploymentIdentityNames[strings.ToLower(name)] || ExternalCallFunction(name)
 }
 
 func bareRefusedName(name string) bool { return BareRefusedName(name) }

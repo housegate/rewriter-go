@@ -1,6 +1,7 @@
 package rewriter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -345,8 +346,7 @@ func TestTableRef_ClickHouse264To268StatementForms(t *testing.T) {
 // ALTER), measured on 26.8.37.168 (`INSERT INTO t (s) SETTINGS max_threads =
 // 1 SELECT arrayMap(currentSchemas, [true])` stores the physical database),
 // the pre-existing bare currentUser / currentDatabase in the same positions,
-// an APPLY column transformer, the other identity and string-lookup names
-// bare, and an Identifier query parameter in an expression (`statement is
+// an APPLY column transformer, and an Identifier query parameter in an expression (`statement is
 // not supported`).
 func TestDeploymentIdentity_ClickHouse268FixRoundOneRoutes(t *testing.T) {
 	refused := []struct{ sql, name string }{
@@ -368,18 +368,6 @@ func TestDeploymentIdentity_ClickHouse268FixRoundOneRoutes(t *testing.T) {
 		{"ALTER TABLE db1.o MODIFY COLUMN s String DEFAULT currentDatabase", "currentDatabase"},
 		{"INSERT INTO db1.o (s) SETTINGS max_threads = 1 VALUES (currentUser)", "currentUser"},
 		{"INSERT INTO db1.o (s) VALUES (current_user)", "current_user"},
-		{"SELECT arrayMap(hostName, ['x'])", "hostName"},
-		{"SELECT arrayMap(FQDN, ['x'])", "FQDN"},
-		{"SELECT arrayMap(fullHostName, ['x'])", "fullHostName"},
-		{"SELECT arrayMap(serverUUID, ['x'])", "serverUUID"},
-		{"SELECT arrayMap(authenticatedUser, ['x'])", "authenticatedUser"},
-		{"SELECT authUser", "authUser"},
-		{"SELECT hostName", "hostName"},
-		{"SELECT arrayMap(getMacro, ['x'])", "getMacro"},
-		{"SELECT arrayMap(dictGet, ['d'], ['a'], [1])", "dictGet"},
-		{"SELECT arrayMap(joinGet, ['t'], ['a'], [1])", "joinGet"},
-		{"SELECT arrayMap(hasColumnInTable, ['db'], ['t'], ['a'])", "hasColumnInTable"},
-		{"SELECT arrayMap(naiveBayesClassifier, ['d'], ['t'])", "naiveBayesClassifier"},
 	}
 	var cases []tablerefCase
 	for _, si := range []bool{false, true} {
@@ -407,4 +395,55 @@ func TestDeploymentIdentity_ClickHouse268FixRoundOneRoutes(t *testing.T) {
 		}
 	}
 	runTablerefCases(t, cases)
+}
+
+// TestDeploymentIdentity_BareNamesOfNonCallableFunctionsAreOrdinaryColumns
+// mirrors rewriter-grpc
+// MetadataAccess.BareNamesOfNonCallableFunctionsAreOrdinaryColumns (Step 5
+// fix round 1b): functions measured NOT callable by a bare name on
+// 26.8.37.168 (hostName, FQDN, serverUUID, getMacro, the lookups, …) are
+// ordinary column names when bare, in the AST and in opaque text; their call
+// form stays refused.
+func TestDeploymentIdentity_BareNamesOfNonCallableFunctionsAreOrdinaryColumns(t *testing.T) {
+	e := newEngine(t)
+	for _, si := range []bool{false, true} {
+		for _, sql := range []string{
+			"SELECT hostname FROM db1.o WHERE hostname = 'h' ORDER BY hostname",
+			"SELECT fqdn, serverUUID, getMacro, dictGet, naiveBayesClassifier FROM db1.o",
+			"SELECT arrayMap(hostName, ['x']) FROM db1.o",
+			"SELECT arrayMap(dictGet, ['d'], ['a'], [1]) FROM db1.o",
+			"ALTER TABLE db1.o UPDATE hostname = 'x' WHERE hostname = 'y'",
+			"ALTER TABLE db1.o MODIFY COLUMN hostname String DEFAULT 'h'",
+			"INSERT INTO db1.o (hostname) VALUES ('x')",
+			"INSERT INTO db1.o (hostname) SETTINGS max_threads = 1 VALUES ('x')",
+			"INSERT INTO db1.o (hostname) SELECT hostname FROM db1.p",
+		} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil {
+				t.Fatalf("si=%v %s: %v", si, sql, err)
+			}
+			if resp.GetCode() != pb.RewriteCode_Success {
+				t.Errorf("si=%v %s: code=%v message=%q, want Success", si, sql, resp.GetCode(), resp.GetMessage())
+				continue
+			}
+			if got := resp.GetSqlAfterRewrite(); !strings.Contains(got, `phys."db1.o"`) && !strings.Contains(got, "phys.`db1.o`") {
+				t.Errorf("si=%v %s: not rewritten: %s", si, sql, got)
+			}
+		}
+		for _, sql := range []string{"SELECT hostName()", "SELECT getMacro('shard')", "SELECT FQDN() FROM db1.o"} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil || resp.GetCode() != pb.RewriteCode_UnsupportedStatement {
+				t.Errorf("si=%v %s: code=%v err=%v, want UnsupportedStatement", si, sql, resp.GetCode(), err)
+			}
+		}
+		for _, sql := range []string{
+			"CREATE TABLE IF NOT EXISTS session_user (a UInt64) ENGINE = MergeTree ORDER BY a",
+			"INSERT INTO current_user (a) VALUES (1)",
+		} {
+			resp, err := doRewrite(e, sql, tablerefOpts(si))
+			if err != nil || resp.GetCode() != pb.RewriteCode_Success {
+				t.Errorf("si=%v %s: code=%v message=%q err=%v, want Success", si, sql, resp.GetCode(), resp.GetMessage(), err)
+			}
+		}
+	}
 }
