@@ -1,7 +1,11 @@
-# ClickHouse 26.8.1.368 system.functions: name, is_aggregate, case_insensitive, alias_to (clickhouse local -q "SELECT name, is_aggregate, case_insensitive, alias_to FROM system.functions ORDER BY name FORMAT TSV")
+# ClickHouse 26.8.37.168 system.functions: name, is_aggregate, case_insensitive, alias_to (clickhouse-client -q "SELECT name, is_aggregate, case_insensitive, alias_to FROM system.functions ORDER BY name FORMAT TSV" against clickhouse/clickhouse-server:26.8.37.168)
 AIClassify	0	0	aiClassify
+AIEmbed	0	0	aiEmbed
 AIExtract	0	0	aiExtract
+AIFilter	0	0	aiFilter
 AIGenerate	0	0	aiGenerate
+AIRedact	0	0	aiRedact
+AISimilarity	0	0	aiSimilarity
 AITranslate	0	0	aiTranslate
 BIT_AND	1	1	groupBitAnd
 BIT_OR	1	1	groupBitOr
@@ -182,6 +186,10 @@ __bitBoolMaskOr	0	0
 __bitSwapLastTwo	0	0	
 __bitWrapperFunc	0	0	
 __getScalar	0	0	
+__groupingForCube	0	0	
+__groupingForGroupingSets	0	0	
+__groupingForRollup	0	0	
+__groupingOrdinary	0	0	
 __patchPartitionID	0	0	
 __scalarSubqueryResult	0	0	
 __toYearCalendarOnly	0	0	
@@ -215,7 +223,10 @@ aggThrow	1	0
 aiClassify	0	0	
 aiEmbed	0	0	
 aiExtract	0	0	
+aiFilter	0	0	
 aiGenerate	0	0	
+aiRedact	0	0	
+aiSimilarity	0	0	
 aiTranslate	0	0	
 alphaTokens	0	0	
 analysisOfVariance	1	1	
@@ -459,8 +470,10 @@ cramersVBiasCorrected	1	0
 cume_dist	1	0	
 curdate	0	1	today
 currentDatabase	0	0	
+currentHandler	0	0	
 currentProfiles	0	0	
 currentQueryID	0	0	
+currentRequestURL	0	0	
 currentRoles	0	0	
 currentSchemas	0	1	
 currentUser	0	0	
@@ -668,6 +681,7 @@ format	0	0
 formatDateTime	0	0	
 formatDateTimeInJodaSyntax	0	0	
 formatQuery	0	0	
+formatQueryFromJSON	0	0	
 formatQueryOrNull	0	0	
 formatQuerySingleLine	0	0	
 formatQuerySingleLineOrNull	0	0	
@@ -723,6 +737,7 @@ getSettingOrDefault	0	0
 getSizeOfEnumType	0	0	
 getSubcolumn	0	0	
 getTypeSerializationStreams	0	0	
+gini	1	0	
 globalIn	0	0	
 globalInIgnoreSet	0	0	
 globalNotIn	0	0	
@@ -971,6 +986,7 @@ mapSubtract	0	0
 mapUpdate	0	0	
 mapValues	0	0	
 match	0	0	
+matchCaseInsensitive	0	0	
 matchPhrase	0	0	hasPhrase
 materialize	0	0	
 max	1	1	
@@ -997,6 +1013,7 @@ medianTDigestWeighted	1	0	quantileTDigestWeighted
 medianTiming	1	0	quantileTiming
 medianTimingWeighted	1	0	quantileTimingWeighted
 mergeTreePartInfo	0	1	
+mergedJSONPatch	1	0	
 metroHash64	0	0	
 mid	0	1	substring
 midpoint	0	1	
@@ -1100,10 +1117,13 @@ normalizedQueryHashKeepNames	0	0
 not	0	1	
 notEmpty	0	0	
 notEquals	0	0	
+notHas	0	0	
 notILike	0	0	
 notIn	0	0	
 notInIgnoreSet	0	0	
 notLike	0	0	
+notMatch	0	0	
+notMatchCaseInsensitive	0	0	
 notNullIn	0	0	
 notNullInIgnoreSet	0	0	
 nothing	1	0	
@@ -1166,6 +1186,7 @@ parseDateTimeInJodaSyntaxOrNull	0	0
 parseDateTimeInJodaSyntaxOrZero	0	0	
 parseDateTimeOrNull	0	0	
 parseDateTimeOrZero	0	0	
+parseQueryToJSON	0	0	
 parseReadableSize	0	0	
 parseReadableSizeOrNull	0	0	
 parseReadableSizeOrZero	0	0	
@@ -1178,6 +1199,10 @@ percentRank	1	0
 percent_rank	1	1	percentRank
 perimeterCartesian	0	0	
 perimeterSpherical	0	0	
+pgGetUserById	0	1	
+pgTableIsVisible	0	1	
+pg_get_userbyid	0	1	pgGetUserById
+pg_table_is_visible	0	1	pgTableIsVisible
 pi	0	1	
 plus	0	0	
 pmod	0	1	positiveModulo
@@ -1503,6 +1528,7 @@ theilsU	1	0
 throwIf	0	0	
 tid	0	0	
 timeDiff	0	1	
+timeSeriesBottomKMasks	1	0	
 timeSeriesChangesToGrid	1	0	
 timeSeriesCopyTag	0	0	
 timeSeriesCopyTags	0	0	
@@ -1522,6 +1548,7 @@ timeSeriesInstantRateToGrid	1	0
 timeSeriesJoinTags	0	0	
 timeSeriesLastToGrid	1	0	timeSeriesResampleToGridWithStaleness
 timeSeriesLastTwoSamples	1	0	
+timeSeriesLimitKMasks	1	0	
 timeSeriesPredictLinearToGrid	1	0	
 timeSeriesRange	0	0	
 timeSeriesRateToGrid	1	0	
@@ -1535,6 +1562,7 @@ timeSeriesStoreTags	0	0
 timeSeriesTagsGroupToTags	0	0	timeSeriesGroupToTags
 timeSeriesTagsToGroup	0	0	
 timeSeriesThrowDuplicateSeriesIf	0	0	
+timeSeriesTopKMasks	1	0	
 timeSlot	0	0	
 timeSlots	0	0	
 timeZone	0	1	timezone
