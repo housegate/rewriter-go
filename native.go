@@ -95,8 +95,18 @@ func finalize(resp *pb.RewriteSQLResponse, ast engine.AST, sql string, ec pb.Exi
 				column := false
 				if err == nil && !found {
 					column, err = engine.HasDeploymentIdentityColumn(ast)
+					// Then an Identifier query parameter outside a database
+					// or table position (T2 refused those): ClickHouse
+					// substitutes the identifier before analysis, so
+					// `SELECT {f:Identifier}` with f = session_user calls
+					// the function (measured on 26.8.37.168), and the
+					// request carries no parameter values to check.
+					param := false
 					if err == nil && !column {
-						return
+						param, err = engine.HasIdentifierParameter(ast)
+						if err == nil && !param {
+							return
+						}
 					}
 				}
 				// A refusal carries no rewrite maps (as rewriter-grpc's

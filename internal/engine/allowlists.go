@@ -334,12 +334,126 @@ func FirstDeploymentIdentityName(e Engine, ast AST, sql string) (name string, ok
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return "", false, fmt.Errorf("engine: decode: %w", err)
 	}
-	name, ok = firstBareIdentityName(root)
-	return name, ok, nil
+	if name, ok = firstBareIdentityName(root); ok {
+		return name, true, nil
+	}
+	return firstBareRefusedNameInOpaqueText(e, ast, sql)
 }
 
-func bareRefusedName(name string) bool {
-	return bareDeploymentIdentityNames[strings.ToLower(name)] || ExternalCallFunction(name)
+// firstBareRefusedNameInOpaqueText scans the texts Polyglot leaves opaque
+// (FirstBareRefusedNameInText): the whole statement for a command node, raw
+// ALTER actions and view column-list items, and an INSERT's unstructured
+// query text.
+func firstBareRefusedNameInOpaqueText(e Engine, ast AST, sql string) (string, bool, error) {
+	var texts []string
+	kind, err := NodeKind(ast)
+	if err != nil {
+		return "", false, err
+	}
+	if kind == NodeCommand {
+		texts = append(texts, sql)
+	}
+	opaque, err := OpaqueStatementTexts(e, ast, sql)
+	if err != nil {
+		return "", false, err
+	}
+	texts = append(texts, opaque...)
+	if text, ok, ierr := OpaqueInsertQueryText(ast); ierr != nil {
+		return "", false, ierr
+	} else if ok {
+		texts = append(texts, text)
+	}
+	for _, text := range texts {
+		if name, ok, terr := FirstBareRefusedNameInText(e, text); terr != nil || ok {
+			return name, ok, terr
+		}
+	}
+	return "", false, nil
+}
+
+// bareIdentityNamesCannotCall are deployment-identity functions measured on
+// 26.8.37.168 as not callable by a bare name (they take no argument, so a
+// higher-order function does not apply them, and they do not allow omitting
+// parentheses: `SELECT hostName` and `arrayMap(hostName, ['x'])` are
+// UNKNOWN_IDENTIFIER), or callable only with a constant argument a lambda
+// cannot supply (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN). They are
+// refused bare anyway, for one rule over every identity name; so is a bare
+// string-lookup name (`arrayMap(dictGet, …)` is ILLEGAL_TYPE_OF_ARGUMENT:
+// the lookup target must be constant). A column of one of these names is
+// refused too, deliberately.
+var bareIdentityNamesCannotCall = map[string]bool{
+	"hostname": true, "fqdn": true, "fullhostname": true, "serveruuid": true,
+	"authenticateduser": true, "authuser": true, "getmacro": true,
+}
+
+// BareRefusedName reports whether an unqualified bare name (not followed by
+// a call's parentheses) is refused with FunctionNotAccessibleMessage, as
+// rewriter-grpc isBareRefusedName.
+func BareRefusedName(name string) bool {
+	lower := strings.ToLower(name)
+	return bareDeploymentIdentityNames[lower] || bareIdentityNamesCannotCall[lower] ||
+		ExternalCallFunction(name) || IsStringLookup(name)
+}
+
+func bareRefusedName(name string) bool { return BareRefusedName(name) }
+
+// bareNameIntroducers are the words after which a bare name in opaque text
+// is an object or column name being declared or addressed, not an
+// expression (a table, a column, an index, a database).
+var bareNameIntroducers = map[string]bool{
+	"into": true, "table": true, "exists": true, "view": true, "dictionary": true, "to": true,
+	"from": true, "join": true, "in": true, "use": true, "describe": true, "desc": true,
+	"database": true, "column": true, "index": true, "projection": true, "constraint": true,
+	"statistics": true, "after": true,
+}
+
+// FirstBareRefusedNameInText returns the first unqualified bare word or
+// quoted identifier of text, in text order, that BareRefusedName refuses:
+// not after or before a `.`, and not right after a bareNameIntroducers word.
+// It reads the opaque texts Polyglot leaves unstructured (a command node, raw
+// ALTER actions, a view's column-list items, the query of an INSERT with a
+// SETTINGS clause), where the AST walk of FirstDeploymentIdentityName sees
+// no column node: measured on 26.8.37.168,
+// `INSERT INTO t (s) SETTINGS max_threads = 1 SELECT arrayMap(currentSchemas, [true])`
+// writes the physical database name into t, and
+// `ALTER TABLE t MODIFY COLUMN s String DEFAULT SESSION_USER` stores the
+// shared user as the column default.
+func FirstBareRefusedNameInText(e Engine, text string) (string, bool, error) {
+	toks, err := tokenizeRaw(e, text)
+	if err != nil {
+		return "", false, err
+	}
+	for i, tk := range toks {
+		if tk.Source == "" {
+			continue
+		}
+		if i > 0 && toks[i-1].TokenType == "DOT" {
+			continue
+		}
+		if i+1 < len(toks) && toks[i+1].TokenType == "DOT" {
+			continue
+		}
+		if i > 0 && !isQuotedLexeme(toks[i-1].TokenType) && bareNameIntroducers[strings.ToLower(toks[i-1].Source)] {
+			continue
+		}
+		var name string
+		switch {
+		case isQuotedLexeme(tk.TokenType) && isQuotedIdentifier(tk.Source):
+			unquoted, ok := clickhouseUnquote(tk.Source)
+			if !ok {
+				unquoted = tk.Text
+			}
+			name = unquoted
+		case !isQuotedLexeme(tk.TokenType) && isWordStart(tk.Source):
+			name = tk.Source
+		default:
+			continue
+		}
+		if BareRefusedName(name) {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func firstBareIdentityName(node any) (string, bool) {

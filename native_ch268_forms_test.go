@@ -337,3 +337,74 @@ func TestTableRef_ClickHouse264To268StatementForms(t *testing.T) {
 		}
 	}
 }
+
+// TestDeploymentIdentity_ClickHouse268FixRoundOneRoutes mirrors rewriter-grpc
+// MetadataAccess.ClickHouse268FixRoundOneRoutesAreRefused (Step 5 fix round
+// 1): a bare refused name in the texts Polyglot leaves opaque (an INSERT
+// with a column list and SETTINGS, ALTER … UPDATE, a column DEFAULT in
+// ALTER), measured on 26.8.37.168 (`INSERT INTO t (s) SETTINGS max_threads =
+// 1 SELECT arrayMap(currentSchemas, [true])` stores the physical database),
+// the pre-existing bare currentUser / currentDatabase in the same positions,
+// an APPLY column transformer, the other identity and string-lookup names
+// bare, and an Identifier query parameter in an expression (`statement is
+// not supported`).
+func TestDeploymentIdentity_ClickHouse268FixRoundOneRoutes(t *testing.T) {
+	refused := []struct{ sql, name string }{
+		{"SELECT * APPLY(aiGenerate) FROM db1.o", "aiGenerate"},
+		{"SELECT COLUMNS('s') APPLY aiEmbed FROM db1.o", "aiEmbed"},
+		{"SELECT COLUMNS('a') APPLY(pgGetUserById) FROM db1.o", "pgGetUserById"},
+		{"SELECT COLUMNS('a') APPLY currentSchemas FROM db1.o", "currentSchemas"},
+		{"SELECT * APPLY(currentDatabase) FROM db1.o", "currentDatabase"},
+		{"INSERT INTO db1.o (s) SETTINGS max_threads = 1 SELECT arrayMap(currentSchemas, [true])", "currentSchemas"},
+		{"INSERT INTO db1.o (s) SETTINGS max_threads = 1 SELECT arrayMap(aiGenerate, ['x'])", "aiGenerate"},
+		{"ALTER TABLE db1.o UPDATE s = toString(arrayMap(aiGenerate, ['x'])) WHERE 1", "aiGenerate"},
+		{"ALTER TABLE db1.o UPDATE s = SESSION_USER WHERE 1", "SESSION_USER"},
+		{"ALTER TABLE db1.o MODIFY COLUMN s String DEFAULT SESSION_USER", "SESSION_USER"},
+		{"INSERT INTO db1.o (s) SETTINGS max_threads = 1 VALUES (SESSION_USER)", "SESSION_USER"},
+		{"INSERT INTO db1.o (s) VALUES (SESSION_USER)", "SESSION_USER"},
+		{"INSERT INTO db1.o (s) VALUES ('a'), (`session_user`)", "session_user"},
+		{"INSERT INTO db1.o (s) SETTINGS max_threads = 1 SELECT currentDatabase", "currentDatabase"},
+		{"ALTER TABLE db1.o UPDATE s = currentUser WHERE 1", "currentUser"},
+		{"ALTER TABLE db1.o MODIFY COLUMN s String DEFAULT currentDatabase", "currentDatabase"},
+		{"INSERT INTO db1.o (s) SETTINGS max_threads = 1 VALUES (currentUser)", "currentUser"},
+		{"INSERT INTO db1.o (s) VALUES (current_user)", "current_user"},
+		{"SELECT arrayMap(hostName, ['x'])", "hostName"},
+		{"SELECT arrayMap(FQDN, ['x'])", "FQDN"},
+		{"SELECT arrayMap(fullHostName, ['x'])", "fullHostName"},
+		{"SELECT arrayMap(serverUUID, ['x'])", "serverUUID"},
+		{"SELECT arrayMap(authenticatedUser, ['x'])", "authenticatedUser"},
+		{"SELECT authUser", "authUser"},
+		{"SELECT hostName", "hostName"},
+		{"SELECT arrayMap(getMacro, ['x'])", "getMacro"},
+		{"SELECT arrayMap(dictGet, ['d'], ['a'], [1])", "dictGet"},
+		{"SELECT arrayMap(joinGet, ['t'], ['a'], [1])", "joinGet"},
+		{"SELECT arrayMap(hasColumnInTable, ['db'], ['t'], ['a'])", "hasColumnInTable"},
+		{"SELECT arrayMap(naiveBayesClassifier, ['d'], ['t'])", "naiveBayesClassifier"},
+	}
+	var cases []tablerefCase
+	for _, si := range []bool{false, true} {
+		for _, c := range refused {
+			cases = append(cases, tablerefCase{name: c.sql, sql: c.sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement,
+				wantMsg:  "function " + c.name + " is not accessible", wantSQL: c.sql})
+		}
+		for _, sql := range []string{
+			"SELECT arrayMap({f:Identifier}, ['x'])",
+			"SELECT {f:Identifier}",
+			"SELECT {f:Identifier} FROM db1.o",
+			"SELECT a FROM db1.o WHERE s = {f:Identifier}",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si,
+				wantCode: pb.RewriteCode_UnsupportedStatement, wantMsg: "statement is not supported", wantSQL: sql})
+		}
+		for _, sql := range []string{
+			"SELECT * APPLY(toString) FROM db1.o", "SELECT {v:String}",
+			"SELECT t.hostName FROM db1.t AS t", "SELECT user, database FROM db1.o",
+			"INSERT INTO db1.o (s) VALUES ('hostName')",
+			"CREATE TABLE IF NOT EXISTS hostName (a UInt64) ENGINE = MergeTree ORDER BY a",
+		} {
+			cases = append(cases, tablerefCase{name: sql, sql: sql, si: si, wantCode: pb.RewriteCode_Success})
+		}
+	}
+	runTablerefCases(t, cases)
+}
