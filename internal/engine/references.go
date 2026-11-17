@@ -139,7 +139,7 @@ func addOpaqueAlterDatabases(e Engine, ast AST, sql string, add func(string)) er
 // string-literal argument is (or embeds) a database-qualified table/dictionary
 // name (spec 2026-09-26 T3, controller ruling 1): the joinGet family, the
 // dictGet/dictHas/dictIsIn/dictGetHierarchy/dictGetChildren/dictGetDescendants
-// family, and hasColumnInTable.
+// family, hasColumnInTable and the naiveBayesClassifier family.
 //
 // name must already be the name ClickHouse resolves (token text from
 // tokenizeRaw, or an AST function name read through functionName); it is not
@@ -156,6 +156,9 @@ func IsStringLookup(name string) bool {
 	for _, prefix := range []string{
 		"dictget", "dicthas", "dictgethierarchy", "dictisin",
 		"dictgetchildren", "dictgetdescendants", "hascolumnintable",
+		// ClickHouse 26.7's naiveBayesClassifier family reads the
+		// NAIVE_BAYES dictionary its first argument names, like dictGet.
+		"naivebayesclassifier",
 	} {
 		if strings.HasPrefix(lower, prefix) {
 			return true

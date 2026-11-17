@@ -156,7 +156,14 @@ func TestTableRef_ValueAndColumnParametersStayAllowed(t *testing.T) {
 	runTablerefCases(t, []tablerefCase{
 		{name: "value", sql: "SELECT * FROM db1.o WHERE a = {v:UInt64}", wantCode: pb.RewriteCode_Success,
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a = {v: UInt64}`},
-		{name: "column", sql: "SELECT {c:Identifier} FROM db1.o", wantCode: pb.RewriteCode_Success},
+		// An Identifier parameter in an expression used to be allowed as a
+		// column; ClickHouse 26.8 substitutes it before analysis, so it can
+		// name a function the request does not show (`SELECT {f:Identifier}`
+		// with f = session_user returns the shared user), and since Step 5
+		// fix round 1 (internal design doc 2026-11-14 official ClickHouse
+		// switch) it is refused, as in rewriter-grpc.
+		{name: "column", sql: "SELECT {c:Identifier} FROM db1.o", wantCode: pb.RewriteCode_UnsupportedStatement,
+			wantMsg: "statement is not supported", wantSQL: "SELECT {c:Identifier} FROM db1.o"},
 		// Spec 2026-09-26 R2/R8: an opaque ALTER … UPDATE tail cannot be
 		// proven column-only, so an Identifier parameter anywhere in a command
 		// node's text is refused with the T2 message (this row used to pin the

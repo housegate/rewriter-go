@@ -239,7 +239,12 @@ func executePrepared(t *testing.T, binary string, p executionProfile, f executio
 	// Readbacks and returned SELECT execute in the same process/session. The SQL
 	// returned by Prepare is passed byte-for-byte as the final query, not rewritten.
 	readback := []string{}
-	argv := []string{"local", "--path", t.TempDir(), "--multiquery", "--format", "JSONCompact"}
+	// --output-format, not --format: since ClickHouse 26.8 the client mirrors
+	// --format into the `format` setting, which also overrides the input format
+	// of every INSERT, so the fixture `INSERT ... VALUES (...)` rows below would
+	// be read as JSONCompact (CANNOT_PARSE_INPUT_ASSERTION_FAILED). 25.8 treats
+	// both flags alike for output.
+	argv := []string{"local", "--path", t.TempDir(), "--multiquery", "--output-format", "JSONCompact"}
 	for _, s := range p.Profiles[0].Record.Settings {
 		argv = append(argv, "--"+s.Name+"="+s.Value)
 		readback = append(readback, "getSetting('"+s.Name+"')")

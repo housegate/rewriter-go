@@ -164,14 +164,57 @@ var tableNameIntroducers = map[string]bool{
 // user, DATABASE and SCHEMA resolve the same way but are ordinary column
 // names, so a bare one is left alone (a known residual: it reaches the
 // function only when the statement has no such column).
+//
+// ClickHouse 26.6 / 26.8 functions that allow omitting their parentheses are
+// called by their bare name too: session_user (measured on 26.8.37.168,
+// `SELECT SESSION_USER` returns the shared user), currentRequestURL and
+// currentHandler. And since 26.5 a bare function name as a higher-order
+// function's first argument is that function applied to the lambda arguments
+// when no column or alias has the name and the function takes arguments:
+// `arrayMap(currentSchemas, [true])` returns the physical session database
+// and `arrayMap(pgGetUserById, [toUInt32(0)])` the shared user (measured), so
+// currentSchemas / current_schemas / pgGetUserById / pg_get_userbyid and the
+// AI functions (ExternalCallFunction) are matched bare as well. A column of
+// one of these names is refused too, deliberately. Mirrors rewriter-grpc
+// firstBareDeploymentIdentityName.
 var bareDeploymentIdentityNames = map[string]bool{
 	"currentdatabase": true, "current_database": true, "currentuser": true, "current_user": true,
+	"session_user": true, "currentrequesturl": true, "currenthandler": true,
+	"currentschemas": true, "current_schemas": true, "pggetuserbyid": true, "pg_get_userbyid": true,
+}
+
+// externalCallFunctions are ClickHouse 26.8's AI functions (and, matched
+// case-insensitively, their AI* aliases). They send their text to the LLM
+// provider of a named collection that the call's `credentials` parameter or
+// the ai_function_*_default_credentials setting names: generally available
+// (allow_experimental_ai_functions is obsolete), and a SQL-created
+// collection is admitted by default (ai_function_allow_sql_named_collections).
+// Whether a collection the one shared ClickHouse user may use exists is
+// deployment configuration this engine cannot see, so they are refused like
+// a deployment-identity call, with the same message, as rewriter-grpc
+// isExternalCallFunctionName.
+var externalCallFunctions = map[string]bool{
+	"aigenerate": true, "aiclassify": true, "aiextract": true, "aitranslate": true,
+	"aiembed": true, "aifilter": true, "airedact": true, "aisimilarity": true,
+}
+
+// ExternalCallFunction reports whether a call of name makes an outbound call
+// no tenant policy governs (externalCallFunctions).
+func ExternalCallFunction(name string) bool {
+	return externalCallFunctions[strings.ToLower(name)]
 }
 
 // DeploymentIdentityFunction reports whether a call of name reveals the
 // shared deployment (deploymentIdentityFunctions).
 func DeploymentIdentityFunction(name string) bool {
 	return deploymentIdentityFunctions[strings.ToLower(name)]
+}
+
+// refusedCallName reports whether a call or bare reference of name is
+// refused with FunctionNotAccessibleMessage: a deployment-identity function
+// or an external-call function.
+func refusedCallName(name string) bool {
+	return DeploymentIdentityFunction(name) || ExternalCallFunction(name)
 }
 
 // FunctionNotAccessibleMessage is the refusal of a deployment-identity call.
@@ -262,11 +305,11 @@ func FirstDeploymentIdentityCall(e Engine, sql string) (name string, ok bool, er
 			if !ok {
 				unquoted = tk.Text
 			}
-			if DeploymentIdentityFunction(unquoted) {
+			if refusedCallName(unquoted) {
 				return unquoted, true, nil
 			}
 		case !isQuotedLexeme(tk.TokenType) && isWordStart(tk.Source):
-			if DeploymentIdentityFunction(tk.Source) {
+			if refusedCallName(tk.Source) {
 				return tk.Source, true, nil
 			}
 		}
@@ -291,8 +334,149 @@ func FirstDeploymentIdentityName(e Engine, ast AST, sql string) (name string, ok
 	if err := json.Unmarshal(ast, &root); err != nil {
 		return "", false, fmt.Errorf("engine: decode: %w", err)
 	}
-	name, ok = firstBareIdentityName(root)
-	return name, ok, nil
+	if name, ok = firstBareIdentityName(root); ok {
+		return name, true, nil
+	}
+	return firstBareRefusedNameInOpaqueText(e, ast, sql)
+}
+
+// firstBareRefusedNameInOpaqueText scans the texts Polyglot leaves opaque
+// (FirstBareRefusedNameInText): the whole statement for a command node, raw
+// ALTER actions and view column-list items, and an INSERT's unstructured
+// query text.
+func firstBareRefusedNameInOpaqueText(e Engine, ast AST, sql string) (string, bool, error) {
+	var texts []string
+	kind, err := NodeKind(ast)
+	if err != nil {
+		return "", false, err
+	}
+	if kind == NodeCommand {
+		texts = append(texts, sql)
+	}
+	opaque, err := OpaqueStatementTexts(e, ast, sql)
+	if err != nil {
+		return "", false, err
+	}
+	texts = append(texts, opaque...)
+	if text, ok, ierr := OpaqueInsertQueryText(ast); ierr != nil {
+		return "", false, ierr
+	} else if ok {
+		texts = append(texts, text)
+	}
+	for _, text := range texts {
+		if name, ok, terr := FirstBareRefusedNameInText(e, text); terr != nil || ok {
+			return name, ok, terr
+		}
+	}
+	return "", false, nil
+}
+
+// BareRefusedName reports whether an unqualified bare name (not followed by
+// a call's parentheses) is refused with FunctionNotAccessibleMessage, as
+// rewriter-grpc isBareRefusedName: only the names a ClickHouse 26.8.37.168
+// server calls by a bare name (bareDeploymentIdentityNames) plus every AI
+// function.
+//
+// Measured NOT callable bare on 26.8.37.168, so left out (a column of that
+// name stays an ordinary column; their call form `name(...)` is still
+// refused): hostName, FQDN, fullHostName, serverUUID, authenticatedUser,
+// authUser (`SELECT hostName` and `arrayMap(hostName, ['x'])` are
+// UNKNOWN_IDENTIFIER: no argument, parentheses not optional); getMacro
+// (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN: the argument must be a
+// constant String); joinGet, dictGet*, hasColumnInTable,
+// naiveBayesClassifier* (`arrayMap(dictGet, ['d'], ['a'], [1])` is
+// ILLEGAL_TYPE_OF_ARGUMENT, `arrayMap(dictGetString, …)` and
+// `arrayMap(naiveBayesClassifier, …)` ILLEGAL_COLUMN: the target must be a
+// constant). Re-measure on a ClickHouse bump.
+func BareRefusedName(name string) bool {
+	return bareDeploymentIdentityNames[strings.ToLower(name)] || ExternalCallFunction(name)
+}
+
+func bareRefusedName(name string) bool { return BareRefusedName(name) }
+
+// bareNameIntroducers are the words after which a bare name in opaque text
+// is an object or column name being declared or addressed, not an
+// expression (a table, a column, an index, a database). They are honoured
+// only outside every bracket (FirstBareRefusedNameInText): inside one the
+// same words introduce expressions (`trim(BOTH ' ' FROM SESSION_USER)`,
+// `substring(x FROM 1)`, `position('a' IN SESSION_USER)`). IN and EXISTS are
+// not introducers at all (measured on 26.8.37.168, `'default' IN
+// session_user` is 1: the operand resolves as the function), and a FROM
+// after DISTINCT (`IS [NOT] DISTINCT FROM x`) is an expression operand.
+var bareNameIntroducers = map[string]bool{
+	"into": true, "table": true, "view": true, "dictionary": true, "to": true,
+	"from": true, "join": true, "use": true, "describe": true, "desc": true,
+	"database": true, "column": true, "index": true, "projection": true, "constraint": true,
+	"statistics": true, "after": true,
+}
+
+// FirstBareRefusedNameInText returns the first unqualified bare word or
+// quoted identifier of text, in text order, that BareRefusedName refuses.
+// It fails closed: a name is skipped only when it is provably not an
+// expression — after a `.` (a qualified name's last part), or right after a
+// bareNameIntroducers word outside every bracket (except a FROM after
+// DISTINCT). A name followed by `.` is refused (`SESSION_USER.1` reads the
+// function's result). It reads the opaque texts Polyglot leaves unstructured
+// (a command node, raw ALTER actions, a view's column-list items, the query
+// of an INSERT with a SETTINGS clause), where the AST walk of
+// FirstDeploymentIdentityName sees no column node: measured on 26.8.37.168,
+// `INSERT INTO t (s) SETTINGS max_threads = 1 SELECT arrayMap(currentSchemas, [true])`
+// writes the physical database name into t, and
+// `ALTER TABLE t MODIFY COLUMN s String DEFAULT SESSION_USER` stores the
+// shared user as the column default.
+func FirstBareRefusedNameInText(e Engine, text string) (string, bool, error) {
+	toks, err := tokenizeRaw(e, text)
+	if err != nil {
+		return "", false, err
+	}
+	depth := 0
+	for i, tk := range toks {
+		switch tk.TokenType {
+		case "L_PAREN", "L_BRACKET":
+			depth++
+			continue
+		case "R_PAREN", "R_BRACKET":
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if tk.Source == "" {
+			continue
+		}
+		if i > 0 && toks[i-1].TokenType == "DOT" {
+			continue
+		}
+		if depth == 0 && i > 0 && !isQuotedLexeme(toks[i-1].TokenType) {
+			prev := strings.ToLower(toks[i-1].Source)
+			afterDistinct := prev == "from" && i > 1 && strings.EqualFold(toks[i-2].Source, "distinct")
+			if bareNameIntroducers[prev] && !afterDistinct {
+				continue
+			}
+		}
+		var name string
+		switch {
+		case isQuotedLexeme(tk.TokenType) && isQuotedIdentifier(tk.Source):
+			unquoted, ok := clickhouseUnquote(tk.Source)
+			if !ok {
+				unquoted = tk.Text
+			}
+			name = unquoted
+		case !isQuotedLexeme(tk.TokenType) && isWordStart(tk.Source):
+			name = tk.Source
+		default:
+			continue
+		}
+		if BareRefusedName(name) {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func hasNullKey(m map[string]any, key string) bool {
+	v, ok := m[key]
+	return ok && v == nil
 }
 
 func firstBareIdentityName(node any) (string, bool) {
@@ -304,15 +488,18 @@ func firstBareIdentityName(node any) (string, bool) {
 			}
 		}
 	case map[string]any:
-		if col, ok := n["column"].(map[string]any); ok && col["table"] == nil {
+		// A column reference carries a "table" key (null when unqualified);
+		// a column definition (`ADD COLUMN session_user String`) has none and
+		// names an object, not an expression, as in rewriter-grpc.
+		if col, ok := n["column"].(map[string]any); ok && hasNullKey(col, "table") {
 			if nm, ok := col["name"].(map[string]any); ok {
-				if s, ok := nm["name"].(string); ok && bareDeploymentIdentityNames[strings.ToLower(s)] {
+				if s, ok := nm["name"].(string); ok && bareRefusedName(s) {
 					return s, true
 				}
 			}
 		}
 		if fn, ok := n["function"].(map[string]any); ok && fn["no_parens"] == true {
-			if s, ok := fn["name"].(string); ok && bareDeploymentIdentityNames[strings.ToLower(s)] {
+			if s, ok := fn["name"].(string); ok && bareRefusedName(s) {
 				return s, true
 			}
 		}

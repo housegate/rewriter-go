@@ -39,6 +39,18 @@ func PreflightTableReferences(e engine.Engine, ast engine.AST, sql string, opts 
 		resp.SqlAfterRewrite = sql
 		return resp, true, nil
 	}
+	// ClickHouse 26.8 shapes Polyglot reads as something else (a STREAM table
+	// modifier, a NATURAL join) are refused before any name is examined, in
+	// both SI states, as rewriter-grpc's preflight refuses them
+	// (unmodelledClickHouse268Shape).
+	if shape, serr := engine.UnmodelledClickHouse268Shape(ast); serr != nil {
+		return nil, false, serr
+	} else if shape {
+		resp := newWriteResp(pb.StatementType_STATEMENT_TYPE_UNSPECIFIED)
+		rejectUnsupported(resp, engine.UnsupportedStatementMessage)
+		resp.SqlAfterRewrite = sql
+		return resp, true, nil
+	}
 	// T7 before T3 (spec 2026-09-26 §5, R8): a command node of a class no
 	// handler models is refused before its names are examined. With the SI
 	// surface inactive the refusal is "statement is not supported" here; with
