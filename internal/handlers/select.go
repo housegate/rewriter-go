@@ -266,6 +266,12 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 		return ast, resp, nil
 	}
 
+	if rejected, werr := rejectSystemTenantWrappers(ast, sel, resp); werr != nil {
+		return nil, nil, werr
+	} else if rejected {
+		return ast, resp, nil
+	}
+
 	var siErr error
 	// unresolved is the first unqualified table (DB == "", which includes the
 	// one-part dotted quoted form `db1.t`) that does not resolve through the
@@ -291,6 +297,14 @@ func rewriteSelectCore(e engine.Engine, ast engine.AST, opts []*pb.RewriteOption
 				return engine.TableDecision{Action: engine.ActionSkip}
 			}
 			tt = semantic
+		}
+		// A class (c) system table is read through its tenant-filtered
+		// derived table (step 2, housegate/housegate#218).
+		if d, ok, derr := systemTenantDecision(e, tt, sel); derr != nil {
+			siErr = derr
+			return engine.TableDecision{Action: engine.ActionSkip}
+		} else if ok {
+			return d
 		}
 		if sel.Mode == nameresolve.ModeDynamic {
 			if tbl, _, ok := nameresolve.LookupStorageIntegrity(tt.DB, tt.Table, sel.Dynamic); ok {

@@ -171,7 +171,7 @@ func TestDriverStatementCompatFixedShapes(t *testing.T) {
 			sql, want string
 		}{
 			{"SELECT count(), sum(data_uncompressed_bytes) FROM system.parts WHERE database = 'devnet2' AND table = 'hw1kzqe3_0.counter_total' AND active AND startsWith(name, 'patch-')",
-				"SELECT count(), sum(data_uncompressed_bytes) FROM system.parts WHERE database = 'devnet2' AND table = 'hw1kzqe3_0.counter_total' AND active AND startsWith(name, 'patch-')"},
+				"SELECT count(), sum(data_uncompressed_bytes) FROM (SELECT * FROM system.parts WHERE database = 'devnet2' AND startsWith(table, 'hw1kzqe3_0.')) AS parts WHERE database = 'devnet2' AND table = 'hw1kzqe3_0.counter_total' AND active AND startsWith(name, 'patch-')"},
 			{"CREATE OR REPLACE VIEW `hw1kzqe3_0`.`v` (`id` String COMMENT 'c1') AS (SELECT `id` FROM `hw1kzqe3_0`.`entity_A`) COMMENT 'view c'",
 				"CREATE OR REPLACE VIEW devnet2.\"hw1kzqe3_0.v\" (\"id\" String COMMENT 'c1') AS (SELECT \"id\" FROM devnet2.\"hw1kzqe3_0.entity_A\" \"hw1kzqe3_0.entity_A\") COMMENT 'view c'"},
 			{"CREATE MATERIALIZED VIEW `hw1kzqe3_0`.`mv` TO `hw1kzqe3_0`.`t` (`id` String COMMENT 'c1') AS (SELECT * FROM `hw1kzqe3_0`.`s`) COMMENT 'c'",
