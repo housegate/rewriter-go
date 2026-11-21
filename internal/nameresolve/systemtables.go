@@ -1,6 +1,11 @@
 package nameresolve
 
-import "sort"
+import (
+	"sort"
+	"strings"
+
+	"github.com/housegate/rewriter-proto/gen/pb"
+)
 
 // SystemDatabase is ClickHouse's `system` database. Every housegate tenant
 // reaches ClickHouse as one shared user, so ClickHouse's own per-user filters
@@ -24,11 +29,12 @@ const SystemDatabase = "system"
 //     another tenant.
 //   - clusters: global topology, read by the Sentio driver on every connect.
 //   - The class (c) per-database metadata tables the Sentio driver reads by
-//     physical name. They still show every tenant's names (and parts
-//     partition values, mutations command text): a known residual that
-//     step 2 (housegate/housegate#218) closes by serving them as a filtered
-//     logical rewrite. The class (c) tables no known client needs
-//     (systemTableAwaitingFilteredRead) are refused until then.
+//     physical name. In dynamic mode each read of one is served from a
+//     tenant-filtered derived table (SystemTableTenantFilterSQL, step 2,
+//     housegate/housegate#218): only the rows of the caller's own logical
+//     databases reach it, in ClickHouse's physical shape. The class (c)
+//     tables no known client needs (systemTableAwaitingFilteredRead) are
+//     refused.
 var systemTableAllowlist = map[string]bool{
 	// class (b)
 	"aggregate_function_combinators": true,
@@ -66,7 +72,7 @@ var systemTableAllowlist = map[string]bool{
 	"zeros_mt":                       true,
 	// class (b*), read by the Sentio driver
 	"clusters": true,
-	// class (c) read by the Sentio driver, passthrough until step 2
+	// class (c) read by the Sentio driver, served tenant-filtered (step 2)
 	"tables":                true,
 	"columns":               true,
 	"data_skipping_indices": true,
@@ -74,6 +80,93 @@ var systemTableAllowlist = map[string]bool{
 	"parts":                 true,
 	"databases":             true,
 	"mutations":             true,
+}
+
+// systemTableTenantColumn maps each allowed class (c) table to the column
+// that carries a physical table name, which starts with the owning logical
+// database's prefix (BuildDynamicTablePrefix). system.databases has no such
+// column ("" here): its rows are filtered by `name` against the physical
+// databases of the caller's database_map instead.
+var systemTableTenantColumn = map[string]string{
+	"tables":                "name",
+	"columns":               "table",
+	"data_skipping_indices": "table",
+	"projections":           "table",
+	"parts":                 "table",
+	"mutations":             "table",
+	"databases":             "",
+}
+
+// SystemTableTenantFiltered reports whether a read of system.<table> is
+// served from a tenant-filtered derived table in dynamic mode (step 2,
+// housegate/housegate#218). table is the decoded name.
+func SystemTableTenantFiltered(table string) bool {
+	_, ok := systemTableTenantColumn[table]
+	return ok
+}
+
+// SystemTableTenantFilterSQL renders the derived-table body that replaces a
+// read of system.<table> (SystemTableTenantFiltered) in dynamic mode:
+//
+//	SELECT * FROM system.<table> WHERE <filter>
+//
+// For a table with a tenant column the filter keeps the rows of every
+// logical database in database_map: `database = '<physical>' AND
+// startsWith(<column>, '<prefix>')` per logical, OR-ed in (physical,
+// logical) order, each term parenthesised when there are several. For
+// system.databases it is `name IN ('<physical>', …)`. An empty database_map
+// (an unauthenticated session) renders `WHERE 0`, so nothing is shown.
+//
+// The prefix is BuildDynamicTablePrefix's, which always ends in "." while
+// logical names never contain a dot, so one logical's prefix never matches
+// another logical's tables. The filter sits inside the derived table, where
+// no alias of the caller's query is in scope: a predicate added to the
+// caller's own WHERE would resolve `database` / `name` against the caller's
+// select-list aliases first (measured on 26.8.37.168: `SELECT 'l1.x' AS
+// name … WHERE startsWith(name, 'l1.')` keeps every row). The body keeps
+// ClickHouse's physical shape and its `*` column set; ALIAS columns
+// (parts.bytes, tables.table, columns.column, databases.database) are not in
+// `*`, so a caller that names one gets UNKNOWN_IDENTIFIER (a declared
+// limitation). Literals are escaped with escape.
+func SystemTableTenantFilterSQL(table string, a *pb.RewriteTableDynamicArgs, escape func(string) string) string {
+	column := systemTableTenantColumn[table]
+	type entry struct{ physical, logical string }
+	var entries []entry
+	physicals := map[string]bool{}
+	for logical, physical := range a.GetDatabaseMap() {
+		if logical == "" || physical == "" {
+			continue
+		}
+		entries = append(entries, entry{physical, logical})
+		physicals[physical] = true
+	}
+	body := "SELECT * FROM " + SystemDatabase + "." + table + " WHERE "
+	if len(entries) == 0 {
+		return body + "0"
+	}
+	if column == "" {
+		names := make([]string, 0, len(physicals))
+		for p := range physicals {
+			names = append(names, "'"+escape(p)+"'")
+		}
+		sort.Strings(names)
+		return body + "name IN (" + strings.Join(names, ", ") + ")"
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].physical != entries[j].physical {
+			return entries[i].physical < entries[j].physical
+		}
+		return entries[i].logical < entries[j].logical
+	})
+	terms := make([]string, len(entries))
+	for i, en := range entries {
+		terms[i] = "database = '" + escape(en.physical) + "' AND startsWith(" + column + ", '" +
+			escape(BuildDynamicTablePrefix(en.logical, a)) + "')"
+		if len(entries) > 1 {
+			terms[i] = "(" + terms[i] + ")"
+		}
+	}
+	return body + strings.Join(terms, " OR ")
 }
 
 // systemTableAwaitingFilteredRead are the class (c) tables no known client

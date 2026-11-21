@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"fmt"
+
 	"github.com/housegate/rewriter-go/internal/engine"
 	"github.com/housegate/rewriter-go/internal/nameresolve"
 	"github.com/housegate/rewriter-proto/gen/pb"
@@ -65,6 +67,66 @@ func systemTableScan(e engine.Engine, ast engine.AST, sql string, sel nameresolv
 		}
 	}
 	return hit, refused, siObject, nil
+}
+
+// systemTenantTable reports the decoded class (c) table a SELECT-walker
+// target reads when it is served tenant-filtered (step 2,
+// housegate/housegate#218): a table qualified with `system` whose name
+// ClickHouse decodes to a nameresolve.SystemTableTenantFiltered table. Names
+// are decoded the way ClickHouse reads them (engine.ClickHouseIdentifierValue),
+// so system.`tables\N` is system.tables here too, as it is for the allowlist.
+// An unqualified name in a `system` session context is not served: `system`
+// is never a mapped logical database, so the walker keeps refusing it as an
+// unresolved unqualified name.
+func systemTenantTable(tt engine.TableTarget) (string, bool) {
+	if engine.ClickHouseIdentifierValue(tt.DB) != nameresolve.SystemDatabase {
+		return "", false
+	}
+	table := engine.ClickHouseIdentifierValue(tt.Table)
+	return table, nameresolve.SystemTableTenantFiltered(table)
+}
+
+// systemTenantDecision builds the ActionSubquery decision that serves a read
+// of a class (c) system table from its tenant-filtered derived table
+// (nameresolve.SystemTableTenantFilterSQL), aliased with the caller's alias
+// or the short table name. ok=false for every other target. Dynamic mode
+// only; nothing is recorded in table_rewrites, since the table read is
+// unchanged.
+func systemTenantDecision(e engine.Engine, tt engine.TableTarget, sel nameresolve.Selection) (d engine.TableDecision, ok bool, err error) {
+	if sel.Mode != nameresolve.ModeDynamic {
+		return engine.TableDecision{}, false, nil
+	}
+	table, ok := systemTenantTable(tt)
+	if !ok {
+		return engine.TableDecision{}, false, nil
+	}
+	body, err := e.ParseOne(nameresolve.SystemTableTenantFilterSQL(table, sel.Dynamic, escapeSQLLiteral))
+	if err != nil {
+		return engine.TableDecision{}, false, fmt.Errorf("tenant-filtered system.%s: %w", table, err)
+	}
+	return engine.TableDecision{Action: engine.ActionSubquery, Subquery: body, SubqueryAlias: table}, true, nil
+}
+
+// rejectSystemTenantWrappers refuses, with T7, a read of a tenant-filtered
+// system table that carries FINAL, SAMPLE or an alias column list: the
+// derived table that filters it cannot keep those semantics, and forwarding
+// the table unfiltered is not an option. Dynamic mode only.
+func rejectSystemTenantWrappers(ast engine.AST, sel nameresolve.Selection, resp *pb.RewriteSQLResponse) (bool, error) {
+	if sel.Mode != nameresolve.ModeDynamic {
+		return false, nil
+	}
+	targets, err := engine.UnsupportedTableWrapperTargets(ast)
+	if err != nil {
+		return false, err
+	}
+	for _, tt := range targets {
+		if _, ok := systemTenantTable(tt); ok {
+			resp.Code = pb.RewriteCode_UnsupportedStatement
+			resp.Message = engine.UnsupportedStatementMessage
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // systemRefusal is the first refused metadata reference of a statement: a

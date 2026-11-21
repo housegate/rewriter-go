@@ -48,6 +48,12 @@ type TableDecision struct {
 	// The alias is the user's alias, else the original qualified name —
 	// same rule as ActionRemote — so column qualifiers keep resolving.
 	Subquery AST
+	// SubqueryAlias, when set, replaces the original qualified name as the
+	// ActionSubquery alias of a table the user did not alias. The tenant-
+	// filtered system tables use the short table name: ClickHouse resolves
+	// `tables.name` against a derived table aliased `tables` but not against
+	// one aliased `system.tables` (measured on 26.8.37.168).
+	SubqueryAlias string
 }
 
 // opaqueDerivedTableKey marks a derived table injected by RewriteSelectTables.
@@ -3106,6 +3112,9 @@ func applyDecision(expr, tbl map[string]any, tt TableTarget, d TableDecision) {
 			return
 		}
 		aliasName := tt.Alias
+		if aliasName == "" {
+			aliasName = d.SubqueryAlias
+		}
 		if aliasName == "" {
 			aliasName = originName(tt)
 		}

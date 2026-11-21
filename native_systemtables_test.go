@@ -78,17 +78,17 @@ func TestSystemTables_AllowlistIsExact(t *testing.T) {
 
 func TestSystemTables_AllowedTablesKeepTodaysBehaviour(t *testing.T) {
 	var cases []tablerefCase
+	// The class (c) tables are allowed and served tenant-filtered (step 2,
+	// native_systemtables_filter_test.go); every other allowed table is
+	// forwarded unchanged.
 	for _, table := range nameresolve.SystemTableAllowlist() {
+		if nameresolve.SystemTableTenantFiltered(table) {
+			continue
+		}
 		sql := "SELECT * FROM system." + table
 		cases = append(cases, sysAllowed(sql, sql)...)
 	}
-	cases = append(cases, tablerefCase{name: "backtick allowed", sql: "SELECT * FROM `system`.`tables`",
-		wantCode: pb.RewriteCode_Success, wantSQL: `SELECT * FROM "system"."tables"`})
 	for _, sql := range []string{
-		`SELECT * FROM "system".columns`,
-		"SELECT name FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%'",
-		"SELECT * FROM system.mutations WHERE database = 'phys' AND is_done = 0",
-		"SELECT * FROM system.parts WHERE database = 'phys' AND active",
 		"SELECT * FROM system.clusters",
 		"SELECT 1",
 		"SELECT * FROM numbers(3)",
@@ -108,12 +108,12 @@ func TestSystemTables_AllowedTablesKeepTodaysBehaviour(t *testing.T) {
 			wantCode: pb.RewriteCode_InvalidRewriteRequest, wantMsg: nameresolve.UnmappedDatabaseMessage("Information_Schema")})
 	}
 	cases = append(cases,
-		tablerefCase{name: "IN allowed operand", sql: "SELECT * FROM db1.o WHERE a IN system.tables", wantCode: pb.RewriteCode_Success,
-			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN system.tables`, wantAcc: []string{"db1.o", "system.tables"}},
-		tablerefCase{name: "join allowed", sql: "SELECT * FROM db1.o JOIN system.columns USING (a)", wantCode: pb.RewriteCode_Success,
-			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" JOIN system.columns USING (a)`},
-		tablerefCase{name: "insert select allowed", sql: "INSERT INTO db1.o SELECT name FROM system.tables", wantCode: pb.RewriteCode_Success,
-			wantSQL: `INSERT INTO phys."db1.o" SELECT name FROM system.tables`},
+		tablerefCase{name: "IN allowed operand", sql: "SELECT * FROM db1.o WHERE a IN system.one", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN system.one`, wantAcc: []string{"db1.o", "system.one"}},
+		tablerefCase{name: "join allowed", sql: "SELECT * FROM db1.o JOIN system.one USING (a)", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" JOIN system.one USING (a)`},
+		tablerefCase{name: "insert select allowed", sql: "INSERT INTO db1.o SELECT name FROM system.functions", wantCode: pb.RewriteCode_Success,
+			wantSQL: `INSERT INTO phys."db1.o" SELECT name FROM system.functions`},
 		// Harmless SHOW forms the SI surface does not model keep their
 		// inactive-surface pass-through.
 		tablerefCase{name: "show changed settings", sql: "SHOW CHANGED SETTINGS", wantCode: pb.RewriteCode_Success, wantSQL: "SHOW CHANGED SETTINGS"},

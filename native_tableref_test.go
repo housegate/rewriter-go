@@ -372,8 +372,8 @@ func TestTableRef_InOperandsAreRewrittenAndReported(t *testing.T) {
 			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE in(a, (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t))`, wantAcc: []string{"db1.o", ".t"}},
 		{name: "cte alias untouched", sql: "WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c", wantCode: pb.RewriteCode_Success,
 			wantSQL: `WITH c AS (SELECT 1 AS a) SELECT * FROM phys."db1.o" "db1.o" WHERE a IN c`, wantAcc: []string{"db1.o"}},
-		{name: "system stays", sql: "SELECT * FROM db1.o WHERE a IN system.tables", wantCode: pb.RewriteCode_Success,
-			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN system.tables`, wantAcc: []string{"db1.o", "system.tables"}},
+		{name: "system stays", sql: "SELECT * FROM db1.o WHERE a IN system.one", wantCode: pb.RewriteCode_Success,
+			wantSQL: `SELECT * FROM phys."db1.o" "db1.o" WHERE a IN system.one`, wantAcc: []string{"db1.o", "system.one"}},
 		// A single-element *literal* value list is never a table operand
 		// (controller review round 1, finding 2): decodeInNamespaceRefDetail
 		// requires is_field or a structurally-provable column/dot shape, and a
