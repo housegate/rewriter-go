@@ -43,9 +43,55 @@ func NewService(libPath string) (*Service, error) {
 
 // Rewrite runs the shared doRewrite pipeline with the options carried in
 // the request. Rejections travel in resp.Code; a non-nil error means an
-// internal failure the caller should treat as fail-open.
+// internal failure the caller should treat as fail-open. A request that sets
+// refuse_metadata_access never gets an error (rewriteRefusingMetadata).
 func (s *Service) Rewrite(_ context.Context, req *pb.RewriteSQLRequest) (*pb.RewriteSQLResponse, error) {
+	if req.GetRefuseMetadataAccess() {
+		return rewriteRefusingMetadata(s.engine, req.GetSql(), req.GetOptions()), nil
+	}
 	return doRewrite(s.engine, req.GetSql(), req.GetOptions())
+}
+
+// rewriteRefusingMetadata is Rewrite under RewriteSQLRequest
+// .refuse_metadata_access, mirroring rewriter-grpc's doRewrite: the
+// statement is checked before every other policy, and a would-be Success is
+// checked again on the rewritten SQL, so a rewrite option (a table map
+// target, an injected CTE body) cannot introduce a metadata read. It fails
+// closed: an engine error, which is otherwise the caller's fail-open
+// channel, and rewritten SQL that does not parse are refusals. Every
+// response sets metadata_access_refusal_applied.
+func rewriteRefusingMetadata(e engine.Engine, sql string, opts []*pb.RewriteOption) *pb.RewriteSQLResponse {
+	refuse := func() *pb.RewriteSQLResponse {
+		return &pb.RewriteSQLResponse{
+			Code:                         pb.RewriteCode_UnsupportedStatement,
+			Message:                      engine.MetadataAccessDisabledMessage,
+			SqlAfterRewrite:              sql,
+			MetadataAccessRefusalApplied: true,
+		}
+	}
+	// A statement the engine cannot parse goes through doRewrite, which
+	// answers the SyntaxError, or parses a form it normalises first.
+	if ast, err := e.ParseOne(sql); err == nil {
+		if reads, rerr := engine.ReadsMetadata(e, ast, sql); rerr != nil || reads {
+			return refuse()
+		}
+	}
+	resp, err := doRewrite(e, sql, opts)
+	if err != nil {
+		return refuse()
+	}
+	if resp.GetCode() == pb.RewriteCode_Success {
+		out := resp.GetSqlAfterRewrite()
+		ast, perr := e.ParseOne(out)
+		if perr != nil {
+			return refuse()
+		}
+		if reads, rerr := engine.ReadsMetadata(e, ast, out); rerr != nil || reads {
+			return refuse()
+		}
+	}
+	resp.MetadataAccessRefusalApplied = true
+	return resp
 }
 
 // RewriteErrorMessage inverts physical names in a ClickHouse error message
